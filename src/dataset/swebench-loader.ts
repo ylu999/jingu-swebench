@@ -25,15 +25,14 @@ interface HFResponse {
   rows: HFRow[]
 }
 
-async function fetchFromHF(dataset: string, n: number): Promise<BenchmarkInstance[]> {
-  const url = `${HF_API_BASE}/rows?dataset=${encodeURIComponent(dataset)}&config=default&split=test&offset=0&length=${n}`
-  console.log(`[loader] fetching ${n} instances from HuggingFace...`)
+const HF_MAX_PAGE = 100
 
+async function fetchPage(dataset: string, offset: number, length: number): Promise<BenchmarkInstance[]> {
+  const url = `${HF_API_BASE}/rows?dataset=${encodeURIComponent(dataset)}&config=default&split=test&offset=${offset}&length=${length}`
   const res = await fetch(url)
   if (!res.ok) {
     throw new Error(`HuggingFace API error: ${res.status} ${res.statusText}\nURL: ${url}`)
   }
-
   const data = (await res.json()) as HFResponse
   return data.rows.map((r) => ({
     instanceId: r.row.instance_id,
@@ -42,6 +41,20 @@ async function fetchFromHF(dataset: string, n: number): Promise<BenchmarkInstanc
     problemStatement: r.row.problem_statement,
     hintsText: r.row.hints_text ?? undefined,
   }))
+}
+
+async function fetchFromHF(dataset: string, n: number): Promise<BenchmarkInstance[]> {
+  console.log(`[loader] fetching ${n} instances from HuggingFace...`)
+  const results: BenchmarkInstance[] = []
+  let offset = 0
+  while (results.length < n) {
+    const pageSize = Math.min(HF_MAX_PAGE, n - results.length)
+    const page = await fetchPage(dataset, offset, pageSize)
+    results.push(...page)
+    if (page.length < pageSize) break  // no more data
+    offset += page.length
+  }
+  return results
 }
 
 export async function loadInstances(opts: {

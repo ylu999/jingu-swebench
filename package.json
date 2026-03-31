@@ -6,7 +6,9 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "run:raw": "node dist/src/cli/run.js --mode raw",
-    "run:jingu": "node dist/src/cli/run.js --mode jingu"
+    "run:jingu": "node dist/src/cli/run.js --mode jingu",
+    "run:compare": "node dist/src/cli/run.js --mode compare",
+    "evaluate": "python scripts/evaluate.py"
   },
   "dependencies": {
     "@aws-sdk/client-bedrock-runtime": "^3.0.0"

@@ -23,6 +23,12 @@ const n = getArg("--n") ? parseInt(getArg("--n")!, 10) : 1
 const noCache = args.includes("--no-cache")
 const skipTestGate = args.includes("--skip-test-gate")
 
+// --instance-ids id1 id2 ... (filter from loaded instances)
+const instanceIdsIdx = args.indexOf("--instance-ids")
+const instanceIds: string[] = instanceIdsIdx >= 0
+  ? args.slice(instanceIdsIdx + 1).filter(a => !a.startsWith("--"))
+  : []
+
 if (!["raw", "jingu", "compare"].includes(mode)) {
   console.error(`Unknown mode: ${mode}. Valid: raw, jingu, compare`)
   process.exit(1)
@@ -31,7 +37,15 @@ if (!["raw", "jingu", "compare"].includes(mode)) {
 async function main() {
   console.log(`\njingu-swebench — mode=${mode} dataset=${dataset} n=${n}\n`)
 
-  const instances = await loadInstances({ dataset, n, noCache })
+  let instances = await loadInstances({ dataset, n, noCache })
+  if (instanceIds.length > 0) {
+    instances = instances.filter(i => instanceIds.includes(i.instanceId))
+    if (instances.length === 0) {
+      console.error(`No instances matched --instance-ids: ${instanceIds.join(", ")}`)
+      process.exit(1)
+    }
+    console.log(`Filtered to ${instances.length} instance(s): ${instances.map(i => i.instanceId).join(", ")}\n`)
+  }
   const outDir = join("results", mode)
   mkdirSync(outDir, { recursive: true })
   const predictionsPath = join(outDir, "predictions.jsonl")

@@ -43,6 +43,8 @@ function readWorkspaceFiles(workspace: Workspace, filePaths: string[]): Record<s
 function findCandidateFiles(instance: BenchmarkInstance, workspace: Workspace): string[] {
   const files = new Set<string>()
 
+  // Only collect .py source files — docs/txt/rst excluded to prevent hallucinated line numbers
+
   // 1. Explicit .py paths in hints_text
   for (const m of (instance.hintsText ?? "").matchAll(/[\w/.+-]+\.py/g)) files.add(m[0])
 
@@ -69,16 +71,29 @@ function findCandidateFiles(instance: BenchmarkInstance, workspace: Workspace): 
   // 3. Explicit .py paths in problem statement
   for (const m of instance.problemStatement.matchAll(/[\w/.+-]+\.py/g)) files.add(m[0])
 
-  // 4. git grep for long identifiers in backticks, but only in the inferred module subdir
+  // Remove non-.py files (docs, rst, txt) — they cause hallucinated line numbers
+  // Remove test files — injecting them causes LLM to add unnecessary test code
+  for (const f of files) {
+    if (!f.endsWith(".py")) { files.delete(f); continue }
+    const parts = f.split("/")
+    if (parts.some(p => p.startsWith("test") || p === "tests")) files.delete(f)
+  }
+
+  // 4. git grep for long identifiers — backtick first, then plain snake_case/CamelCase words
   if (files.size === 0) {
-    const identifiers = [...instance.problemStatement.matchAll(/`([A-Za-z_]\w{5,})`/g)]
+    // Backtick identifiers are highest confidence
+    const backtickIds = [...instance.problemStatement.matchAll(/`([A-Za-z_]\w{5,})`/g)]
       .map((m) => m[1])
-      .slice(0, 3)
+    // Also try snake_case attribute/method names (2+ segments) from problem text
+    const plainIds = [...instance.problemStatement.matchAll(/\b([a-z][a-z0-9]*(?:_[a-z0-9]+){1,})\b/g)]
+      .map((m) => m[1])
+      .filter((id) => id.length > 8)  // skip short generic words
+    const identifiers = [...new Set([...backtickIds, ...plainIds])].slice(0, 5)
     // Infer module root from repo name (e.g. "astropy/astropy" → search in "astropy/")
     const repoModule = instance.repo.split("/")[1] ?? ""
     for (const id of identifiers) {
       const result = workspace.exec(
-        `git grep -l "def ${id}\\|class ${id}" -- "${repoModule}/**/*.py" 2>/dev/null | head -3`
+        `git grep -l "def ${id}\\|class ${id}\\|${id}" -- "${repoModule}/**/*.py" 2>/dev/null | grep -v test | head -3`
       )
       for (const line of result.stdout.split("\n").filter(Boolean)) {
         files.add(line.trim())

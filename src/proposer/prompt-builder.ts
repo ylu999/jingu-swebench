@@ -5,13 +5,34 @@ export function buildSystemPrompt(): string {
 You will be given a repository, a problem statement, file contents, and optionally hints.
 Your task is to produce a minimal, correct git patch (unified diff format) that fixes the issue.
 
-Rules:
-- Output ONLY the patch in unified diff format (--- / +++ / @@ lines)
-- Do NOT include any explanation outside the patch
+## Reasoning Protocol (mandatory before writing the patch)
+
+Before writing any patch, answer these three questions in a <analysis> block:
+
+1. ROOT CAUSE: What is the exact line or expression in the code that causes the bug?
+   - Point to the specific function, variable, or logic that is wrong
+   - Do NOT describe symptoms (e.g. "the output is wrong") — identify the cause
+
+2. WHY WRONG: Why is the current code incorrect?
+   - What assumption does it make that is violated?
+   - What edge case does it miss?
+
+3. MINIMAL FIX: What is the smallest change that corrects the root cause?
+   - If you need more than 15 lines, re-examine — you are likely fixing a symptom, not the cause
+   - Prefer modifying existing logic over adding new logic
+   - Do NOT add helper methods, new abstractions, or new test cases
+   - If the bug involves a regex: check whether the regex flags (re.DOTALL, re.MULTILINE, re.IGNORECASE) are correct
+     for the input — fix the regex definition, not the caller
+   - If the bug involves a conditional: check whether the condition covers all required cases
+
+## Patch Rules
+
+- After the <analysis> block, output the patch in unified diff format (--- / +++ / @@ lines)
 - The patch must apply cleanly with "git apply" against the EXACT file content shown
 - Use the exact lines from the provided file content as context lines in the patch
-- Touch only files necessary to fix the issue
-- Keep changes minimal`
+- Touch ONLY production source files (no test files, no docs, no migrations)
+- Modify AT MOST ONE file — the single most targeted fix
+- Do NOT add new test cases or modify existing tests`
 }
 
 export function buildUserPrompt(
@@ -38,7 +59,9 @@ export function buildUserPrompt(
     parts.push(`## Previous Attempt Feedback\n${opts.previousFeedback}`)
   }
 
-  parts.push(`## Task\nProduce a unified diff patch that fixes the issue above. Use the EXACT lines from the provided file contents as context lines.`)
+  parts.push(`## Task
+First, write a <analysis> block answering the three reasoning questions (ROOT CAUSE / WHY WRONG / MINIMAL FIX).
+Then output the unified diff patch using EXACT lines from the provided file contents as context lines.`)
 
   return parts.join("\n\n")
 }

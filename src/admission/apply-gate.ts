@@ -15,21 +15,23 @@ export function applyGate(workspace: Workspace, patchText: string): GateResult {
     }
   }
 
-  // Fallback: fuzz=5 (LLM line-number drift tolerance)
-  const fuzzy = workspace.applyPatch(patchText, 5)
+  // Fallback: fuzz=25 (LLM often hallucinates line numbers ±24 lines away)
+  const fuzzy = workspace.applyPatch(patchText, 25)
   if (fuzzy.exitCode === 0) {
     return {
       status: "pass",
       code: "ACCEPTED",
-      message: "Patch applies with fuzz=5 (line number drift)",
+      message: "Patch applies with fuzz=25 (line number drift)",
       details: { apply_strictness: "fuzz" as ApplyStrictness },
     }
   }
 
+  // patch writes errors to stdout, not stderr
+  const errOutput = (strict.stdout + strict.stderr).trim()
   return {
     status: "fail",
     code: "PATCH_APPLY_FAILED",
     message: "Patch does not apply (strict or fuzz)",
-    details: { stderr: strict.stderr.trim() },
+    details: { stderr: errOutput, patch_head: patchText.slice(0, 500) },
   }
 }

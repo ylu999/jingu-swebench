@@ -5,3 +5,7 @@ workspaces/
 .cache/
 .jingu-patch.diff
 *.js.map
+__pycache__/
+*.pyc
+logs/
+results/
