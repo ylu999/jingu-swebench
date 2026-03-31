@@ -23,6 +23,7 @@ import os
 import re
 import sys
 import tempfile
+import time
 import traceback
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -221,6 +222,8 @@ def main():
     parser.add_argument("--output", default="results/mini-swe-agent")
     parser.add_argument("--workers", type=int, default=4,
                         help="Parallel instances to run (default: 4)")
+    parser.add_argument("--stagger", type=float, default=15.0,
+                        help="Seconds between sandbox starts to avoid image-pull contention (default: 15)")
     args = parser.parse_args()
 
     output_dir = Path(args.output)
@@ -234,6 +237,12 @@ def main():
     results = [None] * len(args.instance_ids)
 
     def _run(idx: int, iid: str):
+        # Stagger sandbox starts: idx=0 starts immediately, idx=1 waits stagger seconds, etc.
+        # This avoids all workers hammering Modal image-pull simultaneously.
+        delay = idx * args.stagger
+        if delay > 0:
+            print(f"[jingu] {iid} waiting {delay:.0f}s before start (stagger)")
+            time.sleep(delay)
         print(f"\n[jingu] START {iid}")
         r = run_with_jingu(iid, output_dir, max_attempts=args.max_attempts)
         status = "ACCEPTED" if r["accepted"] else "FAILED"
