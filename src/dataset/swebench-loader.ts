@@ -1,23 +1,66 @@
+import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs"
+import { join } from "node:path"
 import type { BenchmarkInstance } from "./instance-types.js"
 
-// Mock loader — returns hardcoded instances for Day 1.
-// Day 3: replace with HuggingFace JSONL loader.
-const MOCK_INSTANCES: BenchmarkInstance[] = [
-  {
-    instanceId: "django__django-11099",
-    repo: "django/django",
-    baseCommit: "a2e2ecb9839a95b6f41cc0bcb46e8ba8fc01d7f8",
-    problemStatement:
-      "Auth.authenticate() should return None instead of raising PermissionDenied when there are no backends configured.",
-    hintsText: "Check django/contrib/auth/__init__.py authenticate()",
-  },
-]
+// HuggingFace datasets-server REST API — no Python/huggingface_hub needed
+const HF_API_BASE = "https://datasets-server.huggingface.co"
+const DATASET_MAP = {
+  lite: "SWE-bench/SWE-bench_Lite",
+  verified: "SWE-bench/SWE-bench_Verified",
+}
+const CACHE_DIR = ".cache"
 
-export function loadInstances(opts: {
+// Raw row shape from HF datasets-server
+interface HFRow {
+  row: {
+    instance_id: string
+    repo: string
+    base_commit: string
+    problem_statement: string
+    hints_text?: string
+  }
+}
+
+interface HFResponse {
+  rows: HFRow[]
+}
+
+async function fetchFromHF(dataset: string, n: number): Promise<BenchmarkInstance[]> {
+  const url = `${HF_API_BASE}/rows?dataset=${encodeURIComponent(dataset)}&config=default&split=test&offset=0&length=${n}`
+  console.log(`[loader] fetching ${n} instances from HuggingFace...`)
+
+  const res = await fetch(url)
+  if (!res.ok) {
+    throw new Error(`HuggingFace API error: ${res.status} ${res.statusText}\nURL: ${url}`)
+  }
+
+  const data = (await res.json()) as HFResponse
+  return data.rows.map((r) => ({
+    instanceId: r.row.instance_id,
+    repo: r.row.repo,
+    baseCommit: r.row.base_commit,
+    problemStatement: r.row.problem_statement,
+    hintsText: r.row.hints_text ?? undefined,
+  }))
+}
+
+export async function loadInstances(opts: {
   dataset: "lite" | "verified"
   n?: number
-}): BenchmarkInstance[] {
-  // TODO Day 3: load from HuggingFace datasets-server or local JSONL
-  const instances = MOCK_INSTANCES
-  return opts.n != null ? instances.slice(0, opts.n) : instances
+  noCache?: boolean
+}): Promise<BenchmarkInstance[]> {
+  const n = opts.n ?? 20
+  const dataset = DATASET_MAP[opts.dataset]
+  const cacheFile = join(CACHE_DIR, `${opts.dataset}-${n}.json`)
+
+  if (!opts.noCache && existsSync(cacheFile)) {
+    console.log(`[loader] using cache: ${cacheFile}`)
+    return JSON.parse(readFileSync(cacheFile, "utf8")) as BenchmarkInstance[]
+  }
+
+  const instances = await fetchFromHF(dataset, n)
+  mkdirSync(CACHE_DIR, { recursive: true })
+  writeFileSync(cacheFile, JSON.stringify(instances, null, 2), "utf8")
+  console.log(`[loader] cached ${instances.length} instances → ${cacheFile}`)
+  return instances
 }

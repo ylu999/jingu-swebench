@@ -1,17 +1,6 @@
 import type { BenchmarkInstance, InstanceRunResult, AttemptResult } from "../types/contracts.js"
 import { propose } from "../proposer/proposer-adapter.js"
-
-// Gate 1 only: structural check (non-empty, looks like a diff)
-function structuralGate(patchText: string) {
-  if (!patchText || patchText.length < 10) {
-    return { status: "fail" as const, code: "EMPTY_PATCH" as const, message: "Patch is empty or too short" }
-  }
-  const hasDiffMarker = /^(---|\+\+\+|@@)/m.test(patchText)
-  if (!hasDiffMarker) {
-    return { status: "fail" as const, code: "PARSE_FAILED" as const, message: "Patch contains no diff markers (---/+++/@@)" }
-  }
-  return { status: "pass" as const, code: "ACCEPTED" as const, message: "Structural check passed" }
-}
+import { structuralGate } from "../admission/structural-gate.js"
 
 export async function runRaw(instance: BenchmarkInstance): Promise<InstanceRunResult> {
   const t0 = Date.now()

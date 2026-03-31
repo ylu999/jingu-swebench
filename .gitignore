@@ -1,5 +1,7 @@
 node_modules/
 dist/
 results/
+workspaces/
+.cache/
 .jingu-patch.diff
 *.js.map
