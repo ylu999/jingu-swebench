@@ -35,30 +35,75 @@ function readWorkspaceFiles(workspace: Workspace, filePaths: string[]): Record<s
 }
 
 // Find candidate files to inject into the prompt.
-// 1. Explicit paths in hints_text
-// 2. git grep for key identifiers mentioned in problem statement
+// Priority order:
+//   1. Explicit .py paths in hints_text
+//   2. Dotted module paths in problem statement (e.g. "ascii.rst" → astropy/io/ascii/rst.py)
+//   3. Explicit .py paths in problem statement
+//   4. git grep for long identifiers (>6 chars) in backticks, restricted to repo module dir
 function findCandidateFiles(instance: BenchmarkInstance, workspace: Workspace): string[] {
   const files = new Set<string>()
 
-  // 1. Explicit .py paths in hints
+  // 1. Explicit .py paths in hints_text
   for (const m of (instance.hintsText ?? "").matchAll(/[\w/.+-]+\.py/g)) files.add(m[0])
-  // Explicit paths in problem statement
-  for (const m of instance.problemStatement.matchAll(/[\w/.+-]+\.py/g)) files.add(m[0])
 
-  // 2. git grep for class/function names mentioned in backticks
-  const identifiers = [...instance.problemStatement.matchAll(/`([A-Za-z_]\w*)`/g)]
+  // 2. Dotted module paths like "ascii.rst", "io.fits.table", "astropy.modeling.separable"
+  //    Convert to file path: replace dots with /, append .py, find in workspace
+  const text = instance.problemStatement + " " + (instance.hintsText ?? "")
+  const dottedModules = [...text.matchAll(/\b([a-z][a-z0-9_]+(?:\.[a-z][a-z0-9_]+){1,5})\b/g)]
     .map((m) => m[1])
-    .filter((id) => id.length > 3)  // skip short tokens
-    .slice(0, 5)  // limit searches
-
-  for (const id of identifiers) {
-    const result = workspace.exec(`git grep -l "def ${id}\\|class ${id}" -- "*.py" 2>/dev/null`)
-    for (const line of result.stdout.split("\n").filter(Boolean)) {
-      files.add(line.trim())
+    .filter((mod) => !mod.includes(".."))  // skip version strings
+  for (const mod of dottedModules) {
+    const candidate = mod.replace(/\./g, "/") + ".py"
+    if (existsSync(joinPath(workspace.dir, candidate))) {
+      files.add(candidate)
+    }
+    // Also try last two segments (e.g. "ascii.rst" → find "*/ascii/rst.py")
+    const parts = mod.split(".")
+    if (parts.length >= 2) {
+      const short = parts.slice(-2).join("/") + ".py"
+      const found = workspace.exec(`find . -path "*/${short}" -not -path "*/test*" -not -path "*/.git/*" 2>/dev/null | head -1`).stdout.trim()
+      if (found) files.add(found.replace(/^\.\//, ""))
     }
   }
 
-  return [...files].slice(0, 3)  // max 3 files to keep prompt size manageable
+  // 3. Explicit .py paths in problem statement
+  for (const m of instance.problemStatement.matchAll(/[\w/.+-]+\.py/g)) files.add(m[0])
+
+  // 4. git grep for long identifiers in backticks, but only in the inferred module subdir
+  if (files.size === 0) {
+    const identifiers = [...instance.problemStatement.matchAll(/`([A-Za-z_]\w{5,})`/g)]
+      .map((m) => m[1])
+      .slice(0, 3)
+    // Infer module root from repo name (e.g. "astropy/astropy" → search in "astropy/")
+    const repoModule = instance.repo.split("/")[1] ?? ""
+    for (const id of identifiers) {
+      const result = workspace.exec(
+        `git grep -l "def ${id}\\|class ${id}" -- "${repoModule}/**/*.py" 2>/dev/null | head -3`
+      )
+      for (const line of result.stdout.split("\n").filter(Boolean)) {
+        files.add(line.trim())
+      }
+    }
+  }
+
+  // Return at most 2 files — prefer smaller files to avoid token explosion
+  return rankBySize(workspace, [...files]).slice(0, 2)
+}
+
+function rankBySize(workspace: Workspace, filePaths: string[]): string[] {
+  return filePaths
+    .map((p) => {
+      const abs = joinPath(workspace.dir, p)
+      try {
+        const lines = readFileSync(abs, "utf8").split("\n").length
+        return { p, lines }
+      } catch {
+        return { p, lines: Infinity }
+      }
+    })
+    .filter((x) => x.lines < Infinity)
+    .sort((a, b) => a.lines - b.lines)
+    .map((x) => x.p)
 }
 
 export async function runJingu(
