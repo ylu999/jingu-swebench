@@ -330,3 +330,63 @@ LLM: BedrockClient (same as benchmark-route1.mjs — no API key needed locally).
 > Jingu doesn't make the model smarter. It makes the model's output trustworthy by enforcing
 > deterministic verification and structured repair — the same governance principle that makes
 > production software reliable.
+
+---
+
+## p162 / p163 — Expected Impact on SWE-bench
+
+### p162 — Principle Evidence Binding (PEB)
+
+p162 要求 LLM 的原则声明必须绑定可验证的 repo 证据。
+
+**在 SWE-bench 上的直接影响：**
+
+| SWE-bench 失败类型 | p162 的作用 |
+|-------------------|------------|
+| Root cause misdiagnosis（诊断错误文件/函数）| PEB 要求 LLM 在 proposer prompt 中 cite 具体文件+行号，迫使它真正定位到正确位置 |
+| Reasoning/code misalignment（分析说一套，patch 写另一套）| Evidence binding 把分析和代码修改锁在同一个 evidence anchor 上，漂移立刻可见 |
+| Retry not converging（每次 retry 犯相同错误）| structured feedback + PEB 要求下一次 attempt 针对具体 evidence 修正，而不是随机重试 |
+
+**结论：** p162 = "让 player 本身更强"。每次 attempt 的起点质量更高，不靠运气。
+
+---
+
+### p163 — PEB Replay + Drift Detection
+
+p163 是在 p162 之上做 replay 和 drift 检测。
+
+**在 SWE-bench 上的直接影响：**
+
+| SWE-bench 实验痛点 | p163 的作用 |
+|------------------|------------|
+| 结果噪声大，分不清信号和运气 | replay 同一 instance 多次，确认结果稳定性 |
+| 模型升级/prompt 改动后不知道影响范围 | drift detection 自动比对 evidence binding 分布变化 |
+| "这个 case 之前过了现在不过了" | replay 给出可追溯的原因（binding 哪里漂移了）|
+
+**结论：** p163 = "让训练和实验系统更强"。不直接改变每次 attempt 的质量，但让实验更可靠、更快迭代。
+
+---
+
+### 优先顺序建议
+
+```
+先跑 SWE-bench smoke run（20 cases）
+  → 看 failure breakdown（是 root cause misdiagnosis？还是 apply 失败？还是 test 不改善？）
+  → 如果主要失败在 "reasoning / code misalignment" 或 "retry not converging"
+    → p162 是真正的瓶颈，值得现在做
+  → 如果主要失败在 apply-gate（patch format 问题）或 test-gate（逻辑本身就错）
+    → p162 影响有限，先把基础 runner 做稳，p162 排后面
+```
+
+**当前判断（未验证）：** p162 中等概率是 SWE-bench 的真实瓶颈之一，但需要第一批 smoke run 数据才能确认。
+
+**不要先做 p162 再跑 benchmark** — 那样无法分离变量，看不出 p162 的实际贡献。
+
+---
+
+### 一句话区分
+
+- **p162** = 让模型的每次尝试更扎实（grounded in evidence）
+- **p163** = 让实验结果更可信（reproducible, drift-detected）
+
+两者都有价值，但对 SWE-bench resolved% 的直接影响，p162 >> p163。
