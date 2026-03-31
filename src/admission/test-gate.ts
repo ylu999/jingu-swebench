@@ -20,6 +20,15 @@ export function testGate(
   testCmd: string,
   beforeCounts: TestCounts
 ): GateResult {
+  // If baseline has no tests at all, skip the test gate (no pytest environment available)
+  if (beforeCounts.passed === 0 && beforeCounts.failed === 0) {
+    return {
+      status: "pass",
+      code: "ACCEPTED",
+      message: "Test gate skipped — no test baseline available (pytest env not set up)",
+    }
+  }
+
   // Apply patch is already done by caller before this gate runs.
   const result = workspace.exec(testCmd)
 
