@@ -1,5 +1,6 @@
 import { loadInstances } from "../dataset/swebench-loader.js"
 import { runRaw } from "../runner/raw-runner.js"
+import { runJingu } from "../runner/jingu-runner.js"
 import { writePrediction } from "../output/predictions-writer.js"
 import { join } from "node:path"
 import { mkdirSync, writeFileSync } from "node:fs"
@@ -40,8 +41,12 @@ async function main() {
         writePrediction(predictionsPath, instance.instanceId, result.finalPatchText)
       }
     } else if (mode === "jingu") {
-      // Day 2: jingu runner with gates + retry
-      console.log(`[jingu] ${instance.instanceId} — not yet implemented`)
+      const wsBase = join("workspaces")
+      const result = await runJingu(instance, wsBase)
+      results.push(result)
+      if (result.finalPatchText) {
+        writePrediction(predictionsPath, instance.instanceId, result.finalPatchText, "jingu")
+      }
     } else {
       console.log(`[compare] ${instance.instanceId} — not yet implemented`)
     }
