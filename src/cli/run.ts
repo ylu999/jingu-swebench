@@ -3,8 +3,11 @@ import { runRaw } from "../runner/raw-runner.js"
 import { runJingu } from "../runner/jingu-runner.js"
 import { runCompare, printCompareSummary } from "../runner/compare-runner.js"
 import { writePrediction } from "../output/predictions-writer.js"
+import { buildCompareReport, buildSummaryTable, buildFailureTable, writeReport } from "../output/report-writer.js"
+import { writeRunEvents } from "../output/eventlog-writer.js"
 import { join } from "node:path"
 import { mkdirSync, writeFileSync } from "node:fs"
+import { randomUUID } from "node:crypto"
 
 // Parse CLI args
 const args = process.argv.slice(2)
@@ -31,13 +34,14 @@ async function main() {
   const outDir = join("results", mode)
   mkdirSync(outDir, { recursive: true })
   const predictionsPath = join(outDir, "predictions.jsonl")
+  const eventlogPath = join(outDir, "events.jsonl")
   const wsBase = join("workspaces")
+  const runId = randomUUID()
 
   if (mode === "compare") {
     const results = await runCompare(instances, wsBase)
     printCompareSummary(results)
 
-    // Write both raw and jingu predictions
     for (const r of results) {
       if (r.raw.finalPatchText) {
         writePrediction(join("results", "raw", "predictions.jsonl"), r.instanceId, r.raw.finalPatchText, "raw")
@@ -45,42 +49,39 @@ async function main() {
       if (r.jingu.finalPatchText) {
         writePrediction(join("results", "jingu", "predictions.jsonl"), r.instanceId, r.jingu.finalPatchText, "jingu")
       }
+      writeRunEvents(join("results", "raw", "events.jsonl"), runId, r.raw)
+      writeRunEvents(join("results", "jingu", "events.jsonl"), runId, r.jingu)
     }
 
-    writeFileSync(
-      join(outDir, "compare.json"),
-      JSON.stringify(results, null, 2)
-    )
+    writeFileSync(join(outDir, "compare.json"), JSON.stringify(results, null, 2))
+    writeReport(join(outDir, "report.md"), buildCompareReport(results))
     return
   }
 
   const results = []
 
   for (const instance of instances) {
-    if (mode === "raw") {
-      const result = await runRaw(instance)
-      results.push(result)
-      if (result.finalPatchText) {
-        writePrediction(predictionsPath, instance.instanceId, result.finalPatchText, "raw")
-      }
-    } else {
-      const result = await runJingu(instance, wsBase)
-      results.push(result)
-      if (result.finalPatchText) {
-        writePrediction(predictionsPath, instance.instanceId, result.finalPatchText, "jingu")
-      }
+    const result = mode === "raw"
+      ? await runRaw(instance)
+      : await runJingu(instance, wsBase)
+
+    results.push(result)
+
+    if (result.finalPatchText) {
+      writePrediction(predictionsPath, instance.instanceId, result.finalPatchText, mode)
     }
+    writeRunEvents(eventlogPath, runId, result)
   }
 
   const accepted = results.filter((r) => r.accepted).length
   console.log(`\n--- Summary ---`)
   console.log(`Mode: ${mode} | Instances: ${results.length} | Accepted: ${accepted}/${results.length}`)
-  console.log(`Predictions written to: ${predictionsPath}`)
 
-  writeFileSync(
-    join(outDir, "summary.json"),
-    JSON.stringify({ mode, dataset, n: results.length, accepted }, null, 2)
-  )
+  writeReport(join(outDir, "report.md"),
+    buildSummaryTable(results) + "\n\n" + buildFailureTable(results))
+  writeFileSync(join(outDir, "summary.json"),
+    JSON.stringify({ mode, dataset, n: results.length, accepted }, null, 2))
+  console.log(`Predictions: ${predictionsPath} | Events: ${eventlogPath}`)
 }
 
 main().catch((err) => {
