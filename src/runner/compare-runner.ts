@@ -11,14 +11,15 @@ export interface CompareResult {
 
 export async function runCompare(
   instances: BenchmarkInstance[],
-  workspaceBase: string
+  workspaceBase: string,
+  opts: { skipTestGate?: boolean } = {}
 ): Promise<CompareResult[]> {
   const results: CompareResult[] = []
 
   for (const instance of instances) {
     console.log(`\n[compare] ${instance.instanceId}`)
     const raw = await runRaw(instance)
-    const jingu = await runJingu(instance, workspaceBase)
+    const jingu = await runJingu(instance, workspaceBase, opts)
     results.push({ instanceId: instance.instanceId, raw, jingu })
   }
 

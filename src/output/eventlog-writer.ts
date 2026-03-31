@@ -72,6 +72,7 @@ export function writeRunEvents(outPath: string, runId: string, result: InstanceR
         status: attempt.applyGate.status,
         code: attempt.applyGate.code,
         message: attempt.applyGate.message,
+        details: attempt.applyGate.details,
       })
     }
 

@@ -21,6 +21,7 @@ const mode = getArg("--mode") ?? "raw"
 const dataset = (getArg("--dataset") ?? "lite") as "lite" | "verified"
 const n = getArg("--n") ? parseInt(getArg("--n")!, 10) : 1
 const noCache = args.includes("--no-cache")
+const skipTestGate = args.includes("--skip-test-gate")
 
 if (!["raw", "jingu", "compare"].includes(mode)) {
   console.error(`Unknown mode: ${mode}. Valid: raw, jingu, compare`)
@@ -39,7 +40,7 @@ async function main() {
   const runId = randomUUID()
 
   if (mode === "compare") {
-    const results = await runCompare(instances, wsBase)
+    const results = await runCompare(instances, wsBase, { skipTestGate })
     printCompareSummary(results)
 
     for (const r of results) {
@@ -63,7 +64,7 @@ async function main() {
   for (const instance of instances) {
     const result = mode === "raw"
       ? await runRaw(instance)
-      : await runJingu(instance, wsBase)
+      : await runJingu(instance, wsBase, { skipTestGate })
 
     results.push(result)
 

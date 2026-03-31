@@ -18,14 +18,24 @@ function parseTestOutput(output: string): TestCounts {
 export function testGate(
   workspace: Workspace,
   testCmd: string,
-  beforeCounts: TestCounts
+  beforeCounts: TestCounts,
+  opts: { skipIfNoBaseline?: boolean } = {}
 ): GateResult {
-  // If baseline has no tests at all, skip the test gate (no pytest environment available)
+  // No pytest environment: either skip (smoke run) or fail with clear message (benchmark)
   if (beforeCounts.passed === 0 && beforeCounts.failed === 0) {
+    if (opts.skipIfNoBaseline) {
+      return {
+        status: "pass",
+        code: "ACCEPTED",
+        message: "Test gate skipped (--skip-test-gate): no pytest baseline available",
+        details: { skipped: true },
+      }
+    }
     return {
-      status: "pass",
-      code: "ACCEPTED",
-      message: "Test gate skipped — no test baseline available (pytest env not set up)",
+      status: "fail",
+      code: "TEST_EXEC_FAILED",
+      message: "No test baseline — pytest environment not available. Use --skip-test-gate for smoke runs only.",
+      details: { skipped: false },
     }
   }
 

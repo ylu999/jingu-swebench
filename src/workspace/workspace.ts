@@ -44,15 +44,14 @@ export class Workspace {
     return patchFile
   }
 
-  applyPatch(patchText: string): ExecResult {
+  applyPatch(patchText: string, fuzz = 0): ExecResult {
     const patchFile = this.writePatchFile(patchText)
-    // Use patch command with fuzzy matching — more tolerant of LLM line number errors
-    return this.exec(`patch --dry-run -p1 --fuzz=5 -i "${patchFile}"`)
+    return this.exec(`patch --dry-run -p1 --fuzz=${fuzz} -i "${patchFile}"`)
   }
 
-  applyPatchForReal(patchText: string): ExecResult {
+  applyPatchForReal(patchText: string, fuzz = 5): ExecResult {
     const patchFile = this.writePatchFile(patchText)
-    return this.exec(`patch -p1 --fuzz=5 -i "${patchFile}"`)
+    return this.exec(`patch -p1 --fuzz=${fuzz} -i "${patchFile}"`)
   }
 
   reset(): void {

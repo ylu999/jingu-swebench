@@ -108,7 +108,8 @@ function rankBySize(workspace: Workspace, filePaths: string[]): string[] {
 
 export async function runJingu(
   instance: BenchmarkInstance,
-  workspaceBase: string
+  workspaceBase: string,
+  opts: { skipTestGate?: boolean } = {}
 ): Promise<InstanceRunResult> {
   const t0 = Date.now()
   console.log(`[jingu] ${instance.instanceId}`)
@@ -169,11 +170,12 @@ export async function runJingu(
       continue
     }
 
-    // Actually apply the patch for the test gate
-    workspace.applyPatchForReal(candidate.patchText)
+    // Apply with the same fuzz level that passed the dry-run
+    const fuzz = (ag.details?.apply_strictness === "fuzz") ? 5 : 0
+    workspace.applyPatchForReal(candidate.patchText, fuzz)
 
     // Gate 3: test delta
-    const tg = testGate(workspace, TEST_CMD, baseline)
+    const tg = testGate(workspace, TEST_CMD, baseline, { skipIfNoBaseline: opts.skipTestGate })
     workspace.reset() // always reset after test run
 
     if (tg.status === "fail") {
