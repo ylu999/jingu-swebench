@@ -175,13 +175,24 @@ def run_with_jingu(instance_id: str, output_dir: Path, max_attempts: int = 3) ->
             continue
 
         score = score_patch(patch)
-        print(f"    [gate] OK  score={score:.0f}  lines={len(patch.splitlines())}")
+        patch_lines = len(patch.splitlines())
+        print(f"    [gate] OK  score={score:.0f}  lines={patch_lines}")
 
         candidates.append({
             "attempt": attempt,
             "patch": patch,
             "score": score,
         })
+
+        # Feed quality hint to next attempt: if patch is over-engineered, say so
+        if patch_lines > 50:
+            last_failure = (
+                f"Previous patch was {patch_lines} lines — too large. "
+                "The fix must be minimal: identify the single root cause and change only that. "
+                "Do NOT add new logic, helpers, or abstractions. Target under 20 lines."
+            )
+        else:
+            last_failure = ""
 
     if not candidates:
         return {
