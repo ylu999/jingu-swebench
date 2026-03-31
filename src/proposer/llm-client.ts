@@ -3,7 +3,7 @@ import { BedrockRuntimeClient, InvokeModelCommand } from "@aws-sdk/client-bedroc
 
 const DEFAULT_MODEL = "global.anthropic.claude-sonnet-4-5-20250929-v1:0"
 const DEFAULT_REGION = "us-east-1"
-const DEFAULT_MAX_TOKENS = 4096
+const DEFAULT_MAX_TOKENS = 8192
 
 export interface LLMCallOptions {
   system: string

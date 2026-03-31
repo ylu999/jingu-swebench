@@ -1,6 +1,6 @@
 import { execSync, type ExecSyncOptions } from "node:child_process"
 import { mkdirSync, writeFileSync, existsSync } from "node:fs"
-import { join } from "node:path"
+import { join, resolve } from "node:path"
 
 export interface ExecResult {
   stdout: string
@@ -12,7 +12,7 @@ export class Workspace {
   readonly dir: string
 
   constructor(dir: string) {
-    this.dir = dir
+    this.dir = resolve(dir)  // always absolute
   }
 
   exec(cmd: string, opts: { throws?: boolean } = {}): ExecResult {
@@ -36,16 +36,23 @@ export class Workspace {
     }
   }
 
-  applyPatch(patchText: string): ExecResult {
+  private writePatchFile(patchText: string): string {
     const patchFile = join(this.dir, ".jingu-patch.diff")
-    writeFileSync(patchFile, patchText, "utf8")
-    return this.exec(`git apply --check "${patchFile}"`)
+    // Ensure patch ends with newline — git apply requires it
+    const text = patchText.endsWith("\n") ? patchText : patchText + "\n"
+    writeFileSync(patchFile, text, "utf8")
+    return patchFile
+  }
+
+  applyPatch(patchText: string): ExecResult {
+    const patchFile = this.writePatchFile(patchText)
+    // Use patch command with fuzzy matching — more tolerant of LLM line number errors
+    return this.exec(`patch --dry-run -p1 --fuzz=5 -i "${patchFile}"`)
   }
 
   applyPatchForReal(patchText: string): ExecResult {
-    const patchFile = join(this.dir, ".jingu-patch.diff")
-    writeFileSync(patchFile, patchText, "utf8")
-    return this.exec(`git apply "${patchFile}"`)
+    const patchFile = this.writePatchFile(patchText)
+    return this.exec(`patch -p1 --fuzz=5 -i "${patchFile}"`)
   }
 
   reset(): void {
@@ -62,8 +69,14 @@ export class Workspace {
     const ws = new Workspace(targetDir)
 
     if (!existsSync(join(targetDir, ".git"))) {
-      execSync(`git clone ${repoUrl} "${targetDir}"`, { stdio: "pipe" })
+      // Clone with full history so any commit is reachable
+      execSync(`git clone --no-local "${repoUrl}" "${targetDir}"`, {
+        stdio: "pipe",
+        timeout: 300_000,
+      })
     }
+    // Fetch the specific commit in case it's not on the default branch
+    ws.exec(`git fetch origin ${baseCommit} 2>/dev/null || true`)
     ws.exec(`git checkout ${baseCommit}`, { throws: true })
     return ws
   }

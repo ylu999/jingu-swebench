@@ -6,10 +6,10 @@ import { callLLM } from "./llm-client.js"
 export async function propose(
   instance: BenchmarkInstance,
   attempt: number,
-  previousFeedback?: string
+  opts: { previousFeedback?: string; fileContents?: Record<string, string> } = {}
 ): Promise<PatchCandidate> {
   const system = buildSystemPrompt()
-  const prompt = buildUserPrompt(instance, previousFeedback)
+  const prompt = buildUserPrompt(instance, opts)
 
   const result = await callLLM({ system, prompt })
   const candidate = parseResponse(result.content, attempt)
