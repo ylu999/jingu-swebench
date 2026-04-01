@@ -1,6 +1,6 @@
 import { loadInstances } from "../dataset/swebench-loader.js"
 import { runMultiStrategy } from "../runner/multi-strategy-runner.js"
-import { STRATEGIES, STRATEGIES_BASELINE, STRATEGIES_PRINCIPLE, STRATEGIES_ABLATION } from "../types/strategy.js"
+import { STRATEGIES, STRATEGIES_BASELINE, STRATEGIES_PRINCIPLE, STRATEGIES_ABLATION, STRATEGIES_V2_ABLATION } from "../types/strategy.js"
 import { writePrediction } from "../output/predictions-writer.js"
 import type { BenchmarkInstance, AttemptResult } from "../types/contracts.js"
 import type { StrategyRunResult } from "../types/strategy.js"
@@ -20,7 +20,10 @@ const sequential = args.includes("--sequential")
 const parallelInstances = args.includes("--parallel-instances")
 const maxAttempts = getArg("--max-attempts") ? parseInt(getArg("--max-attempts")!, 10) : undefined
 const skipBaselineTest = args.includes("--skip-baseline-test")
-const strategySet = args.includes("--baseline")
+const outDirOverride = getArg("--out-dir")
+const strategySet = args.includes("--v2-ablation")
+  ? STRATEGIES_V2_ABLATION
+  : args.includes("--baseline")
   ? STRATEGIES_BASELINE
   : args.includes("--ablation")
     ? STRATEGIES_ABLATION
@@ -158,7 +161,7 @@ async function main() {
     console.log(`[${ts()}] Filtered to ${instances.length} instance(s): ${instances.map((i) => i.instanceId).join(", ")}\n`)
   }
 
-  const outDir = join("results", "multi")
+  const outDir = outDirOverride ?? join("results", "multi")
   mkdirSync(outDir, { recursive: true })
   const predictionsPath = join(outDir, "predictions.jsonl")
   const wsBase = join("workspaces")

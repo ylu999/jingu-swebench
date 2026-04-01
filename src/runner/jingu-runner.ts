@@ -202,22 +202,21 @@ export async function runJingu(
   const cacheDir = join(workspaceBase, "__cache__", instanceSlug)
   let workspace: Workspace
 
-  if (existsSync(join(wsDir, ".git"))) {
-    // Already exists — reset to base commit
+  if (existsSync(wsDir)) {
+    // Worktree already exists — force reset to base commit (clean -fdx handles untracked files)
     workspace = new Workspace(wsDir)
-    workspace.exec(`git checkout ${instance.baseCommit}`, { throws: true })
     workspace.reset()
     console.log(`  [jingu] workspace reused, reset to ${instance.baseCommit.slice(0, 8)}`)
   } else {
-    // Clone once to cache, then cp -r to strategy workspace
+    // Clone once to cache, then create git worktree (shares .git objects, no cp -r)
     const repoUrl = `https://github.com/${instance.repo}.git`
     if (!existsSync(join(cacheDir, ".git"))) {
       console.log(`  [jingu] cloning ${repoUrl} ...`)
     } else {
-      console.log(`  [jingu] cache hit, copying to workspace...`)
+      console.log(`  [jingu] cache hit, creating worktree...`)
     }
     workspace = Workspace.checkoutFromCache(repoUrl, instance.baseCommit, wsDir, cacheDir)
-    console.log(`  [jingu] checkout done @ ${instance.baseCommit.slice(0, 8)}`)
+    console.log(`  [jingu] worktree ready @ ${instance.baseCommit.slice(0, 8)}`)
   }
 
   // Baseline test counts before any patch (shared across strategies when pre-computed)
@@ -251,6 +250,7 @@ export async function runJingu(
   let finalPatchText: string | undefined
 
   const strategyResolution = resStatus !== "valid" ? { status: resStatus, reason: resReason } : undefined
+  const retryOpts = { verificationPolicy: (effectiveStrategy ?? rawStrategy)?.promptHints.verificationPolicy }
 
   const maxAttempts = opts.maxAttempts ?? MAX_ATTEMPTS
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
@@ -262,7 +262,7 @@ export async function runJingu(
       const ar: AttemptResult = { attempt, candidate, structuralGate: sg, accepted: false, strategyResolution }
       attempts.push(ar)
       console.log(`  [jingu] attempt=${attempt} FAIL structural (${sg.code})`)
-      previousFeedback = buildRetryFeedback(ar)
+      previousFeedback = buildRetryFeedback(ar, undefined, retryOpts)
       continue
     }
 
@@ -272,7 +272,7 @@ export async function runJingu(
       const ar: AttemptResult = { attempt, candidate, structuralGate: sg, applyGate: ag, accepted: false, strategyResolution }
       attempts.push(ar)
       console.log(`  [jingu] attempt=${attempt} FAIL apply (${ag.code})`)
-      previousFeedback = buildRetryFeedback(ar, workspace)
+      previousFeedback = buildRetryFeedback(ar, workspace, retryOpts)
       workspace.reset()
       continue
     }
@@ -293,7 +293,7 @@ export async function runJingu(
       const ar: AttemptResult = { attempt, candidate, structuralGate: sg, applyGate: ag, testGate: tg, accepted: false, strategyResolution }
       attempts.push(ar)
       console.log(`  [jingu] attempt=${attempt} FAIL test (${tg.code})`)
-      previousFeedback = buildRetryFeedback(ar, workspace)
+      previousFeedback = buildRetryFeedback(ar, workspace, retryOpts)
       continue
     }
 

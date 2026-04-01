@@ -12,7 +12,7 @@ export type SearchStrategy = {
     maxPatchLines?: number
 
     // Layer C — Verification: what constraints to apply at output time
-    verificationPolicy?: "strict-observed-only" | "standard"
+    verificationPolicy?: "strict-observed-only" | "feedback-grounded" | "standard"
 
     extraInstruction?: string
   }
@@ -41,7 +41,11 @@ export const STRATEGIES_BASELINE: SearchStrategy[] = [
   },
 ]
 
-// Principle-tagged strategies — all 3 layers explicit
+// Principle-tagged strategies — Layer A (localization) + Layer B (patching), no Layer C.
+// Layer C (strict-observed-only) removed from main path after ablation (exp 2026-03):
+//   - C had no net pass_rate gain
+//   - C increased parse_fail_rate (especially on parse-sensitive instances like django-11049)
+//   - A+B achieves apply_fail=35.3% vs baseline 42%, parse_fail=11.8% ≈ baseline 12%
 export const STRATEGIES_PRINCIPLE: SearchStrategy[] = [
   {
     id: "p-minimal",
@@ -50,7 +54,7 @@ export const STRATEGIES_PRINCIPLE: SearchStrategy[] = [
       focusStyle: "minimal-fix",
       analysisDepth: "light",
       maxPatchLines: 10,
-      verificationPolicy: "strict-observed-only",
+      // Layer C intentionally absent: no net benefit, increases parse friction
     },
   },
   {
@@ -59,7 +63,7 @@ export const STRATEGIES_PRINCIPLE: SearchStrategy[] = [
       localizationPolicy: "symbol-first",
       focusStyle: "root-cause",
       analysisDepth: "standard",
-      verificationPolicy: "strict-observed-only",
+      // Layer C intentionally absent: no net benefit, increases parse friction
     },
   },
   {
@@ -73,9 +77,10 @@ export const STRATEGIES_PRINCIPLE: SearchStrategy[] = [
   },
 ]
 
-// Ablation strategies — for Exp-2 layer contribution analysis
-// ab-no-c: Layer A+B, no Layer C (localization + patching, no verification constraint)
-// ab-no-a: Layer B+C, no Layer A (patching + verification, no localization hint)
+// Ablation strategies — layer contribution analysis experiments
+// ab-no-c: Layer A+B, no Layer C — this pattern is now the default (STRATEGIES_PRINCIPLE)
+// ab-no-a: Layer B+C, no Layer A — tests whether localization hints are net positive
+// strict-observed-only retained here for targeted experiments and special-case guardrails
 export const STRATEGIES_ABLATION: SearchStrategy[] = [
   {
     id: "ab-no-c",
@@ -101,3 +106,29 @@ export const STRATEGIES_ABLATION: SearchStrategy[] = [
 
 // Default export: principle-tagged set (used in experiments)
 export const STRATEGIES: SearchStrategy[] = STRATEGIES_PRINCIPLE
+
+// V2 ablation strategies — test "feedback-grounded" vs "strict-observed-only"
+// Key change: verificationPolicy = "feedback-grounded"
+//   → no grounding constraint on first-shot prompt
+//   → grounding constraint injected ONLY in retry feedback after apply/ungrounded fail
+export const STRATEGIES_V2_ABLATION: SearchStrategy[] = [
+  {
+    id: "v2-minimal",
+    promptHints: {
+      localizationPolicy: "test-driven",
+      focusStyle: "minimal-fix",
+      analysisDepth: "light",
+      maxPatchLines: 10,
+      verificationPolicy: "feedback-grounded",
+    },
+  },
+  {
+    id: "v2-root-cause",
+    promptHints: {
+      localizationPolicy: "symbol-first",
+      focusStyle: "root-cause",
+      analysisDepth: "standard",
+      verificationPolicy: "feedback-grounded",
+    },
+  },
+]

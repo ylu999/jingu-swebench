@@ -1,7 +1,11 @@
 import type { AttemptResult } from "../types/contracts.js"
 import type { Workspace } from "../workspace/workspace.js"
 
-export function buildRetryFeedback(attempt: AttemptResult, workspace?: Workspace): string {
+export function buildRetryFeedback(
+  attempt: AttemptResult,
+  workspace?: Workspace,
+  opts: { verificationPolicy?: string } = {}
+): string {
   const lines: string[] = []
 
   // Determine which gate failed
@@ -37,6 +41,12 @@ export function buildRetryFeedback(attempt: AttemptResult, workspace?: Workspace
       }
     }
     lines.push("\nPlease produce a corrected patch. Focus only on the failing hunk.")
+
+    // feedback-grounded: inject grounding constraint here (not in first-shot prompt)
+    if (opts.verificationPolicy === "feedback-grounded") {
+      lines.push("\nGrounding constraint: use ONLY lines that appear verbatim in the provided file contents as context lines.")
+      lines.push("Do NOT invent context lines. If the patch failed to apply, your context lines likely don't match the file exactly.")
+    }
   } else if (failedGate.code === "TESTS_NOT_IMPROVED") {
     const details = failedGate.details as Record<string, unknown> | undefined
     const output = (details?.output as string | undefined) ?? ""
@@ -55,6 +65,11 @@ export function buildRetryFeedback(attempt: AttemptResult, workspace?: Workspace
       lines.push(`You MUST select one of these provided files as your target: ${injected.join(", ")}`)
     }
     lines.push("Only modify code that appears verbatim in the provided file contents above.")
+
+    // feedback-grounded: reinforce grounding on ungrounded patch (same message, explicit reminder)
+    if (opts.verificationPolicy === "feedback-grounded") {
+      lines.push("This grounding constraint applies to all remaining attempts: never patch a file not shown to you.")
+    }
   } else if (failedGate.code === "EMPTY_PATCH" || failedGate.code === "PARSE_FAILED") {
     lines.push("\nYour previous response did not contain a valid unified diff patch.")
     lines.push("Output ONLY the patch in unified diff format (--- / +++ / @@ lines). No explanation, no markdown.")
