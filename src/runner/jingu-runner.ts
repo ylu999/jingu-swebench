@@ -190,7 +190,7 @@ function extractAnchors(instance: BenchmarkInstance): string[] {
 export async function runJingu(
   instance: BenchmarkInstance,
   workspaceBase: string,
-  opts: { skipTestGate?: boolean; wsDir?: string; strategy?: SearchStrategy } = {}
+  opts: { skipTestGate?: boolean; wsDir?: string; strategy?: SearchStrategy; maxAttempts?: number } = {}
 ): Promise<InstanceRunResult> {
   const t0 = Date.now()
   console.log(`[jingu] ${instance.instanceId}`)
@@ -242,7 +242,8 @@ export async function runJingu(
 
   const strategyResolution = resStatus !== "valid" ? { status: resStatus, reason: resReason } : undefined
 
-  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+  const maxAttempts = opts.maxAttempts ?? MAX_ATTEMPTS
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     const candidate = await propose(instance, attempt, { previousFeedback, fileContents, strategy: effectiveStrategy ?? rawStrategy })
 
     // Gate 1: structural (pass injected files + filesTouched for grounding compliance check)

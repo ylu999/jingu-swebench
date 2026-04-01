@@ -13,13 +13,13 @@ export async function runMultiStrategy(
   instance: BenchmarkInstance,
   workspaceBase: string,
   strategies: SearchStrategy[],
-  opts: { sequential?: boolean } = {}
+  opts: { sequential?: boolean; maxAttempts?: number } = {}
 ): Promise<MultiStrategyResult> {
   const instanceSlug = instance.instanceId.replace(/\//g, "__")
 
   async function runOne(strategy: SearchStrategy): Promise<StrategyRunResult> {
     const wsDir = join(workspaceBase, instanceSlug, strategy.id)
-    const runResult = await runJingu(instance, workspaceBase, { wsDir, strategy })
+    const runResult = await runJingu(instance, workspaceBase, { wsDir, strategy, maxAttempts: opts.maxAttempts })
     const verdict = runResult.accepted ? "accepted" : "rejected"
     const result: StrategyRunResult = { strategyId: strategy.id, verdict, runResult, score: 0 }
     result.score = scoreRun(result)
