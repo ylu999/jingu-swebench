@@ -158,15 +158,19 @@ def build_context(round_num: int, past_rounds: list[dict], instances: list[str])
         last = past_rounds[-1]
         m = last.get("metric", {})
         last_metric_str = (
-            f"acceptance_rate={m.get('acceptance_rate', 0):.1%} "
+            f"resolve_rate={m.get('resolve_rate', m.get('acceptance_rate', 0)):.1%} "
+            f"acceptance_rate(gate)={m.get('acceptance_rate', 0):.1%} "
             f"({m.get('accepted', 0)}/{m.get('total', 0)}) "
+            f"resolved_ids={m.get('resolved_ids', [])} "
             f"fail_counts={json.dumps(m.get('fail_counts', {}))}"
         )
         if "metric_after" in last:
             ma = last["metric_after"]
             last_metric_str += (
-                f"\n  After change: acceptance_rate={ma.get('acceptance_rate', 0):.1%} "
-                f"({ma.get('accepted', 0)}/{ma.get('total', 0)})"
+                f"\n  After change: resolve_rate={ma.get('resolve_rate', ma.get('acceptance_rate', 0)):.1%} "
+                f"acceptance_rate(gate)={ma.get('acceptance_rate', 0):.1%} "
+                f"({ma.get('accepted', 0)}/{ma.get('total', 0)}) "
+                f"resolved_ids={ma.get('resolved_ids', [])}"
             )
 
     return f"""# AutoResearch Loop — Round {round_num}
@@ -404,29 +408,108 @@ def git_reset_target() -> None:
 
 # ── Eval runner (for measuring delta after Claude's change) ───────────────────
 
+CLOUD_HOST    = os.environ.get("CLOUD_HOST", "cloud")
+CLOUD_SCRIPTS = os.environ.get("CLOUD_SCRIPTS", "~/jingu-swebench/scripts")
+CLOUD_RESULTS = os.environ.get("CLOUD_RESULTS", "~/jingu-swebench/results")
+CLOUD_PYTHON  = os.environ.get("CLOUD_PYTHON", "~/.local/share/mise/shims/python")
+
+
+def _ssh(cmd: str, timeout: int = 600) -> subprocess.CompletedProcess:
+    """Run a command on cloud desktop via SSH."""
+    return subprocess.run(
+        ["ssh", CLOUD_HOST, cmd],
+        capture_output=True, text=True, timeout=timeout
+    )
+
+
 def run_local_eval(instances: list[str], output_dir: Path, workers: int,
                    max_attempts: int, stagger: int) -> dict:
-    """Run run_with_jingu_gate.py locally to measure acceptance_rate."""
+    """Two-stage eval: generate patches on cloud, then fast-eval resolve rate.
+
+    Stage 1 (~3-5 min): SSH → cloud → run_with_jingu_gate.py → patches
+    Stage 2 (~10s):     SSH → cloud → fast_eval.py → resolve_rate
+
+    acceptance_rate = Jingu gate pass rate (structural)
+    resolve_rate    = FAIL_TO_PASS test pass rate (semantic, fast signal)
+    """
     import re
+    run_name = output_dir.name
     output_dir.mkdir(parents=True, exist_ok=True)
-    log_path = output_dir / "run.log"
+    log_path  = output_dir / "run.log"
 
-    cmd = [
-        sys.executable, str(TARGET_SCRIPT),
-        "--instance-ids", *instances,
-        "--output", str(output_dir),
-        "--workers", str(workers),
-        "--max-attempts", str(max_attempts),
-        "--stagger", str(stagger),
-    ]
+    # ── Sync updated run_with_jingu_gate.py to cloud ──────────────────────────
+    sync = subprocess.run(
+        ["scp", str(TARGET_SCRIPT), f"{CLOUD_HOST}:{CLOUD_SCRIPTS}/run_with_jingu_gate.py"],
+        capture_output=True, text=True, timeout=30
+    )
+    if sync.returncode != 0:
+        print(f"  [eval] WARNING: scp sync failed: {sync.stderr[:100]}")
 
-    print(f"  [eval] running {len(instances)} instances → {output_dir.name}")
+    # ── Stage 1: Generate patches on cloud ───────────────────────────────────
+    cloud_out = f"{CLOUD_RESULTS}/{run_name}"
+    gate_cmd = (
+        f"{CLOUD_PYTHON} {CLOUD_SCRIPTS}/run_with_jingu_gate.py "
+        f"--instance-ids {' '.join(instances)} "
+        f"--output {cloud_out} "
+        f"--workers {workers} "
+        f"--max-attempts {max_attempts} "
+        f"--stagger {stagger}"
+    )
+    print(f"  [eval:stage1] patch generation on cloud ({len(instances)} instances)...")
     t0 = time.time()
+    r1 = _ssh(gate_cmd, timeout=max_attempts * len(instances) * 300 + 60)
+    stage1_time = time.time() - t0
+    # Save log locally
     with open(log_path, "w") as lf:
-        subprocess.run(cmd, stdout=lf, stderr=subprocess.STDOUT, cwd=str(REPO_ROOT))
-    print(f"  [eval] done in {time.time() - t0:.0f}s")
+        lf.write(r1.stdout + r1.stderr)
+    print(f"  [eval:stage1] done in {stage1_time:.0f}s")
 
-    return _parse_results(output_dir, instances, log_path)
+    # ── Copy predictions back ─────────────────────────────────────────────────
+    preds_remote = f"{cloud_out}/jingu-predictions.jsonl"
+    preds_local  = output_dir / "jingu-predictions.jsonl"
+    subprocess.run(
+        ["scp", f"{CLOUD_HOST}:{preds_remote}", str(preds_local)],
+        capture_output=True, text=True, timeout=30
+    )
+
+    # ── Stage 2: Fast resolve eval on cloud ───────────────────────────────────
+    resolve_rate = 0.0
+    resolved_ids: list[str] = []
+    fast_results: dict = {}
+
+    if preds_local.exists():
+        fast_cmd = (
+            f"{CLOUD_PYTHON} {CLOUD_SCRIPTS}/fast_eval.py "
+            f"--predictions {preds_remote} "
+            f"--instance-ids {' '.join(instances)} "
+            f"--workers {min(workers, len(instances))} "
+            f"--remote ''"
+        )
+        print(f"  [eval:stage2] fast resolve eval on cloud...")
+        t1 = time.time()
+        r2 = _ssh(fast_cmd, timeout=120)
+        stage2_time = time.time() - t1
+        print(f"  [eval:stage2] done in {stage2_time:.0f}s")
+
+        # Parse fast_eval output
+        for line in (r2.stdout + r2.stderr).splitlines():
+            if "✓ resolved" in line:
+                iid = line.strip().split(":")[0].strip()
+                resolved_ids.append(iid)
+                fast_results[iid] = True
+            elif "✗ not resolved" in line:
+                iid = line.strip().split(":")[0].strip()
+                fast_results[iid] = False
+
+        resolve_rate = len(resolved_ids) / len(instances) if instances else 0.0
+
+    base_results = _parse_results(output_dir, instances, log_path)
+    base_results["resolve_rate"]  = resolve_rate
+    base_results["resolved_ids"]  = resolved_ids
+    base_results["fast_results"]  = fast_results
+    # Use resolve_rate as primary metric for loop decisions
+    base_results["acceptance_rate"] = resolve_rate
+    return base_results
 
 
 def _parse_results(output_dir: Path, instances: list[str], log_path: Path) -> dict:

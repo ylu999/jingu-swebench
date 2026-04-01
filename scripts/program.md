@@ -9,13 +9,26 @@ This loop is the **inner optimization loop** of jingu-swebench.
 The outer goal is to submit a competitive score to the SWE-bench leaderboard via `sb-cli submit`.
 Each loop round improves the agent's patch generation strategy.
 
-## Metric (IMMUTABLE — never modify the definition)
+## Metrics (IMMUTABLE — never modify the definitions)
+
+Primary optimization target:
+```
+resolve_rate = resolved_instances / total_instances
+```
+- `resolved` = patch passes FAIL_TO_PASS tests inside Docker container (fast_eval.py)
+- This is the true signal — closer to leaderboard ground truth
+- Higher is strictly better
+
+Secondary (gate filter, not the optimization target):
 ```
 acceptance_rate = accepted_instances / total_instances
 ```
-- `accepted` = patch passes structural gate + apply gate (optionally ssh test gate)
-- Higher is strictly better
-- Secondary metric: avg_patch_lines (prefer smaller patches at equal acceptance)
+- `accepted` = patch passes Jingu structural gate (format check only)
+- High acceptance_rate with low resolve_rate = gate is too weak
+
+Final truth (used sparingly, not per-round):
+- sb-cli submit → official leaderboard score
+- Use only to validate significant improvements (5+ pp resolve_rate gain)
 
 ## What the Loop Can Modify
 ONLY `scripts/run_with_jingu_gate.py`:
