@@ -342,7 +342,7 @@ function findCandidateFiles(instance: BenchmarkInstance, workspace: Workspace): 
     const totalLines = failToPassFiles.reduce((sum, f) => {
       try { return sum + readFileSync(joinPath(workspace.dir, f), "utf8").split("\n").length } catch { return sum }
     }, 0)
-    if (totalLines >= 50) {
+    if (totalLines >= 10) {
       return failToPassFiles
     }
     // Files are too small — likely wrong __init__.py stubs, fall through to text-based search
