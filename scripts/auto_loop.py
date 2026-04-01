@@ -449,11 +449,44 @@ CLOUD_RESULTS = os.environ.get("CLOUD_RESULTS", "~/jingu-swebench/results")
 CLOUD_PYTHON  = os.environ.get("CLOUD_PYTHON", "~/.local/share/mise/shims/python")
 
 
-def _ssh(cmd: str, timeout: int = 600) -> subprocess.CompletedProcess:
-    """Run a command on cloud desktop via SSH."""
-    return subprocess.run(
+def _ssh(cmd: str, timeout: int = 600, prefix: str = "") -> subprocess.CompletedProcess:
+    """Run a command on cloud desktop via SSH, streaming output in real time."""
+    proc = subprocess.Popen(
         ["ssh", CLOUD_HOST, cmd],
-        capture_output=True, text=True, timeout=timeout
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        text=True,
+    )
+    out_lines = []
+    try:
+        deadline = time.monotonic() + timeout
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                proc.kill()
+                proc.wait()
+                raise subprocess.TimeoutExpired(cmd, timeout)
+            import select as _select
+            rlist, _, _ = _select.select([proc.stdout], [], [], min(remaining, 1.0))
+            if rlist:
+                line = proc.stdout.readline()
+                if line:
+                    out_lines.append(line)
+                    tag = f"  [{prefix}] " if prefix else "  [ssh] "
+                    print(tag + line.rstrip(), flush=True)
+            if proc.poll() is not None:
+                for line in proc.stdout:
+                    out_lines.append(line)
+                    tag = f"  [{prefix}] " if prefix else "  [ssh] "
+                    print(tag + line.rstrip(), flush=True)
+                break
+    except subprocess.TimeoutExpired:
+        raise
+    stdout = "".join(out_lines)
+    return subprocess.CompletedProcess(
+        args=["ssh", CLOUD_HOST, cmd],
+        returncode=proc.wait(),
+        stdout=stdout,
+        stderr="",
     )
 
 
@@ -478,10 +511,10 @@ def run_local_eval(instances: list[str], output_dir: Path, workers: int,
         "~/.toolbox/bin/ada credentials update "
         "--account=235494812052 --provider=conduit "
         "--role=IibsAdminAccess-DO-NOT-DELETE --once",
-        timeout=60
+        timeout=60, prefix="ada"
     )
     if ada.returncode != 0:
-        print(f"  [eval] WARNING: ada refresh failed: {ada.stderr[:100]}")
+        print(f"  [eval] WARNING: ada refresh failed")
     else:
         print(f"  [eval] credentials refreshed")
 
@@ -505,7 +538,7 @@ def run_local_eval(instances: list[str], output_dir: Path, workers: int,
     )
     print(f"  [eval:stage1] patch generation on cloud ({len(instances)} instances)...")
     t0 = time.time()
-    r1 = _ssh(gate_cmd, timeout=max_attempts * len(instances) * 300 + 60)
+    r1 = _ssh(gate_cmd, timeout=max_attempts * len(instances) * 300 + 60, prefix="stage1")
     stage1_time = time.time() - t0
     # Save log locally
     with open(log_path, "w") as lf:
@@ -535,7 +568,7 @@ def run_local_eval(instances: list[str], output_dir: Path, workers: int,
         )
         print(f"  [eval:stage2] fast resolve eval on cloud...")
         t1 = time.time()
-        r2 = _ssh(fast_cmd, timeout=120)
+        r2 = _ssh(fast_cmd, timeout=120, prefix="stage2")
         stage2_time = time.time() - t1
         print(f"  [eval:stage2] done in {stage2_time:.0f}s")
 
