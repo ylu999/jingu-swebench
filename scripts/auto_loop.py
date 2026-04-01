@@ -329,16 +329,17 @@ def run_claude_agent(context: str, round_num: int, timeout_s: int) -> dict:
     print(f"  [loop] result will be written to: {result_path.name}")
     print(f"  [loop] live log: tail -f {log_path}")
 
-    cmd = [CLAUDE_CLI, "--print", "--output-format", "text",
+    # stream-json + --verbose streams one JSON event per line in real time
+    cmd = [CLAUDE_CLI, "--print", "--output-format", "stream-json", "--verbose",
            "--dangerously-skip-permissions", "-p", context]
 
-    stdout_chunks = []
+    text_chunks = []   # accumulated assistant text (for stdout compat)
     stderr_chunks = []
     returncode = -1
 
     try:
+        import select
         with open(log_path, "w", buffering=1) as log_f:
-            import select
             proc = subprocess.Popen(
                 cmd,
                 stdout=subprocess.PIPE,
@@ -359,17 +360,50 @@ def run_claude_agent(context: str, round_num: int, timeout_s: int) -> dict:
                     line = stream.readline()
                     if not line:
                         continue
-                    log_f.write(line)
-                    if stream is proc.stdout:
-                        stdout_chunks.append(line)
-                    else:
+                    if stream is proc.stderr:
                         stderr_chunks.append(line)
+                        log_f.write(line)
+                        continue
+                    # stream-json: parse each event line
+                    try:
+                        ev = json.loads(line)
+                        etype = ev.get("type", "")
+                        if etype == "assistant":
+                            for block in ev.get("message", {}).get("content", []):
+                                if block.get("type") == "text":
+                                    text = block.get("text", "")
+                                    if text:
+                                        text_chunks.append(text)
+                                        for tl in text.splitlines(keepends=True):
+                                            log_f.write(tl)
+                                            print(f"  [agent] {tl.rstrip()}", flush=True)
+                        elif etype == "system" and ev.get("subtype") == "init":
+                            model = ev.get("model", "")
+                            log_f.write(f"[model] {model}\n")
+                            print(f"  [agent:model] {model}", flush=True)
+                        elif etype == "result":
+                            cost = ev.get("total_cost_usd", 0)
+                            turns = ev.get("num_turns", 0)
+                            log_f.write(f"[result] turns={turns} cost=${cost:.4f}\n")
+                            print(f"  [agent:done] turns={turns} cost=${cost:.4f}", flush=True)
+                        # skip hook/tool_use noise from log (write raw line for debugging)
+                        log_f.write(line)
+                    except json.JSONDecodeError:
+                        log_f.write(line)
                 if proc.poll() is not None and not rlist:
-                    # Drain remaining
                     for line in proc.stdout:
-                        log_f.write(line); stdout_chunks.append(line)
+                        log_f.write(line)
+                        try:
+                            ev = json.loads(line)
+                            if ev.get("type") == "assistant":
+                                for block in ev.get("message", {}).get("content", []):
+                                    if block.get("type") == "text":
+                                        text_chunks.append(block.get("text", ""))
+                        except json.JSONDecodeError:
+                            pass
                     for line in proc.stderr:
-                        log_f.write(line); stderr_chunks.append(line)
+                        stderr_chunks.append(line)
+                        log_f.write(line)
                     break
             returncode = proc.wait()
     except FileNotFoundError:
@@ -377,7 +411,7 @@ def run_claude_agent(context: str, round_num: int, timeout_s: int) -> dict:
         print(f"  [loop] Install: npm install -g @anthropic-ai/claude-code")
         sys.exit(1)
 
-    stdout = "".join(stdout_chunks)
+    stdout = "\n".join(text_chunks)
     stderr = "".join(stderr_chunks)
 
     hash_after   = file_hash(TARGET_SCRIPT)
