@@ -851,6 +851,10 @@ def main():
             break
 
         # ── Step 3: Claude Code agent ──────────────────────────────────────────
+        def _phase(label: str):
+            print(f"\n  ── {label}  [{datetime.now().strftime('%H:%M:%S')}] {'─'*(40-len(label))}", flush=True)
+
+        _phase("PHASE 1/3 — agent analysis")
         hash_before = file_hash(TARGET_SCRIPT)
         result      = run_claude_agent(context, round_num, args.claude_timeout)
 
@@ -859,7 +863,8 @@ def main():
         print(f"  EXPECTED:     {result.get('expected_improvement','')[:120]}")
         print(f"  NEXT STEPS:   {result.get('next_steps','')[:120]}")
         if result.get("actions_taken"):
-            print(f"  ACTIONS:      {result['actions_taken']}")
+            for a in result["actions_taken"]:
+                print(f"  ACTION:       {a}")
 
         file_changed = result.get("file_changed", False)
 
@@ -870,16 +875,17 @@ def main():
         rate_old   = last_metric.get("acceptance_rate", 0.0)
 
         if file_changed:
-            print(f"\n  [loop] file changed — running eval to measure delta...")
+            _phase("PHASE 2/3 — patch generation (local Bedrock)")
             out_dir_new = REPO_ROOT / "results" / f"loop_round_{round_num:03d}_new"
             metric_new  = run_cloud_eval(
                 args.instances, out_dir_new, args.workers, args.max_attempts, args.stagger
             )
             rate_new = metric_new["acceptance_rate"]
             improved = rate_new > rate_old
+            _phase("PHASE 3/3 — done")
             print(f"  BEFORE: {rate_old:.1%}   AFTER: {rate_new:.1%}   {'↑ IMPROVED' if improved else '↓ NO IMPROVEMENT'}")
         else:
-            print(f"  [loop] no file change — skipping re-eval")
+            print(f"\n  [loop] no file change — skipping eval")
 
         # ── Step 5: Commit or rollback ─────────────────────────────────────────
         committed = False
