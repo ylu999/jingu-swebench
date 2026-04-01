@@ -245,8 +245,8 @@ export async function runJingu(
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
     const candidate = await propose(instance, attempt, { previousFeedback, fileContents, strategy: effectiveStrategy ?? rawStrategy })
 
-    // Gate 1: structural (pass injected files for grounding compliance check)
-    const sg = structuralGate(candidate.patchText, strategyCtx.injectedFiles)
+    // Gate 1: structural (pass injected files + filesTouched for grounding compliance check)
+    const sg = structuralGate(candidate.patchText, strategyCtx.injectedFiles, candidate.filesTouched)
     if (sg.status === "fail") {
       const ar: AttemptResult = { attempt, candidate, structuralGate: sg, accepted: false, strategyResolution }
       attempts.push(ar)
