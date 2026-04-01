@@ -66,7 +66,15 @@ function buildTestCommand(repo: string, failToPass: string[]): string {
   }
 
   // Generic: use pytest with explicit node ids
-  const nodeIds = failToPass.join(" ")
+  // For bare test names (e.g. SymPy: "test_ccode_sinc"), find the test file first
+  const nodeIds = failToPass.map((t) => {
+    if (/^\w+$/.test(t) && t.startsWith("test_")) {
+      // Bare name: find file containing this function, then use file::funcname
+      // This is resolved at command-build time via shell substitution
+      return `$(grep -rl "def ${t}\\b" --include="test_*.py" 2>/dev/null | head -1)::${t}`
+    }
+    return t
+  }).join(" ")
   return `python -m pytest -x -q --tb=short ${nodeIds} 2>&1 || true`
 }
 
@@ -101,6 +109,15 @@ function failToPassTestsExistInWorkspace(workspace: Workspace, failToPass: strin
         }
       }
       if (!foundInSpecificFile) return false
+      continue
+    }
+    // Bare test name: "test_ccode_sinc" — no path, no module (used by SymPy and others)
+    // If it's just a test function name with no path separators, grep the whole repo
+    if (/^\w+$/.test(t) && t.startsWith("test_")) {
+      const searchResult = workspace.exec(
+        `git grep -l "def ${t}\\b" -- "**/test_*.py" 2>/dev/null | head -1`
+      )
+      if (!searchResult.stdout.trim()) return false
       continue
     }
     // Pytest format: "path/to/test.py::TestClass::test_method" or "path/to/test.py::test_func[param]"
