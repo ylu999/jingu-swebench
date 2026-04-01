@@ -637,6 +637,35 @@ function extractAnchors(instance: BenchmarkInstance): string[] {
   return [...anchors].slice(0, 10)
 }
 
+// Extract a test function body from a FAIL_TO_PASS test id.
+// For pytest format: "path/to/test.py::TestClass::test_method" or "path/to/test.py::test_func[param]"
+// Returns {file, snippet} or null if not found.
+function extractTestSnippet(workspace: Workspace, testId: string): { file: string; snippet: string } | null {
+  const pytestMatch = testId.match(/^([^:]+\.py)(?:::(\w+))?(?:::(\w+(?:\[.*\])?))?$/)
+  if (!pytestMatch) return null
+  const testFile = pytestMatch[1]
+  const funcName = pytestMatch[3]?.replace(/\[.*\]$/, "") ?? pytestMatch[2]?.replace(/\[.*\]$/, "")
+  if (!funcName) return null
+
+  const abs = joinPath(workspace.dir, testFile)
+  if (!existsSync(abs)) return null
+  try {
+    const lines = readFileSync(abs, "utf8").split("\n")
+    const startIdx = lines.findIndex((l) => l.match(new RegExp(`^\\s*def\\s+${funcName}\\b`)))
+    if (startIdx < 0) return null
+    const baseIndent = lines[startIdx].match(/^(\s*)/)?.[1].length ?? 0
+    let endIdx = startIdx + 1
+    while (endIdx < lines.length && endIdx < startIdx + 60) {
+      const line = lines[endIdx]
+      if (line.trim() === "") { endIdx++; continue }
+      const indent = line.match(/^(\s*)/)?.[1].length ?? 0
+      if (indent <= baseIndent && line.trim().match(/^(def |class )/)) break
+      endIdx++
+    }
+    return { file: testFile, snippet: lines.slice(startIdx, Math.min(endIdx, startIdx + 50)).join("\n") }
+  } catch { return null }
+}
+
 export async function runJingu(
   instance: BenchmarkInstance,
   workspaceBase: string,
@@ -844,6 +873,23 @@ export async function runJingu(
       attempts.push(ar)
       console.log(`  [jingu] attempt=${attempt} FAIL test (${tg.code})`)
       previousFeedback = buildRetryFeedback(ar, workspace, retryOpts)
+      // TESTS_NOT_IMPROVED: inject test function snippet so LLM knows the expected behavior.
+      // Only do this once (attempt 1) to avoid bloating context on all retries.
+      if (tg.code === "TESTS_NOT_IMPROVED" && attempt === 1 && instance.failToPass && instance.failToPass.length > 0) {
+        const seenFuncs = new Set<string>()
+        const testSnippets: string[] = []
+        for (const testId of instance.failToPass.slice(0, 3)) {
+          const result = extractTestSnippet(workspace, testId)
+          if (result && !seenFuncs.has(result.file + ":" + testId.split("::").pop())) {
+            seenFuncs.add(result.file + ":" + testId.split("::").pop())
+            testSnippets.push(`### ${result.file}\n\`\`\`python\n${result.snippet}\n\`\`\``)
+          }
+        }
+        if (testSnippets.length > 0) {
+          previousFeedback += "\n\n## Failing Test (expected behavior reference — DO NOT MODIFY this test):\n" + testSnippets.join("\n\n")
+          console.log(`  [jingu] injecting test snippet for retry (${seenFuncs.size} test(s))`)
+        }
+      }
       continue
     }
 
