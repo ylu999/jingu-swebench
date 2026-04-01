@@ -167,6 +167,12 @@ function findFilesFromFailToPass(instance: BenchmarkInstance, workspace: Workspa
       if (!existsSync(abs)) continue
       try {
         const content = readFileSync(abs, "utf8")
+        // Only use imports from test files that actually contain the failing test class/method.
+        // If the test was ADDED by the fix commit, the base file has irrelevant imports.
+        // Check: if any test class from testClasses appears in this file
+        const fileContainsTargetTest = [...testClasses].some((cls) => content.includes(cls))
+        if (!fileContainsTargetTest) break  // test class not in this file — imports are irrelevant
+
         // Single-line imports only: "from django.X import Y" — avoid multiline capture
         for (const m of content.matchAll(/^from\s+([\w.]+)\s+import\s+/gm)) {
           const srcMod = m[1]
