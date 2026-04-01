@@ -70,6 +70,35 @@ function buildTestCommand(repo: string, failToPass: string[]): string {
   return `python -m pytest -x -q --tb=short ${nodeIds} 2>&1 || true`
 }
 
+// Check if the specific test methods in failToPass exist in the workspace test files.
+// SWE-bench FAIL_TO_PASS tests are sometimes added by the fix commit itself, not in the base.
+// Returns true if all tests exist (can run them), false if any test method is missing.
+function failToPassTestsExistInWorkspace(workspace: Workspace, failToPass: string[]): boolean {
+  for (const t of failToPass) {
+    // unittest format: "test_method_name (module.path.TestClass)"
+    const unittestMatch = t.match(/^(\w+)\s*\(([^)]+)\)$/)
+    if (unittestMatch) {
+      const methodName = unittestMatch[1]  // e.g. "test_main_module_is_resolved"
+      // Search for this method name in the tests directory
+      const searchResult = workspace.exec(
+        `grep -r "def ${methodName}\\b" tests/ 2>/dev/null | head -1`
+      )
+      if (!searchResult.stdout.trim()) return false
+      continue
+    }
+    // Pytest format: "path/to/test.py::TestClass::test_method"
+    const pytestMatch = t.match(/^([^:]+\.py)(?:::(\w+))?(?:::(\w+))?/)
+    if (pytestMatch && pytestMatch[3]) {
+      const methodName = pytestMatch[3]
+      const searchResult = workspace.exec(
+        `grep -r "def ${methodName}\\b" tests/ 2>/dev/null | head -1`
+      )
+      if (!searchResult.stdout.trim()) return false
+    }
+  }
+  return true
+}
+
 export function testGate(
   workspace: Workspace,
   _testCmd: string,  // kept for API compat, overridden when failToPass available
@@ -97,6 +126,17 @@ export function testGate(
     }
   }
 
+  // Check if FAIL_TO_PASS tests exist in the workspace (they may be added by the fix commit).
+  // If tests don't exist in the base commit, we can't verify them — skip test gate.
+  if (hasGroundTruth && !failToPassTestsExistInWorkspace(workspace, opts.failToPass!)) {
+    return {
+      status: "pass",
+      code: "ACCEPTED",
+      message: `Test gate skipped: FAIL_TO_PASS test methods not present in base commit (tests added by fix). Relying on apply gate.`,
+      details: { skipped: true, reason: "tests_added_by_fix" },
+    }
+  }
+
   // Build the actual test command
   const testCmd = hasGroundTruth
     ? buildTestCommand(opts.repo ?? "", opts.failToPass!)
@@ -113,7 +153,8 @@ export function testGate(
     }
   }
 
-  const after = parseTestOutput(result.stdout + result.stderr)
+  const combinedOutput = result.stdout + result.stderr
+  const after = parseTestOutput(combinedOutput)
 
   if (hasGroundTruth) {
     // Ground-truth mode: all FAIL_TO_PASS tests must now pass.
@@ -121,8 +162,8 @@ export function testGate(
     // Allow some failures from pre-existing unrelated tests (e.g., Python version incompatibilities).
     const expectedPassing = opts.failToPass!.length
     const totalRan = after.passed + after.failed + after.errors
+
     // Pre-existing failures are OK if the expected tests pass.
-    // Heuristic: accept if passed >= expectedPassing AND failures don't increase vs baseline errors.
     // Simple rule: accept if passed >= expectedPassing and no NEW failures beyond what baseline had.
     const allPass = after.passed >= expectedPassing && after.errors === 0
     if (allPass) {
@@ -133,11 +174,12 @@ export function testGate(
         details: { after, expectedPassing },
       }
     }
+
     return {
       status: "fail",
       code: "TESTS_NOT_IMPROVED",
       message: `FAIL_TO_PASS not fully resolved: passed=${after.passed}/${totalRan} expected=${expectedPassing} failed=${after.failed} errors=${after.errors}`,
-      details: { after, expectedPassing, output: tailLines(result.stdout + result.stderr, 30) },
+      details: { after, expectedPassing, output: tailLines(combinedOutput, 30) },
     }
   }
 

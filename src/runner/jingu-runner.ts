@@ -8,7 +8,7 @@ import { testGate, runTestsBaseline, type TestCounts } from "../admission/test-g
 import { buildRetryFeedback } from "../admission/retry-feedback.js"
 import { Workspace } from "../workspace/workspace.js"
 import { join } from "node:path"
-import { existsSync, readFileSync } from "node:fs"
+import { existsSync, readFileSync, readdirSync } from "node:fs"
 import { join as joinPath } from "node:path"
 
 const MAX_ATTEMPTS = 3
@@ -175,6 +175,62 @@ function findFilesFromFailToPass(instance: BenchmarkInstance, workspace: Workspa
       } catch { /* skip */ }
       break
     }
+
+    // Derive source directory from test module path directly.
+    // Pattern: "{app}_tests.test_{module}" → look in "{repoModule}/{app}/{module}/" or "{repoModule}/{app}/"
+    // Pattern: "migrations.test_{X}" → look in "{repoModule}/db/migrations/"
+    // This catches cases where test imports lead to the wrong file (e.g. wrong contenttypes import)
+    const parts = mod.split(".")
+    if (parts.length >= 1) {
+      const first = parts[0]  // e.g. "auth_tests", "check_framework", "migrations"
+      const last = parts[parts.length - 1]  // e.g. "test_migrations", "test_model_checks"
+
+      // "{app}_tests" → "{repoModule}/{app}/"
+      const appMatch = first.match(/^([a-z_]+?)_tests$/)
+      if (appMatch) {
+        const app = appMatch[1]  // e.g. "auth", "utils", "invalid_models" → but we need to map
+        // Try finding directory: e.g. "utils" → look for django/utils/, or auth → django/contrib/auth/
+        const appSubDir = app.replace(/_/g, "/")  // e.g. "invalid_models" → "invalid/models" (not useful, try appDir)
+        const possibleDirs = [
+          `${repoModule}/${app}`,
+          `${repoModule}/contrib/${app}`,
+          `${repoModule}/db/${app}`,
+          `${repoModule}/core/${app}`,
+        ]
+        for (const dir of possibleDirs) {
+          if (existsSync(joinPath(workspace.dir, dir))) {
+            // If test is about migrations specifically, look in migrations/ subdir
+            if (last.includes("migration")) {
+              const migDir = dir + "/migrations"
+              if (existsSync(joinPath(workspace.dir, migDir))) {
+                sourceModulePaths.add(migDir.replace(/\//g, "."))
+              }
+            }
+            // Add the module path with last test part as hint
+            const testSubject = last.replace(/^test_/, "")  // e.g. "model_checks", "autoreload"
+            const subjectPath = testSubject.replace(/_/g, "/")  // won't work for multi-word but worth trying
+            sourceModulePaths.add(dir.replace(/\//g, ".") + "." + testSubject)
+            sourceModulePaths.add(dir.replace(/\//g, "."))
+            break
+          }
+        }
+      }
+
+      // "check_framework.test_X" → look in "{repoModule}/core/checks/"
+      if (first === "check_framework") {
+        sourceModulePaths.add(`${repoModule}.core.checks`)
+      }
+      // "migrations.test_X" → look in "{repoModule}/db/migrations/"
+      if (first === "migrations" && parts.length >= 2) {
+        sourceModulePaths.add(`${repoModule}.db.migrations`)
+      }
+      // "invalid_models_tests.test_X" → look in "{repoModule}/db/models/"
+      if (first === "invalid_models_tests") {
+        const testSubject = last.replace(/^test_/, "")  // e.g. "ordinary_fields"
+        sourceModulePaths.add(`${repoModule}.db.models.fields`)
+        sourceModulePaths.add(`${repoModule}.db.models`)
+      }
+    }
   }
 
   // Determine search scope: prefer narrowing to directories of modules referenced in test imports
@@ -183,7 +239,10 @@ function findFilesFromFailToPass(instance: BenchmarkInstance, workspace: Workspa
   // Falls back to repo module root if no source modules found
   const searchDirs: string[] = []
   for (const srcMod of [...sourceModulePaths].slice(0, 4)) {
-    searchDirs.push(srcMod.replace(/\./g, "/") + "/")
+    const dirPath = srcMod.replace(/\./g, "/")
+    if (existsSync(joinPath(workspace.dir, dirPath))) {
+      searchDirs.push(dirPath + "/")
+    }
   }
   if (searchDirs.length === 0 && repoModule) {
     searchDirs.push(repoModule + "/")
@@ -212,14 +271,51 @@ function findFilesFromFailToPass(instance: BenchmarkInstance, workspace: Workspa
   // Prefer the deepest (most specific) module that resolves to a file.
   if (sourceFiles.size === 0 && sourceModulePaths.size > 0) {
     const sorted = [...sourceModulePaths].sort((a, b) => b.split(".").length - a.split(".").length)
-    for (const mod of sorted.slice(0, 3)) {
+    for (const mod of sorted.slice(0, 5)) {
       const modPath = mod.replace(/\./g, "/")
+      // First: try exact file
       for (const suffix of [".py", "/__init__.py"]) {
         const candidate = modPath + suffix
         if (existsSync(joinPath(workspace.dir, candidate)) && !candidate.includes("test")) {
-          sourceFiles.add(candidate)
-          break
+          // Skip tiny __init__.py files (< 20 lines) — usually empty
+          try {
+            const lineCount = readFileSync(joinPath(workspace.dir, candidate), "utf8").split("\n").length
+            if (lineCount >= 20 || !candidate.endsWith("__init__.py")) {
+              sourceFiles.add(candidate)
+              break
+            }
+          } catch { /* skip */ }
         }
+      }
+      if (sourceFiles.size > 0) break
+
+      // If it's a directory, list files and pick the most relevant:
+      // - For migrations: last file (highest migration number)
+      // - For checks/models/etc: file matching test module subject name
+      const dirPath = modPath
+      if (existsSync(joinPath(workspace.dir, dirPath))) {
+        try {
+          const entries = readdirSync(joinPath(workspace.dir, dirPath))
+            .filter((f) => f.endsWith(".py") && !f.includes("test") && f !== "__init__.py")
+            .sort()  // alphabetical
+          if (entries.length > 0) {
+            // Try to find file matching test module subject (e.g. "model_checks" → "models.py")
+            // Extract subject keywords from test module names
+            const subjectKeywords: string[] = []
+            for (const tm of testModules) {
+              const parts = tm.split(".")
+              const last = parts[parts.length - 1].replace(/^test_/, "")  // e.g. "model_checks"
+              subjectKeywords.push(...last.split("_"))  // ["model", "checks"]
+            }
+            const match = entries.find((e) =>
+              subjectKeywords.some((kw) => kw.length >= 4 && e.includes(kw))
+            )
+            // For migration dirs: pick last entry (highest number)
+            const isMigrationDir = dirPath.includes("migration")
+            sourceFiles.add(`${dirPath}/${match ?? (isMigrationDir ? entries[entries.length - 1] : entries[0])}`)
+          }
+        } catch { /* skip */ }
+        if (sourceFiles.size > 0) break
       }
     }
   }
