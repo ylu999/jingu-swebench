@@ -190,8 +190,12 @@ export async function runJingu(
     const fuzz = (ag.details?.apply_strictness === "fuzz") ? 5 : 0
     workspace.applyPatchForReal(candidate.patchText, fuzz)
 
-    // Gate 3: test delta
-    const tg = testGate(workspace, TEST_CMD, baseline, { skipIfNoBaseline: opts.skipTestGate })
+    // Gate 3: test delta (use FAIL_TO_PASS ground truth when available)
+    const tg = testGate(workspace, TEST_CMD, baseline, {
+      skipIfNoBaseline: opts.skipTestGate,
+      failToPass: instance.failToPass,
+      repo: instance.repo,
+    })
     workspace.reset() // always reset after test run
 
     if (tg.status === "fail") {

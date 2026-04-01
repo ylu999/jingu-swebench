@@ -18,6 +18,10 @@ interface HFRow {
     base_commit: string
     problem_statement: string
     hints_text?: string
+    // SWE-bench ground truth (JSON-encoded string arrays)
+    FAIL_TO_PASS?: string
+    PASS_TO_PASS?: string
+    version?: string
   }
 }
 
@@ -40,6 +44,8 @@ async function fetchPage(dataset: string, offset: number, length: number): Promi
     baseCommit: r.row.base_commit,
     problemStatement: r.row.problem_statement,
     hintsText: r.row.hints_text ?? undefined,
+    failToPass: r.row.FAIL_TO_PASS ? JSON.parse(r.row.FAIL_TO_PASS) as string[] : undefined,
+    version: r.row.version ?? undefined,
   }))
 }
 

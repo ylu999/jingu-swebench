@@ -5,6 +5,10 @@ export type BenchmarkInstance = {
   baseCommit: string
   problemStatement: string
   hintsText?: string
+  // SWE-bench ground truth: test IDs that must go from FAIL → PASS
+  failToPass?: string[]
+  // version string used to pick correct test runner
+  version?: string
 }
 
 // proposer output
@@ -24,6 +28,7 @@ export type GateResult = {
     | "PARSE_FAILED"
     | "PATCH_APPLY_FAILED"
     | "TEST_EXEC_FAILED"
+    | "TEST_HARNESS_UNAVAILABLE"
     | "TESTS_NOT_IMPROVED"
     | "ACCEPTED"
   message: string
