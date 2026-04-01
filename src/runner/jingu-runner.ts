@@ -195,20 +195,28 @@ export async function runJingu(
   const t0 = Date.now()
   console.log(`[jingu] ${instance.instanceId}`)
 
-  const wsDir = opts.wsDir ?? join(workspaceBase, instance.instanceId.replace(/\//g, "__"))
+  const instanceSlug = instance.instanceId.replace(/\//g, "__")
+  const wsDir = opts.wsDir ?? join(workspaceBase, instanceSlug)
+  // Shared clone cache: workspaceBase/__cache__/<instanceSlug>
+  // All strategy workspaces cp -r from this single clone — no repeated network transfers
+  const cacheDir = join(workspaceBase, "__cache__", instanceSlug)
   let workspace: Workspace
 
   if (existsSync(join(wsDir, ".git"))) {
-    // Already cloned — reset to base commit
+    // Already exists — reset to base commit
     workspace = new Workspace(wsDir)
     workspace.exec(`git checkout ${instance.baseCommit}`, { throws: true })
     workspace.reset()
     console.log(`  [jingu] workspace reused, reset to ${instance.baseCommit.slice(0, 8)}`)
   } else {
-    // Clone from GitHub
+    // Clone once to cache, then cp -r to strategy workspace
     const repoUrl = `https://github.com/${instance.repo}.git`
-    console.log(`  [jingu] cloning ${repoUrl} ...`)
-    workspace = Workspace.checkout(repoUrl, instance.baseCommit, wsDir)
+    if (!existsSync(join(cacheDir, ".git"))) {
+      console.log(`  [jingu] cloning ${repoUrl} ...`)
+    } else {
+      console.log(`  [jingu] cache hit, copying to workspace...`)
+    }
+    workspace = Workspace.checkoutFromCache(repoUrl, instance.baseCommit, wsDir, cacheDir)
     console.log(`  [jingu] checkout done @ ${instance.baseCommit.slice(0, 8)}`)
   }
 

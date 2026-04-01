@@ -80,6 +80,33 @@ export class Workspace {
     return ws
   }
 
+  // Clone once into a shared cache dir, then cp -r to each strategy workspace.
+  // Much faster than cloning N times — avoids redundant network transfers.
+  static checkoutFromCache(repoUrl: string, baseCommit: string, targetDir: string, cacheDir: string): Workspace {
+    // Step 1: ensure cache exists (clone once)
+    if (!existsSync(join(cacheDir, ".git"))) {
+      mkdirSync(cacheDir, { recursive: true })
+      execSync(`git clone --no-local "${repoUrl}" "${cacheDir}"`, {
+        stdio: "pipe",
+        timeout: 300_000,
+      })
+      const cache = new Workspace(cacheDir)
+      cache.exec(`git fetch origin ${baseCommit} 2>/dev/null || true`)
+      cache.exec(`git checkout ${baseCommit}`, { throws: true })
+      cache.reset()
+    }
+
+    // Step 2: copy cache → target (fast local copy, no network)
+    if (!existsSync(targetDir)) {
+      execSync(`cp -r "${cacheDir}" "${targetDir}"`, { stdio: "pipe" })
+    }
+
+    const ws = new Workspace(targetDir)
+    ws.exec(`git checkout ${baseCommit}`, { throws: true })
+    ws.reset()
+    return ws
+  }
+
   // For Day 1: create a fake workspace from local path (no clone needed)
   static fromLocalPath(dir: string): Workspace {
     if (!existsSync(dir)) {
