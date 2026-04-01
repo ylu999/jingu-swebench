@@ -30,7 +30,9 @@ Before writing any patch, answer these three questions in a <analysis> block:
 
 - After the <analysis> block, output the patch in unified diff format (--- / +++ / @@ lines)
 - The patch must apply cleanly with "git apply" against the EXACT file content shown
-- Use the exact lines from the provided file content as context lines in the patch
+- CRITICAL: Use ONLY the exact lines from the provided file content as context lines in the patch
+- If a file is marked "⚠️ PARTIAL FILE: showing lines N–M only", use ONLY lines from that range as context
+- Do NOT guess or reconstruct lines outside the shown range — you will cause an apply failure
 - Touch ONLY production source files (no test files, no docs, no migrations)
 - Modify AT MOST ONE file — the single most targeted fix
 - Do NOT add new test cases or modify existing tests`
@@ -55,7 +57,15 @@ export function buildUserPrompt(
 
   if (opts.fileContents && Object.keys(opts.fileContents).length > 0) {
     const fileSection = Object.entries(opts.fileContents)
-      .map(([path, content]) => `### ${path}\n\`\`\`\n${content}\n\`\`\``)
+      .map(([path, content]) => {
+        // Check if this is a truncated window — content ends with "... (lines N–M of T, anchored on ...)"
+        const truncNote = content.match(/\.\.\. \(lines (\d+)–(\d+) of (\d+)[^)]*\)$/)
+        if (truncNote) {
+          const [, start, end] = truncNote
+          return `### ${path}\n⚠️ PARTIAL FILE: showing lines ${start}–${end} only. Use ONLY these lines as context.\n\`\`\`\n${content}\n\`\`\``
+        }
+        return `### ${path}\n\`\`\`\n${content}\n\`\`\``
+      })
       .join("\n\n")
     parts.push(`## Relevant File Contents\n${fileSection}`)
   }

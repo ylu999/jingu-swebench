@@ -323,21 +323,28 @@ function rankBySize(workspace: Workspace, filePaths: string[]): string[] {
 }
 
 // Extract symbol anchors for window-based file injection.
-// Sources: backtick identifiers from problem statement + method names from FAIL_TO_PASS.
+// Sources: backtick identifiers from problem statement + SOURCE class/method names from FAIL_TO_PASS.
+// Note: test class names (e.g. "CharFieldTests") are stripped to source names ("CharField")
+// so extractRelevantWindow can locate the correct code region in the injected file.
 function extractAnchors(instance: BenchmarkInstance): string[] {
   const anchors = new Set<string>()
   // Backtick identifiers in problem statement
   for (const m of instance.problemStatement.matchAll(/`([A-Za-z_]\w{3,})`/g)) anchors.add(m[1])
-  // Method/class names from FAIL_TO_PASS: "test_foo (module.TestClass)" → "test_foo", "TestClass"
+  // Method/class names from FAIL_TO_PASS: "test_foo (module.TestClass)" → test_foo, CharField (stripped)
   for (const t of instance.failToPass ?? []) {
     const m = t.match(/^(\w+)\s*\(([^)]+)\)/)
     if (m) {
-      anchors.add(m[1])  // test method name
+      anchors.add(m[1])  // test method name (e.g. test_choices_in_max_length)
       const parts = m[2].split(".")
-      anchors.add(parts[parts.length - 1])  // class name
+      const testClassName = parts[parts.length - 1]
+      // Add test class name as-is (might match in test files)
+      anchors.add(testClassName)
+      // Also add stripped source class name (e.g. "CharFieldTests" → "CharField")
+      const stripped = testClassName.replace(/TestCase$/, "").replace(/Tests$/, "").replace(/^Test/, "")
+      if (stripped.length >= 3 && stripped !== testClassName) anchors.add(stripped)
     }
   }
-  return [...anchors].slice(0, 8)
+  return [...anchors].slice(0, 10)
 }
 
 export async function runJingu(

@@ -1,6 +1,14 @@
 import type { AttemptResult } from "../types/contracts.js"
 import type { Workspace } from "../workspace/workspace.js"
 
+// Extract the target line number from a patch hunk header: "@@ -N,n +M,m @@"
+// Returns the original file line number (from -N) for finding the relevant region.
+function extractHunkLineNumber(patchText: string): number | null {
+  const m = patchText.match(/@@ -(\d+)(?:,\d+)? \+(\d+)/)
+  if (!m) return null
+  return parseInt(m[1], 10)
+}
+
 export function buildRetryFeedback(
   attempt: AttemptResult,
   workspace?: Workspace,
@@ -34,13 +42,26 @@ export function buildRetryFeedback(
     }
     if (workspace) {
       for (const file of touched) {
-        const preview = workspace.exec(`head -40 "${file}"`).stdout
-        if (preview) {
-          lines.push(`\nCurrent state of ${file} (first 40 lines):\n${preview}`)
+        // Extract the hunk's target line number from the patch header (@@ -N,n +N,n @@)
+        // to show the actual file content around that region, not just head -40
+        const hunkLineNum = extractHunkLineNumber(patchHead)
+        if (hunkLineNum !== null) {
+          const start = Math.max(1, hunkLineNum - 5)
+          const count = 50
+          const preview = workspace.exec(`sed -n '${start},${start + count}p' "${file}"`).stdout
+          if (preview) {
+            lines.push(`\nActual file content of ${file} (lines ${start}–${start + count}):\n${preview}`)
+            lines.push("Use ONLY these exact lines as context lines in your patch.")
+          }
+        } else {
+          const preview = workspace.exec(`head -60 "${file}"`).stdout
+          if (preview) {
+            lines.push(`\nCurrent state of ${file} (first 60 lines):\n${preview}`)
+          }
         }
       }
     }
-    lines.push("\nPlease produce a corrected patch. Focus only on the failing hunk.")
+    lines.push("\nPlease produce a corrected patch. Use ONLY the exact lines shown above as context lines.")
 
     // feedback-grounded: inject grounding constraint here (not in first-shot prompt)
     if (opts.verificationPolicy === "feedback-grounded") {
