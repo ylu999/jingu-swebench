@@ -40,6 +40,7 @@ type StrategyMetrics = {
   durationMs: number
   applyFailCount: number
   parseFailCount: number
+  resolution?: { status: "valid" | "degraded"; reason?: string }
 }
 
 type Row = {
@@ -110,6 +111,8 @@ async function runInstance(instance: BenchmarkInstance, wsBase: string, predicti
       ? r.runResult.finalPatchText.split("\n").filter((l) => (l.startsWith("+") || l.startsWith("-")) && !l.startsWith("+++") && !l.startsWith("---")).length
       : 0
     const { applyFailCount, parseFailCount } = collectAttemptMetrics(r.runResult.attempts)
+    // Pick resolution from first attempt that has it (strategy-level, not per-attempt)
+    const resolution = r.runResult.attempts.find((a) => a.strategyResolution)?.strategyResolution
     strategyStats[r.strategyId] = {
       verdict: r.verdict,
       score: r.score,
@@ -117,6 +120,7 @@ async function runInstance(instance: BenchmarkInstance, wsBase: string, predicti
       durationMs: r.runResult.durationMs,
       applyFailCount,
       parseFailCount,
+      resolution,
     }
   }
 
@@ -125,7 +129,8 @@ async function runInstance(instance: BenchmarkInstance, wsBase: string, predicti
 
   console.log(`[${ts()}]   done in ${(instanceDuration / 1000).toFixed(1)}s — accepted=${acceptedCount}/${strategySet.length} best=${best?.strategyId ?? "none"}`)
   for (const [id, s] of Object.entries(strategyStats)) {
-    console.log(`[${ts()}]     ${id}: ${s.verdict} patchLines=${s.patchLines} score=${s.score} applyFail=${s.applyFailCount} parseFail=${s.parseFailCount} (${(s.durationMs / 1000).toFixed(1)}s)`)
+    const resTag = s.resolution?.status === "degraded" ? ` [degraded:${s.resolution.reason}]` : ""
+    console.log(`[${ts()}]     ${id}: ${s.verdict} patchLines=${s.patchLines} score=${s.score} applyFail=${s.applyFailCount} parseFail=${s.parseFailCount}${resTag} (${(s.durationMs / 1000).toFixed(1)}s)`)
   }
 
   if (best?.runResult.finalPatchText) {

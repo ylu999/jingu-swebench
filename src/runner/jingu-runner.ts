@@ -1,5 +1,6 @@
 import type { BenchmarkInstance, InstanceRunResult, AttemptResult } from "../types/contracts.js"
 import type { SearchStrategy } from "../types/strategy.js"
+import { resolveStrategy } from "./strategy-resolver.js"
 import { propose } from "../proposer/proposer-adapter.js"
 import { structuralGate } from "../admission/structural-gate.js"
 import { applyGate } from "../admission/apply-gate.js"
@@ -224,17 +225,30 @@ export async function runJingu(
     console.log(`  [jingu] injecting files: ${Object.keys(fileContents).join(", ")}`)
   }
 
+  // Resolve strategy against runtime context (after file injection is known).
+  // This handles the Layer A → Layer C dependency:
+  //   if no files injected + strict-observed-only → downgrade to "standard"
+  const strategyCtx = { injectedFiles: Object.keys(fileContents) }
+  const rawStrategy = opts.strategy
+  const { effectiveStrategy, status: resStatus, reason: resReason } =
+    rawStrategy ? resolveStrategy(rawStrategy, strategyCtx) : { effectiveStrategy: undefined, status: "valid" as const, reason: undefined }
+  if (resStatus === "degraded") {
+    console.log(`  [proposer] strategy degraded: ${resReason} (${rawStrategy?.id})`)
+  }
+
   const attempts: AttemptResult[] = []
   let previousFeedback: string | undefined
   let finalPatchText: string | undefined
 
+  const strategyResolution = resStatus !== "valid" ? { status: resStatus, reason: resReason } : undefined
+
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
-    const candidate = await propose(instance, attempt, { previousFeedback, fileContents, strategy: opts.strategy })
+    const candidate = await propose(instance, attempt, { previousFeedback, fileContents, strategy: effectiveStrategy ?? rawStrategy })
 
     // Gate 1: structural
     const sg = structuralGate(candidate.patchText)
     if (sg.status === "fail") {
-      const ar: AttemptResult = { attempt, candidate, structuralGate: sg, accepted: false }
+      const ar: AttemptResult = { attempt, candidate, structuralGate: sg, accepted: false, strategyResolution }
       attempts.push(ar)
       console.log(`  [jingu] attempt=${attempt} FAIL structural (${sg.code})`)
       previousFeedback = buildRetryFeedback(ar)
@@ -244,7 +258,7 @@ export async function runJingu(
     // Gate 2: apply
     const ag = applyGate(workspace, candidate.patchText)
     if (ag.status === "fail") {
-      const ar: AttemptResult = { attempt, candidate, structuralGate: sg, applyGate: ag, accepted: false }
+      const ar: AttemptResult = { attempt, candidate, structuralGate: sg, applyGate: ag, accepted: false, strategyResolution }
       attempts.push(ar)
       console.log(`  [jingu] attempt=${attempt} FAIL apply (${ag.code})`)
       previousFeedback = buildRetryFeedback(ar, workspace)
@@ -265,7 +279,7 @@ export async function runJingu(
     workspace.reset() // always reset after test run
 
     if (tg.status === "fail") {
-      const ar: AttemptResult = { attempt, candidate, structuralGate: sg, applyGate: ag, testGate: tg, accepted: false }
+      const ar: AttemptResult = { attempt, candidate, structuralGate: sg, applyGate: ag, testGate: tg, accepted: false, strategyResolution }
       attempts.push(ar)
       console.log(`  [jingu] attempt=${attempt} FAIL test (${tg.code})`)
       previousFeedback = buildRetryFeedback(ar, workspace)
@@ -273,7 +287,7 @@ export async function runJingu(
     }
 
     // All gates passed
-    const ar: AttemptResult = { attempt, candidate, structuralGate: sg, applyGate: ag, testGate: tg, accepted: true }
+    const ar: AttemptResult = { attempt, candidate, structuralGate: sg, applyGate: ag, testGate: tg, accepted: true, strategyResolution }
     attempts.push(ar)
     finalPatchText = candidate.patchText
     console.log(`  [jingu] attempt=${attempt} ACCEPTED`)

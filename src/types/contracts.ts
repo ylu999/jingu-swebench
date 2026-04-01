@@ -43,6 +43,8 @@ export type AttemptResult = {
   applyGate?: GateResult
   testGate?: GateResult
   accepted: boolean
+  // Strategy resolution result for this attempt (set when strategy was resolved/degraded)
+  strategyResolution?: { status: "valid" | "degraded"; reason?: string }
 }
 
 // per-instance final result
