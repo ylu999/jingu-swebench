@@ -12,9 +12,7 @@
     "evaluate": "python scripts/evaluate.py"
   },
   "dependencies": {
-    "@aws-sdk/client-bedrock-runtime": "^3.0.0",
-    "@aws-sdk/client-cloudwatch-logs": "^3.1021.0",
-    "@aws-sdk/client-ecs": "^3.1021.0"
+    "@aws-sdk/client-bedrock-runtime": "^3.0.0"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",
