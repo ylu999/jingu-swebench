@@ -1,0 +1,32 @@
+{
+  "label": "mini-SWE-agent baseline (no Jingu features)",
+  "date": "2026-04-01",
+  "script_commit": "HEAD (e6347ed)",
+  "config": {
+    "model": "bedrock/global.anthropic.claude-sonnet-4-5-20250929-v1:0",
+    "max_attempts": 1,
+    "workers": 4,
+    "stagger": 5,
+    "step_limit": 100
+  },
+  "instances": [
+    "django__django-11039",
+    "django__django-11001",
+    "django__django-11019",
+    "django__django-11049",
+    "django__django-11099"
+  ],
+  "results": {
+    "resolve_rate": 0.8,
+    "resolved": 4,
+    "total": 5,
+    "resolved_ids": ["django__django-11001", "django__django-11039", "django__django-11049", "django__django-11099"],
+    "failed_ids": ["django__django-11019"]
+  },
+  "cost": {
+    "total_usd": 3.0228,
+    "avg_per_instance_usd": 0.6046,
+    "wall_time_s": 393
+  },
+  "note": "Pure mini-SWE-agent + structural Jingu gate only. No retry, no policy, no trust gate, no governance. This is the floor — Jingu features should improve on this."
+}

@@ -83,13 +83,13 @@ DOCS_DIR      = REPO_ROOT / "docs" / "swebench"
 
 CLAUDE_CLI    = os.environ.get("CLAUDE_CLI", "claude")
 
-DEFAULT_INSTANCES = [
-    "django__django-11039",
-    "django__django-11001",
-    "django__django-11019",
-    "django__django-11049",
-    "django__django-11099",
-]
+# ── Infra config (edit loop_config.py, not here) ───────────────────────────────
+from loop_config import (  # noqa: E402
+    CLOUD_HOST, CLOUD_PYTHON, CLOUD_SCRIPTS, CLOUD_RESULTS,
+    DEFAULT_INSTANCES, STAGE1_LOCAL,
+    STAGE1_PER_INSTANCE_BUDGET_S, STAGE1_HEADROOM_S, STAGE2_TIMEOUT_S,
+    CLAUDE_AGENT_TIMEOUT_S, CLOUD_SYNC_SCRIPTS,
+)
 
 # ── Journal ────────────────────────────────────────────────────────────────────
 
@@ -167,7 +167,7 @@ Do NOT re-derive them by reading cloud files or auto_loop.py — trust this bloc
 
 | Item | Value |
 |------|-------|
-| stage1 runs on | LOCAL laptop (subprocess, direct Bedrock) — no ssh |
+| stage1 runs on | CLOUD (ssh → run_with_jingu_gate.py → Docker) — local Docker locked |
 | stage2 runs on | CLOUD (ssh → fast_eval.py → Docker pytest) |
 | claude agent timeout | 1800s |
 | eval workers | {workers} |
@@ -252,20 +252,20 @@ scripts/
 Step 1 — invoke you (claude --print) with this context
 Step 2 — detect if run_with_jingu_gate.py changed (file hash before vs after)
 Step 3 — if changed:
-    Stage 1 (LOCAL, ~15-20 min):
-      python run_with_jingu_gate.py --instance-ids ... → patches
-      (runs on laptop, calls Bedrock directly, no ssh needed)
+    Sync scripts → scp run_with_jingu_gate.py + swebench_infra.py to cloud
+    Stage 1 (CLOUD, ~15-20 min):
+      ssh cloud: python run_with_jingu_gate.py → patches via Bedrock + Docker
+      scp predictions → local
     Stage 2 (CLOUD,  ~2-3 min):
-      scp predictions → cloud
       ssh cloud: python fast_eval.py → Docker pytest → resolve_rate
 Step 4 — write results to journal → feed into next round context
 ```
 
 **Key points:**
-- `run_with_jingu_gate.py` runs LOCALLY. The cloud is only used for Docker eval (fast_eval.py).
-- There is NO sync of scripts to cloud. The local file IS what gets executed.
-- You do NOT need to check cloud script versions — they are irrelevant.
-- You do NOT need to scp anything. You do NOT need ssh for patch generation.
+- Both stages run on CLOUD (local Docker requires enterprise login, is locked).
+- auto_loop syncs scripts to cloud automatically before each eval — no manual scp needed.
+- You do NOT need to scp anything or check cloud script versions.
+- The LOCAL `run_with_jingu_gate.py` is what you modify; auto_loop syncs it to cloud.
 
 ### Cloud layout (for read-only investigation of past runs only)
 
@@ -274,8 +274,7 @@ Step 4 — write results to journal → feed into next round context
                                                 (when stage1 still ran on cloud)
 ```
 
-**Note:** Logs from rounds ≤ 033 show stage1 running on cloud (step_limit=60 on cloud).
-From round 034 onwards, stage1 runs locally — cloud logs will only contain stage2 (fast_eval).
+**Note:** Both stage1 and stage2 run on cloud. auto_loop syncs scripts before each eval.
 
 **Do not SSH to check script versions.** The LOCAL file shown below is what gets executed.
 
@@ -376,10 +375,12 @@ def run_claude_agent(context: str, round_num: int, timeout_s: int) -> dict:
         f"Edit({SCRIPT_DIR}/fast_eval.py)",
         f"Edit({SCRIPT_DIR}/swebench_infra.py)",
         f"Edit({SCRIPT_DIR}/auto_loop.py)",
+        f"Edit({SCRIPT_DIR}/loop_config.py)",
         f"Edit({SCRIPT_DIR}/compare_groups.py)",
         f"Write({SCRIPT_DIR}/fast_eval.py)",
         f"Write({SCRIPT_DIR}/swebench_infra.py)",
         f"Write({SCRIPT_DIR}/auto_loop.py)",
+        f"Write({SCRIPT_DIR}/loop_config.py)",
         f"Write({SCRIPT_DIR}/compare_groups.py)",
         # Block triggering eval pipeline on cloud
         "Bash(ssh * fast_eval*)",
@@ -418,6 +419,8 @@ def run_claude_agent(context: str, round_num: int, timeout_s: int) -> dict:
                     print(f"  [loop] Claude Code timed out after {timeout_s}s")
                     return {"success": False, "note": "timeout", "file_changed": False}
                 rlist, _, _ = select.select([proc.stdout, proc.stderr], [], [], min(remaining, 1.0))
+                if not rlist and proc.poll() is not None:
+                    break
                 for stream in rlist:
                     line = stream.readline()
                     if not line:
@@ -539,11 +542,6 @@ def git_reset_target() -> None:
 
 # ── Eval runner (for measuring delta after Claude's change) ───────────────────
 
-CLOUD_HOST    = os.environ.get("CLOUD_HOST", "cloud")
-CLOUD_SCRIPTS = os.environ.get("CLOUD_SCRIPTS", "~/jingu-swebench/scripts")
-CLOUD_RESULTS = os.environ.get("CLOUD_RESULTS", "~/jingu-swebench/results")
-CLOUD_PYTHON  = os.environ.get("CLOUD_PYTHON", "~/.local/share/mise/shims/python")
-
 
 def _ssh(cmd: str, timeout: int = 600, prefix: str = "") -> subprocess.CompletedProcess:
     """Run a command on cloud desktop via SSH, streaming output in real time."""
@@ -588,10 +586,12 @@ def _ssh(cmd: str, timeout: int = 600, prefix: str = "") -> subprocess.Completed
 
 def run_cloud_eval(instances: list[str], output_dir: Path, workers: int,
                    max_attempts: int, stagger: int) -> dict:
-    """Two-stage eval: generate patches locally, then fast-eval on cloud (Docker).
+    """Two-stage eval: generate patches on cloud, then fast-eval on cloud (Docker).
 
-    Stage 1 (LOCAL, ~15-20 min): run_with_jingu_gate.py → patches via Bedrock
+    Stage 1 (CLOUD, ~15-20 min): ssh → run_with_jingu_gate.py → patches via Bedrock
     Stage 2 (CLOUD,  ~2-3 min):  ssh → fast_eval.py → Docker pytest → resolve_rate
+
+    Both stages run on cloud because local Docker requires enterprise login (locked).
 
     acceptance_rate = Jingu gate pass rate (structural)
     resolve_rate    = FAIL_TO_PASS test pass rate (semantic, fast signal)
@@ -602,49 +602,60 @@ def run_cloud_eval(instances: list[str], output_dir: Path, workers: int,
     output_dir.mkdir(parents=True, exist_ok=True)
     log_path = output_dir / "run.log"
 
-    # ── Stage 1: Generate patches LOCALLY ────────────────────────────────────
-    # run_with_jingu_gate.py runs on the laptop, calls Bedrock directly.
-    # No ssh needed for patch generation.
-    LOCAL_PYTHON = sys.executable
-    gate_cmd = [
-        LOCAL_PYTHON, str(TARGET_SCRIPT),
-        "--instance-ids", *instances,
-        "--output", str(output_dir),
-        "--workers", str(workers),
-        "--max-attempts", str(max_attempts),
-        "--stagger", str(stagger),
-    ]
-    print(f"  [eval:stage1] patch generation LOCAL ({len(instances)} instances, "
+    # ── Sync scripts to cloud before running ─────────────────────────────────
+    print(f"  [eval:sync] syncing scripts to cloud...")
+    for name in CLOUD_SYNC_SCRIPTS:
+        src = SCRIPT_DIR / name
+        if src.exists():
+            r = subprocess.run(
+                ["scp", str(src), f"{CLOUD_HOST}:{CLOUD_SCRIPTS}/{name}"],
+                capture_output=True, text=True, timeout=30,
+            )
+            if r.returncode != 0:
+                print(f"  [eval:sync] WARNING scp {name} failed: {r.stderr[:100]}")
+            else:
+                print(f"  [eval:sync] {name} → cloud OK")
+
+    # ── Stage 1: Generate patches on CLOUD (Docker available there) ───────────
+    cloud_out = f"{CLOUD_RESULTS}/{run_name}"
+    gate_cmd = (
+        f"mkdir -p {cloud_out} && "
+        f"{CLOUD_PYTHON} {CLOUD_SCRIPTS}/run_with_jingu_gate.py "
+        f"--instance-ids {' '.join(instances)} "
+        f"--output {cloud_out} "
+        f"--workers {workers} "
+        f"--max-attempts {max_attempts} "
+        f"--stagger {stagger}"
+    )
+    print(f"  [eval:stage1] patch generation on CLOUD ({len(instances)} instances, "
           f"workers={workers}, max_attempts={max_attempts})...")
     t0 = time.time()
-
-    with open(log_path, "w", buffering=1) as log_f:
-        proc = subprocess.Popen(
-            gate_cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            text=True, cwd=str(REPO_ROOT),
-        )
-        import select as _sel
-        deadline = t0 + max_attempts * len(instances) * 400 + 60
-        while True:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                proc.kill(); proc.wait()
-                print(f"  [eval:stage1] TIMEOUT")
-                break
-            rlist, _, _ = _sel.select([proc.stdout], [], [], min(remaining, 1.0))
-            if rlist:
-                line = proc.stdout.readline()
-                if line:
-                    log_f.write(line)
-                    print(f"  [stage1] {line.rstrip()}", flush=True)
-            if proc.poll() is not None:
-                for line in proc.stdout:
-                    log_f.write(line)
-                    print(f"  [stage1] {line.rstrip()}", flush=True)
-                break
+    timeout_stage1 = max_attempts * len(instances) * STAGE1_PER_INSTANCE_BUDGET_S + STAGE1_HEADROOM_S
+    try:
+        r1 = _ssh(gate_cmd, timeout=timeout_stage1, prefix="stage1")
+        # Write cloud output to local log
+        with open(log_path, "w") as log_f:
+            log_f.write(r1.stdout)
+    except subprocess.TimeoutExpired:
+        print(f"  [eval:stage1] TIMEOUT after {timeout_stage1}s")
+        r1 = subprocess.CompletedProcess(args=[], returncode=1, stdout="", stderr="")
+        with open(log_path, "w") as log_f:
+            log_f.write("TIMEOUT\n")
 
     stage1_time = time.time() - t0
-    print(f"  [eval:stage1] done in {stage1_time:.0f}s  (rc={proc.returncode})")
+    print(f"  [eval:stage1] done in {stage1_time:.0f}s  (rc={r1.returncode})")
+
+    # ── Copy predictions from cloud to local ─────────────────────────────────
+    preds_remote = f"{cloud_out}/jingu-predictions.jsonl"
+    preds_local  = output_dir / "jingu-predictions.jsonl"
+    scp_down = subprocess.run(
+        ["scp", f"{CLOUD_HOST}:{preds_remote}", str(preds_local)],
+        capture_output=True, text=True, timeout=60,
+    )
+    if scp_down.returncode == 0 and preds_local.exists():
+        print(f"  [eval:stage1] predictions downloaded ({preds_local.stat().st_size} bytes)")
+    else:
+        print(f"  [eval:stage1] WARNING: could not download predictions: {scp_down.stderr[:100]}")
 
     # Parse run_report.json for LLM usage summary
     report_path = output_dir / "run_report.json"
@@ -676,29 +687,16 @@ def run_cloud_eval(instances: list[str], output_dir: Path, workers: int,
         except Exception:
             pass
 
-    # ── Copy predictions to cloud for fast_eval ───────────────────────────────
-    preds_local  = output_dir / "jingu-predictions.jsonl"
-    cloud_out    = f"{CLOUD_RESULTS}/{run_name}"
+    # ── Stage 2: Fast resolve eval on cloud (Docker) ──────────────────────────
+    # predictions are already on cloud from stage1; also available locally via scp_down above
     preds_remote = f"{cloud_out}/jingu-predictions.jsonl"
 
-    # ── Stage 2: Fast resolve eval on cloud (Docker) ──────────────────────────
     resolve_rate = 0.0
     resolved_ids: list[str] = []
     fast_results: dict = {}
     stage2_time = 0.0
 
     if preds_local.exists() and preds_local.stat().st_size > 0:
-        # Ensure remote dir exists, then scp predictions up
-        _ssh(f"mkdir -p {cloud_out}", timeout=15, prefix="mkdir")
-        scp_up = subprocess.run(
-            ["scp", str(preds_local), f"{CLOUD_HOST}:{preds_remote}"],
-            capture_output=True, text=True, timeout=60,
-        )
-        if scp_up.returncode != 0:
-            print(f"  [eval] WARNING: scp predictions→cloud failed: {scp_up.stderr[:100]}")
-        else:
-            print(f"  [eval] predictions uploaded to cloud ({preds_local.stat().st_size} bytes)")
-
         fast_cmd = (
             f"{CLOUD_PYTHON} {CLOUD_SCRIPTS}/fast_eval.py "
             f"--predictions {preds_remote} "
@@ -708,7 +706,7 @@ def run_cloud_eval(instances: list[str], output_dir: Path, workers: int,
         )
         print(f"  [eval:stage2] fast resolve eval on cloud (Docker)...")
         t1 = time.time()
-        r2 = _ssh(fast_cmd, timeout=180, prefix="stage2")
+        r2 = _ssh(fast_cmd, timeout=STAGE2_TIMEOUT_S, prefix="stage2")
         stage2_time = time.time() - t1
         print(f"  [eval:stage2] done in {stage2_time:.0f}s")
 
@@ -728,7 +726,7 @@ def run_cloud_eval(instances: list[str], output_dir: Path, workers: int,
     # ── Final summary ─────────────────────────────────────────────────────────
     total_time = time.time() - t_total
     print(f"\n  ┌─ Eval Summary ──────────────────────────────────────")
-    print(f"  │  stage1 (patch gen, local) : {stage1_time:.0f}s")
+    print(f"  │  stage1 (patch gen, cloud) : {stage1_time:.0f}s")
     print(f"  │  stage2 (docker eval, cloud): {stage2_time:.0f}s")
     print(f"  │  total                      : {total_time:.0f}s")
     print(f"  │  resolve_rate               : {resolve_rate:.1%}  ({len(resolved_ids)}/{len(instances)})")
@@ -805,8 +803,8 @@ def main():
     parser.add_argument("--stagger", type=int, default=20)
     parser.add_argument("--target", type=float,
                         default=float(os.environ.get("LOOP_TARGET", "0.6")))
-    parser.add_argument("--claude-timeout", type=int, default=1800,
-                        help="Timeout for Claude Code agent in seconds (default 600)")
+    parser.add_argument("--claude-timeout", type=int, default=CLAUDE_AGENT_TIMEOUT_S,
+                        help=f"Timeout for Claude Code agent in seconds (default {CLAUDE_AGENT_TIMEOUT_S})")
     parser.add_argument("--context-only", action="store_true",
                         help="Just build and print the context document, don't call Claude")
     parser.add_argument("--no-eval", action="store_true",

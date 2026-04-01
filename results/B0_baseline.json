@@ -1,0 +1,66 @@
+{
+  "baseline_id": "B0",
+  "label": "mini-SWE-agent baseline — no Jingu features",
+  "date": "2026-04-01",
+  "frozen": true,
+
+  "what_this_is": "Pure mini-SWE-agent + thin structural wrapper. No trust-gate, no policy-core, no jingu-agent governance. This is the floor against which all Jingu integration experiments are measured.",
+  "what_this_is_not": [
+    "Not a jingu-feature baseline",
+    "Not a jingu-integrated result",
+    "The thin structural gate (jingu_structural_check) is a diff-format check only — not real admission control"
+  ],
+
+  "script": {
+    "file": "scripts/run_with_jingu_gate.py",
+    "commit": "e6347ed7e08d0a5b81cc43117ddc5d155991020e",
+    "note": "HEAD at time of baseline run — no agent modifications applied"
+  },
+
+  "config": {
+    "model": "bedrock/global.anthropic.claude-sonnet-4-5-20250929-v1:0",
+    "max_attempts": 1,
+    "workers": 4,
+    "stagger_s": 5,
+    "step_limit": 100
+  },
+
+  "instances": [
+    "django__django-11001",
+    "django__django-11019",
+    "django__django-11039",
+    "django__django-11049",
+    "django__django-11099"
+  ],
+
+  "results": {
+    "resolve_rate": 0.8,
+    "resolved": 4,
+    "total": 5,
+    "resolved_ids": [
+      "django__django-11001",
+      "django__django-11039",
+      "django__django-11049",
+      "django__django-11099"
+    ],
+    "unresolved_ids": [
+      "django__django-11019"
+    ],
+    "eval_method": "fast_eval.py (Docker pytest, FAIL_TO_PASS tests)"
+  },
+
+  "cost": {
+    "total_usd": 3.0228,
+    "avg_per_instance_usd": 0.6046,
+    "wall_time_s": 393,
+    "api_calls_total": 264,
+    "avg_calls_per_instance": 52.8
+  },
+
+  "experiment_sequence": {
+    "B0": "this — mini-SWE-agent, no Jingu features",
+    "B1": "B0 + jingu-trust-gate (patch admission control)",
+    "B2": "B1 + jingu-policy-core (policy-driven gate rules)",
+    "B3": "B2 + jingu-agent governance loop (RPP, reviewer, retry)"
+  }
+}
