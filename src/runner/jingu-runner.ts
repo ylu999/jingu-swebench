@@ -152,9 +152,12 @@ function findFilesFromFailToPass(instance: BenchmarkInstance, workspace: Workspa
   // Use primary symbols first; add fallback symbols if primary produces nothing
   const sourceSymbols = sourceSymbolsPrimary
 
-  // Also use test module path to find the test file and extract source module imports
-  // We extract "from django.X.Y import Z" → source module paths → git grep for symbols
-  const sourceModulePaths = new Set<string>()
+  // Use test module path to find the test file and extract source module imports.
+  // We extract "from django.X.Y import Z" → importedModulePaths (lower priority).
+  // Also derive high-priority paths from test module structure → mappedModulePaths.
+  const importedModulePaths = new Set<string>()   // from test file imports (often misleading)
+  const mappedModulePaths = new Set<string>()      // from test module name pattern (high precision)
+
   for (const mod of testModules) {
     // Try two forms: "tests/module/path.py" and "module/path.py"
     const relPath = mod.replace(/\./g, "/") + ".py"
@@ -169,17 +172,17 @@ function findFilesFromFailToPass(instance: BenchmarkInstance, workspace: Workspa
           const srcMod = m[1]
           // Keep only non-test source module paths
           if (!srcMod.includes("test") && !srcMod.startsWith(".")) {
-            sourceModulePaths.add(srcMod)
+            importedModulePaths.add(srcMod)
           }
         }
       } catch { /* skip */ }
       break
     }
 
-    // Derive source directory from test module path directly.
-    // Pattern: "{app}_tests.test_{module}" → look in "{repoModule}/{app}/{module}/" or "{repoModule}/{app}/"
+    // Derive source directory from test module path directly (HIGH PRIORITY).
+    // Pattern: "{app}_tests.test_{module}" → look in "{repoModule}/{app}/"
     // Pattern: "migrations.test_{X}" → look in "{repoModule}/db/migrations/"
-    // This catches cases where test imports lead to the wrong file (e.g. wrong contenttypes import)
+    // This is more reliable than following imports (imports often point to wrong helper files).
     const parts = mod.split(".")
     if (parts.length >= 1) {
       const first = parts[0]  // e.g. "auth_tests", "check_framework", "migrations"
@@ -188,9 +191,7 @@ function findFilesFromFailToPass(instance: BenchmarkInstance, workspace: Workspa
       // "{app}_tests" → "{repoModule}/{app}/"
       const appMatch = first.match(/^([a-z_]+?)_tests$/)
       if (appMatch) {
-        const app = appMatch[1]  // e.g. "auth", "utils", "invalid_models" → but we need to map
-        // Try finding directory: e.g. "utils" → look for django/utils/, or auth → django/contrib/auth/
-        const appSubDir = app.replace(/_/g, "/")  // e.g. "invalid_models" → "invalid/models" (not useful, try appDir)
+        const app = appMatch[1]  // e.g. "auth", "utils"
         const possibleDirs = [
           `${repoModule}/${app}`,
           `${repoModule}/contrib/${app}`,
@@ -203,14 +204,13 @@ function findFilesFromFailToPass(instance: BenchmarkInstance, workspace: Workspa
             if (last.includes("migration")) {
               const migDir = dir + "/migrations"
               if (existsSync(joinPath(workspace.dir, migDir))) {
-                sourceModulePaths.add(migDir.replace(/\//g, "."))
+                mappedModulePaths.add(migDir.replace(/\//g, "."))
               }
             }
             // Add the module path with last test part as hint
-            const testSubject = last.replace(/^test_/, "")  // e.g. "model_checks", "autoreload"
-            const subjectPath = testSubject.replace(/_/g, "/")  // won't work for multi-word but worth trying
-            sourceModulePaths.add(dir.replace(/\//g, ".") + "." + testSubject)
-            sourceModulePaths.add(dir.replace(/\//g, "."))
+            const testSubject = last.replace(/^test_/, "")  // e.g. "autoreload"
+            mappedModulePaths.add(dir.replace(/\//g, ".") + "." + testSubject)
+            mappedModulePaths.add(dir.replace(/\//g, "."))
             break
           }
         }
@@ -218,20 +218,22 @@ function findFilesFromFailToPass(instance: BenchmarkInstance, workspace: Workspa
 
       // "check_framework.test_X" → look in "{repoModule}/core/checks/"
       if (first === "check_framework") {
-        sourceModulePaths.add(`${repoModule}.core.checks`)
+        mappedModulePaths.add(`${repoModule}.core.checks`)
       }
       // "migrations.test_X" → look in "{repoModule}/db/migrations/"
       if (first === "migrations" && parts.length >= 2) {
-        sourceModulePaths.add(`${repoModule}.db.migrations`)
+        mappedModulePaths.add(`${repoModule}.db.migrations`)
       }
       // "invalid_models_tests.test_X" → look in "{repoModule}/db/models/"
       if (first === "invalid_models_tests") {
-        const testSubject = last.replace(/^test_/, "")  // e.g. "ordinary_fields"
-        sourceModulePaths.add(`${repoModule}.db.models.fields`)
-        sourceModulePaths.add(`${repoModule}.db.models`)
+        mappedModulePaths.add(`${repoModule}.db.models.fields`)
+        mappedModulePaths.add(`${repoModule}.db.models`)
       }
     }
   }
+
+  // Combine: mapped paths take priority over imported paths
+  const sourceModulePaths = new Set<string>([...mappedModulePaths, ...importedModulePaths])
 
   // Determine search scope: prefer narrowing to directories of modules referenced in test imports
   // e.g. ["django.db", "django.forms"] → search within "django/db/" and "django/forms/"
@@ -264,14 +266,15 @@ function findFilesFromFailToPass(instance: BenchmarkInstance, workspace: Workspa
     if (sourceFiles.size > 0) break  // found with primary symbols, skip fallback
   }
 
-  // Fallback: if symbol grep found nothing but we have import-derived module paths,
-  // resolve the most specific module path to an actual file.
-  // e.g. "django.forms" → check django/forms/__init__.py, django/forms.py
-  //      "django.db.models.expressions" → django/db/models/expressions.py etc.
-  // Prefer the deepest (most specific) module that resolves to a file.
-  if (sourceFiles.size === 0 && sourceModulePaths.size > 0) {
-    const sorted = [...sourceModulePaths].sort((a, b) => b.split(".").length - a.split(".").length)
-    for (const mod of sorted.slice(0, 5)) {
+  // Fallback: if symbol grep found nothing, resolve module paths to actual files.
+  // Priority: mappedModulePaths (from test module structure) over importedModulePaths (from test imports).
+  // Mapped paths are more reliable because imports often point to helper modules, not the bug site.
+  if (sourceFiles.size === 0 && (mappedModulePaths.size > 0 || importedModulePaths.size > 0)) {
+    // Try mapped paths first (high priority), then fall back to imported paths
+    const priorityPaths = [...mappedModulePaths].sort((a, b) => b.split(".").length - a.split(".").length)
+    const fallbackPaths = [...importedModulePaths].sort((a, b) => b.split(".").length - a.split(".").length)
+    const sorted = [...priorityPaths, ...fallbackPaths].slice(0, 8)
+    for (const mod of sorted) {
       const modPath = mod.replace(/\./g, "/")
       // First: try exact file
       for (const suffix of [".py", "/__init__.py"]) {
