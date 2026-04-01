@@ -30,9 +30,12 @@ Before writing any patch, answer these three questions in a <analysis> block:
 
 - After the <analysis> block, output the patch in unified diff format (--- / +++ / @@ lines)
 - The patch must apply cleanly with "git apply" against the EXACT file content shown
-- CRITICAL: Use ONLY the exact lines from the provided file content as context lines in the patch
-- If a file is marked "⚠️ PARTIAL FILE: showing lines N–M only", use ONLY lines from that range as context
-- Do NOT guess or reconstruct lines outside the shown range — you will cause an apply failure
+- CONTEXT LINES: Use the MINIMUM number of context lines — ideally 0 or 1 per hunk
+  - Use "git diff -U1" style: only 1 line of context above and below each change
+  - If a file is marked "⚠️ PARTIAL FILE: showing lines N–M only", use ONLY lines from that range
+  - Do NOT include lines you are not 100% certain match the file exactly
+  - Fewer context lines = fewer chances for apply failure
+- CRITICAL: NEVER invent or reconstruct context lines you haven't seen — this causes apply failure
 - Touch ONLY production source files (no test files, no docs, no migrations)
 - Modify AT MOST ONE file — the single most targeted fix
 - Do NOT add new test cases or modify existing tests`

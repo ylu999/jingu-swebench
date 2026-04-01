@@ -306,6 +306,35 @@ function findCandidateFiles(instance: BenchmarkInstance, workspace: Workspace): 
   return rankBySize(workspace, [...files]).slice(0, 2)
 }
 
+// Extract the target line number from the first hunk header "@@ -N,n +M,m @@"
+function extractHunkLineFromPatch(patchText: string): number | null {
+  const m = patchText.match(/@@ -(\d+)(?:,\d+)? \+(\d+)/)
+  if (!m) return null
+  return parseInt(m[1], 10)
+}
+
+// Re-read a file centered on a specific line number — used after apply_fail to give
+// LLM the exact content around where it tried to patch.
+function readWorkspaceFilesAtLine(
+  workspace: Workspace,
+  filePaths: string[],
+  centerLine: number
+): Record<string, string> {
+  const result: Record<string, string> = {}
+  for (const p of filePaths) {
+    const abs = joinPath(workspace.dir, p)
+    if (!existsSync(abs)) continue
+    try {
+      const lines = readFileSync(abs, "utf8").split("\n")
+      const start = Math.max(0, centerLine - 15)
+      const end = Math.min(lines.length, centerLine + 100)
+      const window = lines.slice(start, end).join("\n")
+      result[p] = window + `\n... (lines ${start + 1}–${end} of ${lines.length}, re-centered after apply failure)`
+    } catch { /* skip */ }
+  }
+  return result
+}
+
 function rankBySize(workspace: Workspace, filePaths: string[]): string[] {
   return filePaths
     .map((p) => {
@@ -410,20 +439,37 @@ export async function runJingu(
   const attempts: AttemptResult[] = []
   let previousFeedback: string | undefined
   let finalPatchText: string | undefined
+  // Dynamic file contents: updated across retries when UNGROUNDED_PATCH reveals needed files
+  let currentFileContents = fileContents
+  let currentInjectedFiles = strategyCtx.injectedFiles
 
   const strategyResolution = resStatus !== "valid" ? { status: resStatus, reason: resReason } : undefined
   const retryOpts = { verificationPolicy: (effectiveStrategy ?? rawStrategy)?.promptHints.verificationPolicy }
 
   const maxAttempts = opts.maxAttempts ?? MAX_ATTEMPTS
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    const candidate = await propose(instance, attempt, { previousFeedback, fileContents, strategy: effectiveStrategy ?? rawStrategy })
+    const candidate = await propose(instance, attempt, { previousFeedback, fileContents: currentFileContents, strategy: effectiveStrategy ?? rawStrategy })
 
     // Gate 1: structural (pass injected files + filesTouched for grounding compliance check)
-    const sg = structuralGate(candidate.patchText, strategyCtx.injectedFiles, candidate.filesTouched)
+    const sg = structuralGate(candidate.patchText, currentInjectedFiles, candidate.filesTouched)
     if (sg.status === "fail") {
       const ar: AttemptResult = { attempt, candidate, structuralGate: sg, accepted: false, strategyResolution }
       attempts.push(ar)
       console.log(`  [jingu] attempt=${attempt} FAIL structural (${sg.code})`)
+      // UNGROUNDED_PATCH: LLM patched a file we didn't show it — add that file to next attempt
+      if (sg.code === "UNGROUNDED_PATCH" && candidate.filesTouched.length > 0) {
+        const extraFiles = candidate.filesTouched.filter(
+          (f) => !currentInjectedFiles.some((inj) => f.endsWith(inj) || inj.endsWith(f))
+        )
+        if (extraFiles.length > 0) {
+          const extraContents = readWorkspaceFiles(workspace, extraFiles, anchors)
+          if (Object.keys(extraContents).length > 0) {
+            currentFileContents = { ...currentFileContents, ...extraContents }
+            currentInjectedFiles = Object.keys(currentFileContents)
+            console.log(`  [jingu] adding ungrounded files to context: ${Object.keys(extraContents).join(", ")}`)
+          }
+        }
+      }
       previousFeedback = buildRetryFeedback(ar, undefined, retryOpts)
       continue
     }
@@ -435,6 +481,18 @@ export async function runJingu(
       attempts.push(ar)
       console.log(`  [jingu] attempt=${attempt} FAIL apply (${ag.code})`)
       previousFeedback = buildRetryFeedback(ar, workspace, retryOpts)
+      // After apply_fail: re-center file window on the hunk line from the failed patch
+      // This gives the LLM the exact content it needs for a corrected patch on the next attempt
+      if (candidate.filesTouched.length > 0) {
+        const hunkLine = extractHunkLineFromPatch(candidate.patchText)
+        if (hunkLine !== null) {
+          const refreshed = readWorkspaceFilesAtLine(workspace, candidate.filesTouched, hunkLine)
+          if (Object.keys(refreshed).length > 0) {
+            currentFileContents = { ...currentFileContents, ...refreshed }
+            currentInjectedFiles = Object.keys(currentFileContents)
+          }
+        }
+      }
       workspace.reset()
       continue
     }
