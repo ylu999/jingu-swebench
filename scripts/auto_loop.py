@@ -331,9 +331,30 @@ def run_claude_agent(context: str, round_num: int, timeout_s: int) -> dict:
     print(f"  [loop] result will be written to: {result_path.name}")
     print(f"  [loop] live log: tail -f {log_path}")
 
+    # Deny list: eval files the agent must never write/execute.
+    # The agent may SSH to cloud for read-only investigation, but must not
+    # trigger fast_eval.py, run_with_jingu_gate.py, or touch infra files.
+    DENIED_TOOLS = [
+        # Block writes to protected scripts
+        f"Edit({SCRIPT_DIR}/fast_eval.py)",
+        f"Edit({SCRIPT_DIR}/swebench_infra.py)",
+        f"Edit({SCRIPT_DIR}/auto_loop.py)",
+        f"Edit({SCRIPT_DIR}/compare_groups.py)",
+        f"Write({SCRIPT_DIR}/fast_eval.py)",
+        f"Write({SCRIPT_DIR}/swebench_infra.py)",
+        f"Write({SCRIPT_DIR}/auto_loop.py)",
+        f"Write({SCRIPT_DIR}/compare_groups.py)",
+        # Block triggering eval pipeline on cloud
+        "Bash(ssh * fast_eval*)",
+        "Bash(ssh * run_with_jingu_gate*)",
+        "Bash(ssh * swebench.harness*)",
+    ]
+
     # stream-json + --verbose streams one JSON event per line in real time
     cmd = [CLAUDE_CLI, "--print", "--output-format", "stream-json", "--verbose",
-           "--dangerously-skip-permissions", "-p", context]
+           "--dangerously-skip-permissions",
+           "--disallowedTools", " ".join(DENIED_TOOLS),
+           "-p", context]
 
     text_chunks = []   # accumulated assistant text (for stdout compat)
     stderr_chunks = []
