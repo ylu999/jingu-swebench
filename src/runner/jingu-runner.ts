@@ -24,21 +24,30 @@ const MAX_FILE_LINES = 350
 // centered on it. Falls back to head-of-file if no anchor found.
 const WINDOW_SIZE = 120
 function extractRelevantWindow(lines: string[], anchors: string[]): { content: string; note: string } {
-  // Helper: search for anchor in file (case-insensitive, also tries snake_case conversion)
+  // Helper: search for anchor in file, trying multiple strategies
   const findAnchorLine = (anchor: string): number => {
-    // Exact match: def/class {anchor}
+    // Pass 1: exact match: def/class {anchor}
     let idx = lines.findIndex((l) =>
       l.match(new RegExp(`\\b(def|class)\\s+${anchor.replace(/[.*+?^${}()|[\\]\\]/g, "\\$&")}\\b`))
     )
     if (idx >= 0) return idx
-    // Case-insensitive match: def/class contains anchor (handles _get_FIELD_display vs GetFieldDisplay)
+    // Pass 2: case-insensitive match: def/class contains anchor fragment
+    // (handles _get_FIELD_display vs GetFieldDisplay)
     const anchorLower = anchor.toLowerCase().replace(/_/g, "")
     idx = lines.findIndex((l) => {
       const m = l.match(/\b(?:def|class)\s+(\w+)/)
       if (!m) return false
       return m[1].toLowerCase().replace(/_/g, "").includes(anchorLower.slice(0, 8))
     })
-    return idx
+    if (idx >= 0) return idx
+    // Pass 3: loose match — anchor text appears anywhere in line (not as def/class)
+    // This handles e.g. setattr(cls, 'get_FOO_display'...) when anchor = "display"
+    const anchorFragment = anchor.toLowerCase().replace(/^get_?|_?display$/, "").replace(/_/g, "")
+    if (anchorFragment.length >= 5) {
+      idx = lines.findIndex((l) => l.toLowerCase().replace(/_/g, "").includes(anchorFragment))
+      if (idx >= 0) return idx
+    }
+    return -1
   }
   if (anchors.length > 0) {
     for (const anchor of anchors) {
