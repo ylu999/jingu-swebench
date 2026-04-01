@@ -290,24 +290,31 @@ function findFilesFromFailToPass(instance: BenchmarkInstance, workspace: Workspa
       // Handles: "astropy.modeling.tests.test_separable" → "astropy.modeling.separable"
       //          "sympy.core.tests.test_basic" → "sympy.core.basic"
       //          "requests.tests.test_hooks" → "requests.hooks"
+      //          "lib.matplotlib.tests.test_matplotlib" → "lib.matplotlib.__init__"
       if (parts.length >= 2 && last.startsWith("test_")) {
         const subjectName = last.replace(/^test_/, "")  // e.g. "separable"
         const testsIdx = parts.indexOf("tests")
-        if (testsIdx >= 1) {
-          // "pkg.tests.test_X" → "pkg.X"
-          const pkgPath = parts.slice(0, testsIdx).join(".")  // e.g. "astropy.modeling"
-          const candidate = pkgPath.replace(/\./g, "/") + "/" + subjectName + ".py"
-          if (existsSync(joinPath(workspace.dir, candidate))) {
-            mappedModulePaths.add(pkgPath + "." + subjectName)
-          }
-          // Also add the package dir itself
-          mappedModulePaths.add(pkgPath)
+        const pkgParts = testsIdx >= 1 ? parts.slice(0, testsIdx) : parts.slice(0, -1)
+        const pkgPath = pkgParts.join(".")  // e.g. "astropy.modeling"
+        const pkgDir = pkgPath.replace(/\./g, "/")
+        // Try exact file: "pkg/X.py"
+        const exactCandidate = pkgDir + "/" + subjectName + ".py"
+        if (existsSync(joinPath(workspace.dir, exactCandidate))) {
+          mappedModulePaths.add(pkgPath + "." + subjectName)
         } else {
-          // "pkg.test_X" → "pkg.X" (no tests subdir)
-          const pkgPath = parts.slice(0, -1).join(".")
-          const candidate = pkgPath.replace(/\./g, "/") + "/" + subjectName + ".py"
-          if (existsSync(joinPath(workspace.dir, candidate))) {
-            mappedModulePaths.add(pkgPath + "." + subjectName)
+          // X.py doesn't exist. Check if test is named after the package itself:
+          // "lib.matplotlib.tests.test_matplotlib" → pkgPath last seg = "matplotlib"
+          //  subjectName = "matplotlib" → same → test is about the package → use __init__.py
+          const pkgLastSeg = pkgParts[pkgParts.length - 1] ?? ""
+          const initCandidate = pkgDir + "/__init__.py"
+          if (subjectName === pkgLastSeg && existsSync(joinPath(workspace.dir, initCandidate))) {
+            // Add a fake dotted path that maps to __init__.py
+            // We can't add "lib.matplotlib.__init__" but we can add it to mappedDirectFiles via import
+            // Instead: add "lib.matplotlib" → dir resolve → __init__.py via explicit path
+            mappedModulePaths.add(pkgPath + ".__init__")
+          } else {
+            // Subject doesn't match package name — add package dir for broader search
+            mappedModulePaths.add(pkgPath)
           }
         }
       }
@@ -761,6 +768,30 @@ export async function runJingu(
             currentFileContents = { ...currentFileContents, ...extraContents }
             currentInjectedFiles = Object.keys(currentFileContents)
             console.log(`  [jingu] adding ungrounded files to context: ${Object.keys(extraContents).join(", ")}`)
+          }
+        }
+      }
+      // PARSE_FAILED: LLM output analysis but no patch — it may need different file context.
+      // On attempt 1, try to find additional files via backtick identifier grep from problem statement.
+      if (sg.code === "PARSE_FAILED" && attempt === 1 && Object.keys(currentFileContents).length === 0) {
+        // No files injected at all — use findCandidateFiles result (already done) or grep identifiers
+        const backtickIds = [...instance.problemStatement.matchAll(/`([A-Za-z_]\w{5,})`/g)].map(m => m[1])
+        const repoMod = instance.repo.split("/")[1] ?? ""
+        const extraCandidates: string[] = []
+        for (const id of backtickIds.slice(0, 4)) {
+          const r = workspace.exec(
+            `git grep -l "def ${id}\\b\\|class ${id}\\b" -- "${repoMod}" 2>/dev/null | grep -v test | head -2`
+          )
+          for (const line of r.stdout.split("\n").filter(Boolean)) {
+            extraCandidates.push(line.trim())
+          }
+        }
+        if (extraCandidates.length > 0) {
+          const extraContents = readWorkspaceFiles(workspace, extraCandidates, anchors)
+          if (Object.keys(extraContents).length > 0) {
+            currentFileContents = { ...currentFileContents, ...extraContents }
+            currentInjectedFiles = Object.keys(currentFileContents)
+            console.log(`  [jingu] adding parse-fail context files: ${Object.keys(extraContents).join(", ")}`)
           }
         }
       }
