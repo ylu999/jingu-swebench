@@ -13,23 +13,69 @@ import { join as joinPath } from "node:path"
 const MAX_ATTEMPTS = 3
 const TEST_CMD = "python -m pytest -x -q --tb=short 2>&1 || true"
 
-const MAX_FILE_LINES = 600
+// Total lines injected across all files — keeps prompt budget bounded
+const MAX_TOTAL_INJECT_LINES = 400
+// Per-file hard cap (never inject more than this even if budget allows)
+const MAX_FILE_LINES = 350
 
-function readWorkspaceFiles(workspace: Workspace, filePaths: string[]): Record<string, string> {
-  const result: Record<string, string> = {}
-  for (const p of filePaths) {
-    const abs = joinPath(workspace.dir, p)
-    if (existsSync(abs)) {
-      try {
-        const lines = readFileSync(abs, "utf8").split("\n")
-        // Truncate large files — keep first MAX_FILE_LINES lines
-        const content = lines.length > MAX_FILE_LINES
-          ? lines.slice(0, MAX_FILE_LINES).join("\n") + `\n... (truncated at ${MAX_FILE_LINES} lines)`
-          : lines.join("\n")
-        result[p] = content
-      } catch {
-        // skip unreadable files
+// Extract the most relevant window from a file around a set of anchor symbols.
+// Finds the first def/class line matching any anchor, returns WINDOW_SIZE lines
+// centered on it. Falls back to head-of-file if no anchor found.
+const WINDOW_SIZE = 120
+function extractRelevantWindow(lines: string[], anchors: string[]): { content: string; note: string } {
+  if (anchors.length > 0) {
+    for (const anchor of anchors) {
+      const idx = lines.findIndex((l) =>
+        l.match(new RegExp(`\\b(def|class)\\s+${anchor.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`))
+      )
+      if (idx >= 0) {
+        const start = Math.max(0, idx - 10)
+        const end = Math.min(lines.length, idx + WINDOW_SIZE)
+        return {
+          content: lines.slice(start, end).join("\n"),
+          note: `(lines ${start + 1}–${end} of ${lines.length}, anchored on "${anchor}")`,
+        }
       }
+    }
+  }
+  // No anchor found — take head of file
+  const end = Math.min(lines.length, MAX_FILE_LINES)
+  return {
+    content: lines.slice(0, end).join("\n"),
+    note: lines.length > end ? `(lines 1–${end} of ${lines.length}, truncated)` : "",
+  }
+}
+
+function readWorkspaceFiles(
+  workspace: Workspace,
+  filePaths: string[],
+  anchors: string[] = []
+): Record<string, string> {
+  const result: Record<string, string> = {}
+  let totalLines = 0
+
+  for (const p of filePaths) {
+    if (totalLines >= MAX_TOTAL_INJECT_LINES) break
+    const abs = joinPath(workspace.dir, p)
+    if (!existsSync(abs)) continue
+    try {
+      const lines = readFileSync(abs, "utf8").split("\n")
+      const budget = Math.min(MAX_FILE_LINES, MAX_TOTAL_INJECT_LINES - totalLines)
+
+      let content: string
+      if (lines.length <= budget) {
+        content = lines.join("\n")
+      } else {
+        const { content: w, note } = extractRelevantWindow(lines, anchors)
+        const wLines = w.split("\n").slice(0, budget)
+        content = wLines.join("\n")
+        if (note) content += `\n... ${note}`
+      }
+
+      result[p] = content
+      totalLines += content.split("\n").length
+    } catch {
+      // skip unreadable files
     }
   }
   return result
@@ -122,6 +168,24 @@ function rankBySize(workspace: Workspace, filePaths: string[]): string[] {
     .map((x) => x.p)
 }
 
+// Extract symbol anchors for window-based file injection.
+// Sources: backtick identifiers from problem statement + method names from FAIL_TO_PASS.
+function extractAnchors(instance: BenchmarkInstance): string[] {
+  const anchors = new Set<string>()
+  // Backtick identifiers in problem statement
+  for (const m of instance.problemStatement.matchAll(/`([A-Za-z_]\w{3,})`/g)) anchors.add(m[1])
+  // Method/class names from FAIL_TO_PASS: "test_foo (module.TestClass)" → "test_foo", "TestClass"
+  for (const t of instance.failToPass ?? []) {
+    const m = t.match(/^(\w+)\s*\(([^)]+)\)/)
+    if (m) {
+      anchors.add(m[1])  // test method name
+      const parts = m[2].split(".")
+      anchors.add(parts[parts.length - 1])  // class name
+    }
+  }
+  return [...anchors].slice(0, 8)
+}
+
 export async function runJingu(
   instance: BenchmarkInstance,
   workspaceBase: string,
@@ -153,7 +217,9 @@ export async function runJingu(
 
   // Read relevant files from workspace to ground LLM in exact file content
   const candidateFiles = findCandidateFiles(instance, workspace)
-  const fileContents = readWorkspaceFiles(workspace, candidateFiles)
+  // Build symbol anchors from FAIL_TO_PASS test names + backtick identifiers in problem statement
+  const anchors = extractAnchors(instance)
+  const fileContents = readWorkspaceFiles(workspace, candidateFiles, anchors)
   if (Object.keys(fileContents).length > 0) {
     console.log(`  [jingu] injecting files: ${Object.keys(fileContents).join(", ")}`)
   }

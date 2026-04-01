@@ -20,6 +20,10 @@ export function buildRetryFeedback(attempt: AttemptResult, workspace?: Workspace
     if (stderr) {
       lines.push(`\nError detail:\n${stderr}`)
     }
+    const patchHead = (failedGate.details?.patch_head as string | undefined) ?? ""
+    if (patchHead) {
+      lines.push(`\nYour previous patch (first 500 chars):\n${patchHead}`)
+    }
     const touched = attempt.candidate?.filesTouched ?? []
     if (touched.length > 0) {
       lines.push(`\nYour previous attempt touched: ${touched.join(", ")}`)
