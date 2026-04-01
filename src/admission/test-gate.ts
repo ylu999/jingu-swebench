@@ -103,16 +103,21 @@ function failToPassTestsExistInWorkspace(workspace: Workspace, failToPass: strin
       if (!foundInSpecificFile) return false
       continue
     }
-    // Pytest format: "path/to/test.py::TestClass::test_method"
+    // Pytest format: "path/to/test.py::TestClass::test_method" or "path/to/test.py::test_func[param]"
     const pytestMatch = t.match(/^([^:]+\.py)(?:::(\w+))?(?:::(\w+))?/)
-    if (pytestMatch && pytestMatch[3]) {
+    if (pytestMatch) {
       const testFile = pytestMatch[1]
-      const methodName = pytestMatch[3]
-      // Check in the specific test file
-      const searchResult = workspace.exec(
-        `grep "def ${methodName}\\b" "${testFile}" 2>/dev/null | head -1`
-      )
-      if (!searchResult.stdout.trim()) return false
+      // Group 3 = method (Class::method format), Group 2 = either class or standalone func
+      // Standalone: "file.py::test_func[param]" → group2=test_func, group3=undefined
+      // Class style: "file.py::Class::method" → group2=Class, group3=method
+      const methodName = pytestMatch[3] ?? (pytestMatch[2]?.match(/^test_/) ? pytestMatch[2] : undefined)
+      if (methodName) {
+        // Check in the specific test file
+        const searchResult = workspace.exec(
+          `grep "def ${methodName}\\b" "${testFile}" 2>/dev/null | head -1`
+        )
+        if (!searchResult.stdout.trim()) return false
+      }
     }
   }
   return true
