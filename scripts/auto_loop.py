@@ -2,63 +2,60 @@
 """
 AutoResearch loop for jingu-swebench.
 
-Architecture (three-file pattern):
-  program.md              — fixed goals, rules, constraints (never modified)
-  run_with_jingu_gate.py  — the file the loop can modify (config, strategy, prompts)
-  auto_loop.py            — this file (orchestrator + context memory)
+Architecture:
+  auto_loop.py            — this file, runs on LOCAL MAC
+  run_with_jingu_gate.py  — the file Claude Code may modify
+  program.md              — fixed goals (never modified)
 
-How the loop works:
-  1. Run a batch of instances via run_with_jingu_gate.py → get acceptance_rate
-  2. Build a context document: program goals + round history + current code + metric
-  3. Call Claude (Bedrock) with the context document as a Claude Code-style agent:
-     - Claude reads all context, identifies the best single improvement
-     - Claude outputs: hypothesis + the complete new version of run_with_jingu_gate.py
-     - This avoids fragile unified diff parsing
-  4. If file content changed → re-run eval to measure delta
-  5. If metric improved → git commit; if not → git reset
-  6. Append to loop_journal.jsonl: metric, hypothesis, what changed, next_steps
-  7. Repeat until budget exhausted or target reached
+Each round:
+  1. Build a rich context document (goals + round history + current code + metrics)
+  2. Invoke `claude --print` (Claude Code) with the context as prompt
+     Claude Code can do ANYTHING:
+       - SSH to cloud desktop (ssh cloud ...)
+       - Run Docker containers for SWE-bench evaluation
+       - Read logs, debug failures, root-cause analysis
+       - Modify run_with_jingu_gate.py
+       - Fetch documentation from the web
+       - Run dry-runs, full evals, whatever it deems necessary
+  3. Claude Code writes a JSON result to results/loop_round_NNN_result.json
+  4. Loop checks if run_with_jingu_gate.py changed → re-eval → commit/rollback
+  5. Append to loop_journal.jsonl for next round's context
 
 Usage:
   python scripts/auto_loop.py
-  python scripts/auto_loop.py --instances django__django-11039 django__django-11001
-  python scripts/auto_loop.py --max-rounds 10 --workers 4
-  python scripts/auto_loop.py --dry-run        # plan only, no execution
+  python scripts/auto_loop.py --max-rounds 10
+  python scripts/auto_loop.py --context-only    # just build context, don't call claude
 
 Environment:
-  AWS_DEFAULT_REGION (default: us-east-1)
-  AWS_PROFILE for credential selection
-  LOOP_TARGET_PASS_RATE (default: 0.6)
+  CLAUDE_CLI   — path to claude CLI (default: claude)
+  LOOP_TARGET  — stop when acceptance_rate >= this (default: 0.6)
+
+Cloud desktop:
+  Accessible via: ssh cloud
+  Runs all Docker containers for SWE-bench
+  Docker uses AWS Bedrock as the LLM inside containers
 """
 
 import argparse
 import hashlib
 import json
 import os
-import re
 import subprocess
 import sys
-import textwrap
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-import boto3
-
-# ── Constants ──────────────────────────────────────────────────────────────────
+# ── Paths ──────────────────────────────────────────────────────────────────────
 
 SCRIPT_DIR    = Path(__file__).parent
 REPO_ROOT     = SCRIPT_DIR.parent
 TARGET_SCRIPT = SCRIPT_DIR / "run_with_jingu_gate.py"
 PROGRAM_MD    = SCRIPT_DIR / "program.md"
 JOURNAL_PATH  = REPO_ROOT / "results" / "loop_journal.jsonl"
-CONTEXT_PATH  = REPO_ROOT / "results" / "loop_context.md"
+DOCS_DIR      = REPO_ROOT / "docs" / "swebench"
 
-EVAL_METRIC   = "acceptance_rate"   # immutable
-
-# Bedrock model
-CLAUDE_MODEL  = "bedrock/global.anthropic.claude-sonnet-4-5-20250929-v1:0"
-CLAUDE_REGION = os.environ.get("AWS_DEFAULT_REGION", "us-east-1")
+CLAUDE_CLI    = os.environ.get("CLAUDE_CLI", "claude")
 
 DEFAULT_INSTANCES = [
     "django__django-11039",
@@ -90,8 +87,7 @@ def append_journal(entry: dict) -> None:
         f.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
 
-def summarize_journal(rounds: list[dict]) -> str:
-    """Compact summary of past rounds for Claude context."""
+def format_round_history(rounds: list[dict]) -> str:
     if not rounds:
         return "No previous rounds."
     lines = []
@@ -101,22 +97,253 @@ def summarize_journal(rounds: list[dict]) -> str:
         rate   = metric.get("acceptance_rate", 0.0)
         acc    = metric.get("accepted", 0)
         tot    = metric.get("total", 0)
-        hyp    = r.get("hypothesis", "")[:150]
-        change = r.get("change_summary", "")[:150]
-        nexts  = r.get("next_steps", "")[:150]
+        hyp    = r.get("hypothesis", "")[:200]
+        change = r.get("change_summary", "")[:200]
+        nexts  = r.get("next_steps", "")[:200]
         commit = r.get("committed", False)
         delta  = f" delta={r['delta']:+.1%}" if "delta" in r else ""
+        note   = r.get("note", "")
         lines.append(
-            f"Round {rn}: {acc}/{tot} ({rate:.1%}){delta} committed={commit}\n"
-            f"  hyp: {hyp}\n"
-            f"  change: {change}\n"
+            f"Round {rn}: {acc}/{tot} ({rate:.1%}){delta} committed={commit}"
+            + (f" [{note}]" if note else "") + "\n"
+            f"  hypothesis: {hyp}\n"
+            f"  change_summary: {change}\n"
             f"  next_steps: {nexts}"
         )
-    return "\n".join(lines)
+    return "\n\n".join(lines)
 
-# ── Runner ─────────────────────────────────────────────────────────────────────
+# ── File hash ──────────────────────────────────────────────────────────────────
 
-def run_batch(instances: list[str], output_dir: Path, workers: int, max_attempts: int, stagger: int) -> dict:
+def file_hash(path: Path) -> str:
+    if not path.exists():
+        return ""
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+# ── Context builder ────────────────────────────────────────────────────────────
+
+def build_context(round_num: int, past_rounds: list[dict], instances: list[str]) -> str:
+    program_goals = PROGRAM_MD.read_text() if PROGRAM_MD.exists() else "(program.md not found)"
+    current_code  = TARGET_SCRIPT.read_text() if TARGET_SCRIPT.exists() else "(run_with_jingu_gate.py not found)"
+    round_history = format_round_history(past_rounds)
+
+    # Last metric for quick reference
+    last_metric_str = "No previous runs."
+    if past_rounds:
+        last = past_rounds[-1]
+        m = last.get("metric", {})
+        last_metric_str = (
+            f"acceptance_rate={m.get('acceptance_rate', 0):.1%} "
+            f"({m.get('accepted', 0)}/{m.get('total', 0)}) "
+            f"fail_counts={json.dumps(m.get('fail_counts', {}))}"
+        )
+        if "metric_after" in last:
+            ma = last["metric_after"]
+            last_metric_str += (
+                f"\n  After change: acceptance_rate={ma.get('acceptance_rate', 0):.1%} "
+                f"({ma.get('accepted', 0)}/{ma.get('total', 0)})"
+            )
+
+    return f"""# AutoResearch Loop — Round {round_num}
+
+You are the autonomous optimization agent for jingu-swebench.
+Your goal is to improve the acceptance_rate on SWE-bench instances.
+
+---
+
+## System Architecture
+
+- **Local Mac**: You are running here. `run_with_jingu_gate.py` is here.
+- **Cloud Desktop**: All Docker containers run here. Access via `ssh cloud`.
+  - Path on cloud: `~/jingu-swebench/`
+  - Docker is running, SWE-bench images may be cached
+  - Python available: `~/.local/share/mise/shims/python`
+  - AWS Bedrock credentials already configured
+- **Modal**: mini-SWE-agent uses Modal for sandbox execution
+- **sb-cli**: For official SWE-bench cloud evaluation (no Docker needed)
+
+## Reference Docs (read these if needed)
+- `{DOCS_DIR}/README.md` — quick reference + prediction format
+- `{DOCS_DIR}/evaluation.md` — harness evaluation commands
+- `{DOCS_DIR}/datasets.md` — dataset structure, FAIL_TO_PASS semantics
+- `{DOCS_DIR}/harness_reference.md` — full parameter reference
+- `{DOCS_DIR}/docker_setup.md` — Docker setup and caching
+
+---
+
+## Program Goals (FIXED — never modify)
+
+{program_goals}
+
+---
+
+## Round History (most recent last)
+
+{round_history}
+
+## Last Known Metric
+{last_metric_str}
+
+## Instances Being Tested
+{", ".join(instances)}
+
+---
+
+## Current run_with_jingu_gate.py
+
+```python
+{current_code}
+```
+
+---
+
+## Your Task for Round {round_num}
+
+You have FULL AUTONOMY to do whatever is needed to improve the acceptance_rate.
+
+You CAN:
+- Read the round history above and identify the dominant failure pattern
+- SSH to cloud desktop (`ssh cloud`) to investigate, run tests, check Docker logs
+- Run a dry-run or full eval batch on cloud desktop
+- Read any log file, check environment state, debug root causes
+- Modify `{TARGET_SCRIPT}` (the ONLY code file you may change)
+- Fetch documentation from the web if needed
+- Read the docs in `{DOCS_DIR}/`
+
+You MUST NOT:
+- Modify `auto_loop.py`, `program.md`, or `compare_groups.py`
+- Make compound changes (ONE change at a time)
+- Modify the acceptance_rate metric definition
+
+## Workflow
+
+1. Analyze — study round history, identify the highest-impact failure mode
+2. Investigate — if you need more data, SSH to cloud and look at logs/outputs
+3. Hypothesize — form ONE testable hypothesis
+4. Implement — make ONE targeted change to `run_with_jingu_gate.py`
+5. Record — write your result to `{REPO_ROOT}/results/loop_round_{round_num:03d}_result.json`
+
+## Result Format
+
+After completing your work, write this exact JSON to:
+`{REPO_ROOT}/results/loop_round_{round_num:03d}_result.json`
+
+```json
+{{
+  "round": {round_num},
+  "hypothesis": "one sentence: what you believe will improve acceptance_rate and why",
+  "change_summary": "what specific change you made to run_with_jingu_gate.py (or 'none')",
+  "expected_improvement": "e.g. +5pp acceptance_rate by reducing PARSE_FAILED",
+  "next_steps": "what to try next if this hypothesis is wrong or if it works",
+  "actions_taken": ["list", "of", "things", "you", "did"]
+}}
+```
+
+If you made no change, set change_summary to "none" and explain why in hypothesis.
+
+Go ahead — analyze the situation and take action.
+""".strip()
+
+# ── Claude Code executor ───────────────────────────────────────────────────────
+
+def run_claude_agent(context: str, round_num: int, timeout_s: int) -> dict:
+    """Invoke Claude Code CLI with context. Returns parsed result."""
+    result_path = REPO_ROOT / "results" / f"loop_round_{round_num:03d}_result.json"
+    result_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Remove stale result from previous attempt
+    if result_path.exists():
+        result_path.unlink()
+
+    hash_before = file_hash(TARGET_SCRIPT)
+
+    print(f"  [loop] invoking Claude Code (timeout={timeout_s}s)...")
+    print(f"  [loop] result will be written to: {result_path.name}")
+
+    cmd = [CLAUDE_CLI, "--print", "--no-markdown", "-p", context]
+
+    try:
+        proc = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=timeout_s,
+            cwd=str(REPO_ROOT),
+        )
+    except subprocess.TimeoutExpired:
+        print(f"  [loop] Claude Code timed out after {timeout_s}s")
+        return {"success": False, "note": "timeout", "file_changed": False}
+    except FileNotFoundError:
+        print(f"  [loop] ERROR: claude CLI not found at: {CLAUDE_CLI}")
+        print(f"  [loop] Install: npm install -g @anthropic-ai/claude-code")
+        sys.exit(1)
+
+    hash_after   = file_hash(TARGET_SCRIPT)
+    file_changed = (hash_after != hash_before)
+
+    print(f"  [loop] Claude exit={proc.returncode}  file_changed={file_changed}")
+    if proc.returncode != 0 and proc.stderr:
+        print(f"  [loop] stderr: {proc.stderr[:300]}")
+
+    # Read result JSON written by Claude
+    result = {}
+    if result_path.exists():
+        try:
+            result = json.loads(result_path.read_text())
+            print(f"  [loop] result JSON loaded from {result_path.name}")
+        except json.JSONDecodeError as e:
+            print(f"  [loop] result JSON parse error: {e}")
+    else:
+        print(f"  [loop] WARNING: Claude did not write result JSON to {result_path.name}")
+        # Try to extract JSON from stdout as fallback
+        import re
+        match = re.search(r'\{[^{}]*"hypothesis"[^{}]*\}', proc.stdout, re.DOTALL)
+        if match:
+            try:
+                result = json.loads(match.group())
+                print(f"  [loop] extracted result from stdout (fallback)")
+            except json.JSONDecodeError:
+                pass
+
+    return {
+        "success": bool(result),
+        "file_changed": file_changed,
+        "hypothesis": result.get("hypothesis", ""),
+        "change_summary": result.get("change_summary", "none"),
+        "expected_improvement": result.get("expected_improvement", ""),
+        "next_steps": result.get("next_steps", ""),
+        "actions_taken": result.get("actions_taken", []),
+        "note": result.get("note", ""),
+        "stdout_tail": proc.stdout[-500:] if proc.stdout else "",
+    }
+
+# ── Git helpers ────────────────────────────────────────────────────────────────
+
+def git_commit(message: str) -> bool:
+    subprocess.run(["git", "add", str(TARGET_SCRIPT)], cwd=str(REPO_ROOT), capture_output=True)
+    r = subprocess.run(
+        ["git", "commit", "-m", message],
+        cwd=str(REPO_ROOT), capture_output=True, text=True
+    )
+    if r.returncode == 0:
+        print(f"  [loop] committed: {message.splitlines()[0][:80]}")
+        return True
+    print(f"  [loop] commit failed: {r.stderr.strip()[:200]}")
+    return False
+
+
+def git_reset_target() -> None:
+    subprocess.run(
+        ["git", "checkout", "HEAD", "--", str(TARGET_SCRIPT)],
+        cwd=str(REPO_ROOT), check=True
+    )
+    print(f"  [loop] reset {TARGET_SCRIPT.name} to HEAD")
+
+# ── Eval runner (for measuring delta after Claude's change) ───────────────────
+
+def run_local_eval(instances: list[str], output_dir: Path, workers: int,
+                   max_attempts: int, stagger: int) -> dict:
+    """Run run_with_jingu_gate.py locally to measure acceptance_rate."""
+    import re
     output_dir.mkdir(parents=True, exist_ok=True)
     log_path = output_dir / "run.log"
 
@@ -129,17 +356,17 @@ def run_batch(instances: list[str], output_dir: Path, workers: int, max_attempts
         "--stagger", str(stagger),
     ]
 
-    print(f"  [loop] running {len(instances)} instances → {output_dir.name}")
+    print(f"  [eval] running {len(instances)} instances → {output_dir.name}")
     t0 = time.time()
     with open(log_path, "w") as lf:
-        proc = subprocess.run(cmd, stdout=lf, stderr=subprocess.STDOUT, cwd=str(REPO_ROOT))
-    elapsed = time.time() - t0
-    print(f"  [loop] done in {elapsed:.0f}s (exit={proc.returncode})")
+        subprocess.run(cmd, stdout=lf, stderr=subprocess.STDOUT, cwd=str(REPO_ROOT))
+    print(f"  [eval] done in {time.time() - t0:.0f}s")
 
-    return parse_results(output_dir, instances, log_path)
+    return _parse_results(output_dir, instances, log_path)
 
 
-def parse_results(output_dir: Path, instances: list[str], log_path: Path) -> dict:
+def _parse_results(output_dir: Path, instances: list[str], log_path: Path) -> dict:
+    import re
     preds_path = output_dir / "jingu-predictions.jsonl"
     preds = {}
     if preds_path.exists():
@@ -153,490 +380,217 @@ def parse_results(output_dir: Path, instances: list[str], log_path: Path) -> dic
         log_text = log_path.read_text()
         for iid in instances:
             pattern = rf"\[jingu\] {re.escape(iid)}.*?(?=\[jingu\] |\Z)"
-            matches = re.findall(pattern, log_text, re.DOTALL)
-            for m in matches:
+            for m in re.findall(pattern, log_text, re.DOTALL):
                 for code in ["EMPTY_PATCH", "PARSE_FAILED", "UNGROUNDED_PATCH",
                              "PATCH_APPLY_FAILED", "TESTS_NOT_IMPROVED"]:
                     if code in m:
                         failures[iid].append(code)
 
     accepted_ids = list(preds.keys())
-    total    = len(instances)
-    accepted = len(accepted_ids)
-
+    accepted     = len(accepted_ids)
+    total        = len(instances)
     fail_counts: dict[str, int] = {}
     for codes in failures.values():
-        for code in codes:
-            fail_counts[code] = fail_counts.get(code, 0) + 1
-
-    patch_lines = [len(preds[iid]["model_patch"].splitlines()) for iid in accepted_ids]
-    avg_lines   = sum(patch_lines) / len(patch_lines) if patch_lines else 0.0
-
-    per_instance = {}
-    for iid in instances:
-        per_instance[iid] = {
-            "accepted": iid in preds,
-            "fail_codes": failures.get(iid, []),
-            "patch_lines": len(preds[iid]["model_patch"].splitlines()) if iid in preds else 0,
-        }
+        for c in codes:
+            fail_counts[c] = fail_counts.get(c, 0) + 1
+    patch_lines = [len(preds[i]["model_patch"].splitlines()) for i in accepted_ids]
 
     return {
-        "accepted": accepted,
-        "total": total,
-        "acceptance_rate": accepted / total if total > 0 else 0.0,
+        "accepted": accepted, "total": total,
+        "acceptance_rate": accepted / total if total else 0.0,
         "accepted_ids": accepted_ids,
         "fail_counts": fail_counts,
-        "avg_patch_lines": avg_lines,
-        "per_instance": per_instance,
+        "avg_patch_lines": sum(patch_lines) / len(patch_lines) if patch_lines else 0.0,
+        "per_instance": {
+            iid: {"accepted": iid in preds,
+                  "fail_codes": failures.get(iid, []),
+                  "patch_lines": len(preds[iid]["model_patch"].splitlines()) if iid in preds else 0}
+            for iid in instances
+        },
     }
-
-# ── Context builder ────────────────────────────────────────────────────────────
-
-def build_context_doc(
-    round_num: int,
-    current_metric: dict,
-    past_rounds: list[dict],
-    current_code: str,
-    instances: list[str],
-    program_goals: str,
-) -> str:
-    per_instance_lines = []
-    for iid, info in current_metric.get("per_instance", {}).items():
-        status = "ACCEPTED" if info["accepted"] else "REJECTED"
-        codes  = ", ".join(info["fail_codes"]) if info["fail_codes"] else "no_failure_logged"
-        per_instance_lines.append(
-            f"  {status}  {iid}  fail_codes=[{codes}]  patch_lines={info['patch_lines']}"
-        )
-
-    past_summary = summarize_journal(past_rounds)
-
-    return textwrap.dedent(f"""
-    # AutoResearch Context — Round {round_num}
-
-    ## Program Goals (FIXED — never modify these)
-    {program_goals}
-
-    ## Current Metric (Round {round_num} baseline — BEFORE your change)
-    - acceptance_rate: {current_metric['acceptance_rate']:.1%}  ({current_metric['accepted']}/{current_metric['total']})
-    - avg_patch_lines: {current_metric['avg_patch_lines']:.1f}
-    - fail_counts: {json.dumps(current_metric['fail_counts'])}
-
-    ## Per-Instance Results
-    {chr(10).join(per_instance_lines)}
-
-    ## Round History (last 10 rounds)
-    {past_summary}
-
-    ## Current run_with_jingu_gate.py (the ONLY file you may modify)
-    ```python
-    {current_code}
-    ```
-
-    ## Test Instances
-    {", ".join(instances)}
-
-    ---
-
-    ## Your Task
-
-    You are the hypothesis agent in an AutoResearch loop optimizing a SWE-bench patch agent.
-
-    Step 1 — ANALYZE:
-    Study the failure patterns and round history carefully.
-    Identify the single most impactful improvement you can make.
-
-    Step 2 — DECIDE:
-    State your hypothesis: what change will improve acceptance_rate, and why.
-    ONE change at a time. Do NOT compound multiple changes.
-
-    Step 3 — IMPLEMENT:
-    Output the complete new content of run_with_jingu_gate.py with your ONE change applied.
-    Output the ENTIRE file — not a diff, not a partial snippet.
-
-    Step 4 — SUMMARIZE:
-    After the file, output exactly this JSON block:
-
-    ```json
-    {{
-      "hypothesis": "one sentence: what you believe and why",
-      "change_summary": "what specific thing you changed and where",
-      "expected_improvement": "e.g. acceptance_rate +5pp by reducing PARSE_FAILED",
-      "next_steps": "what to try next if this hypothesis is wrong"
-    }}
-    ```
-
-    Constraints:
-    - Modify ONLY run_with_jingu_gate.py
-    - ONE change only (no compound changes)
-    - Change must be reversible (loop will git reset if metric does not improve)
-    - Do NOT modify the metric definition, auto_loop.py, or program.md
-    - The file content you output will directly replace run_with_jingu_gate.py
-    """).strip()
-
-# ── Claude executor (Bedrock) ──────────────────────────────────────────────────
-
-SYSTEM_PROMPT = """\
-You are an expert software engineering research agent optimizing a SWE-bench patch generation system.
-You operate in an AutoResearch loop. Your job is to analyze experiment results and make ONE targeted
-improvement to the system's strategy file.
-
-You will receive context including: program goals, current metrics, per-instance results, round history,
-and the current source code. You will output the complete modified source file followed by a JSON summary.
-
-Critical rules:
-- Output the ENTIRE file content (not a diff)
-- Make exactly ONE change
-- Never modify the eval metric definition
-- Your output determines what runs next — be precise and complete
-"""
-
-
-def call_claude_bedrock(context_doc: str) -> str:
-    """Call Claude via Bedrock. Returns raw response text."""
-    # Try cross-region inference first, fall back to direct model ID
-    model_ids_to_try = [
-        CLAUDE_MODEL,
-        "anthropic.claude-sonnet-4-5-20250929-v1:0",
-        "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
-    ]
-
-    client = boto3.client("bedrock-runtime", region_name=CLAUDE_REGION)
-
-    for model_id in model_ids_to_try:
-        try:
-            body = {
-                "anthropic_version": "bedrock-2023-05-31",
-                "max_tokens": 8192,
-                "system": SYSTEM_PROMPT,
-                "messages": [{"role": "user", "content": context_doc}],
-            }
-            resp = client.invoke_model(
-                modelId=model_id,
-                body=json.dumps(body),
-                contentType="application/json",
-                accept="application/json",
-            )
-            data = json.loads(resp["body"].read())
-            return data["content"][0]["text"]
-        except client.exceptions.ValidationException as e:
-            print(f"  [loop] model {model_id} failed: {e}. Trying next...")
-            continue
-        except Exception:
-            raise
-
-    raise RuntimeError(f"All model IDs failed: {model_ids_to_try}")
-
-
-def extract_file_and_summary(raw: str, original_code: str) -> tuple[str | None, dict | None]:
-    """
-    Extract new file content and JSON summary from Claude response.
-    Returns (new_file_content, summary_dict) or (None, None) on failure.
-    """
-    # Extract JSON summary (last ```json block)
-    fenced_json = re.findall(r'```json\s*([\s\S]*?)```', raw)
-    summary = None
-    if fenced_json:
-        for candidate in reversed(fenced_json):
-            try:
-                summary = json.loads(candidate.strip())
-                break
-            except json.JSONDecodeError:
-                pass
-
-    # Extract file content (largest ```python block that looks like the file)
-    fenced_python = re.findall(r'```python\s*([\s\S]*?)```', raw)
-    new_content = None
-    if fenced_python:
-        # Pick the largest block (the full file, not a snippet)
-        candidates = sorted(fenced_python, key=len, reverse=True)
-        for candidate in candidates:
-            # Must contain key signatures from the original file
-            if "run_with_jingu_gate" in candidate or "jingu_structural_check" in candidate:
-                new_content = candidate.strip()
-                break
-        if not new_content:
-            # Fall back to largest block if no signature match
-            new_content = candidates[0].strip() if candidates else None
-
-    # If no fenced block, try to extract between known markers
-    if not new_content:
-        # Look for content between "#!/usr/bin/env python3" and the JSON block
-        match = re.search(r'(#!/usr/bin/env python3[\s\S]*?)```json', raw)
-        if match:
-            new_content = match.group(1).strip()
-
-    return new_content, summary
-
-
-def file_hash(path: Path) -> str:
-    if not path.exists():
-        return ""
-    return hashlib.sha256(path.read_bytes()).hexdigest()
-
-
-def run_claude_code_agent(context_doc: str) -> dict:
-    """
-    Call Claude Bedrock with context, extract new file + summary.
-    Returns result dict.
-    """
-    print(f"  [loop] calling Claude (Bedrock)...")
-    hash_before  = file_hash(TARGET_SCRIPT)
-    original_code = TARGET_SCRIPT.read_text()
-
-    try:
-        raw = call_claude_bedrock(context_doc)
-    except Exception as e:
-        print(f"  [loop] Bedrock call failed: {e}")
-        return {
-            "success": False, "file_changed": False,
-            "hypothesis": "", "change_summary": f"Bedrock error: {e}",
-            "expected_improvement": "", "next_steps": "",
-            "raw_output": str(e),
-        }
-
-    print(f"  [loop] Claude responded ({len(raw)} chars)")
-
-    new_content, summary = extract_file_and_summary(raw, original_code)
-
-    if new_content and new_content != original_code:
-        # Write new file
-        TARGET_SCRIPT.write_text(new_content)
-        print(f"  [loop] wrote new {TARGET_SCRIPT.name} ({len(new_content)} chars)")
-    else:
-        if not new_content:
-            print(f"  [loop] could not extract file content from Claude response")
-        else:
-            print(f"  [loop] Claude returned identical file content — no change")
-
-    hash_after  = file_hash(TARGET_SCRIPT)
-    changed     = (hash_after != hash_before)
-
-    return {
-        "success": bool(summary) and changed,
-        "file_changed": changed,
-        "hypothesis": summary.get("hypothesis", "") if summary else "",
-        "change_summary": summary.get("change_summary", "") if summary else "",
-        "expected_improvement": summary.get("expected_improvement", "") if summary else "",
-        "next_steps": summary.get("next_steps", "") if summary else "",
-        "raw_output": raw[:2000],
-    }
-
-# ── Git helpers ────────────────────────────────────────────────────────────────
-
-def git_commit(message: str) -> bool:
-    subprocess.run(["git", "add", str(TARGET_SCRIPT)], cwd=str(REPO_ROOT), capture_output=True)
-    r = subprocess.run(
-        ["git", "commit", "-m", message],
-        cwd=str(REPO_ROOT), capture_output=True, text=True
-    )
-    if r.returncode == 0:
-        print(f"  [loop] committed: {message[:80]}")
-        return True
-    print(f"  [loop] commit failed: {r.stderr.strip()[:200]}")
-    return False
-
-
-def git_reset_target() -> None:
-    subprocess.run(
-        ["git", "checkout", "HEAD", "--", str(TARGET_SCRIPT)],
-        cwd=str(REPO_ROOT), check=True
-    )
-    print(f"  [loop] reset {TARGET_SCRIPT.name} to HEAD")
-
-# ── Program goals ──────────────────────────────────────────────────────────────
-
-def load_program_goals() -> str:
-    if PROGRAM_MD.exists():
-        return PROGRAM_MD.read_text()
-    return textwrap.dedent("""
-    GOAL: Maximize acceptance_rate on SWE-bench instances.
-    METRIC: acceptance_rate = accepted / total (higher is better)
-    TARGET: >= 60% acceptance rate
-    CONSTRAINT: patches must pass structural gate + apply gate
-    """).strip()
 
 # ── Main loop ──────────────────────────────────────────────────────────────────
 
 def main():
-    parser = argparse.ArgumentParser(description="AutoResearch loop for jingu-swebench")
-    parser.add_argument("--instances", nargs="+", default=DEFAULT_INSTANCES)
+    parser = argparse.ArgumentParser(description="AutoResearch loop — Claude Code as agent")
     parser.add_argument("--max-rounds", type=int, default=20)
-    parser.add_argument("--workers", type=int, default=4)
+    parser.add_argument("--instances", nargs="+", default=DEFAULT_INSTANCES)
+    parser.add_argument("--workers", type=int, default=2,
+                        help="Workers for local eval (default 2; cloud desktop runs the real evals)")
     parser.add_argument("--max-attempts", type=int, default=3)
     parser.add_argument("--stagger", type=int, default=20)
     parser.add_argument("--target", type=float,
-                        default=float(os.environ.get("LOOP_TARGET_PASS_RATE", "0.6")))
-    parser.add_argument("--dry-run", action="store_true",
-                        help="Run baseline eval + build context, but don't call Claude")
+                        default=float(os.environ.get("LOOP_TARGET", "0.6")))
+    parser.add_argument("--claude-timeout", type=int, default=600,
+                        help="Timeout for Claude Code agent in seconds (default 600)")
+    parser.add_argument("--context-only", action="store_true",
+                        help="Just build and print the context document, don't call Claude")
+    parser.add_argument("--no-eval", action="store_true",
+                        help="Skip baseline eval (use last round's metric as baseline)")
     args = parser.parse_args()
 
     print(f"""
-╔══════════════════════════════════════════════════════╗
-║  jingu-swebench AutoResearch Loop                    ║
-║  instances={len(args.instances)}  max_rounds={args.max_rounds}  target={args.target:.0%}    ║
-║  model: Claude via AWS Bedrock                       ║
-╚══════════════════════════════════════════════════════╝
+╔══════════════════════════════════════════════════════════╗
+║  jingu-swebench AutoResearch Loop                        ║
+║  agent: Claude Code (claude --print)                     ║
+║  eval:  cloud desktop Docker + AWS Bedrock               ║
+║  target: {args.target:.0%}  max_rounds={args.max_rounds}                  ║
+╚══════════════════════════════════════════════════════════╝
 """)
 
-    program_goals = load_program_goals()
-    past_rounds   = load_journal()
-    round_num     = len([r for r in past_rounds if r.get("hypothesis") != "TARGET_REACHED"]) + 1
+    past_rounds = load_journal()
+    round_num   = len([r for r in past_rounds if r.get("hypothesis") != "TARGET_REACHED"]) + 1
 
     if past_rounds:
-        print(f"  [loop] resuming from round {round_num} ({len(past_rounds)} past rounds)")
-        last_rate = past_rounds[-1].get("metric", {}).get("acceptance_rate", 0)
-        print(f"  [loop] last round: acceptance_rate={last_rate:.1%}\n")
+        last      = past_rounds[-1]
+        last_rate = last.get("metric", {}).get("acceptance_rate", 0)
+        print(f"  Resuming from round {round_num} ({len(past_rounds)} past rounds)")
+        print(f"  Last acceptance_rate: {last_rate:.1%}\n")
 
     for _ in range(args.max_rounds):
-        print(f"\n{'='*60}")
+        print(f"\n{'='*62}")
         print(f"  ROUND {round_num}  [{datetime.now().strftime('%H:%M:%S')}]")
-        print(f"{'='*60}")
+        print(f"{'='*62}")
 
-        # ── Step 1: Baseline eval ──────────────────────────────────────────────
-        out_dir = REPO_ROOT / "results" / f"loop_round_{round_num:03d}_baseline"
-        metric  = run_batch(
-            instances=args.instances,
-            output_dir=out_dir,
-            workers=args.workers,
-            max_attempts=args.max_attempts,
-            stagger=args.stagger,
-        )
+        # ── Step 1: Baseline metric ────────────────────────────────────────────
+        # Claude Code will run the real eval on cloud desktop.
+        # Here we track the last known metric for context.
+        last_metric = {}
+        if past_rounds:
+            last_entry = past_rounds[-1]
+            # If previous round improved, use metric_after; otherwise metric
+            if last_entry.get("improved"):
+                last_metric = last_entry.get("metric_after", last_entry.get("metric", {}))
+            else:
+                last_metric = last_entry.get("metric", {})
 
-        rate = metric["acceptance_rate"]
-        print(f"\n  METRIC: {rate:.1%}  ({metric['accepted']}/{metric['total']})")
-        print(f"  fail_counts: {metric['fail_counts']}")
-
-        if rate >= args.target:
-            print(f"\n  TARGET REACHED: {rate:.1%} >= {args.target:.1%}")
-            append_journal({
-                "round": round_num,
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-                "metric": metric,
-                "hypothesis": "TARGET_REACHED",
-                "change_summary": "none",
-                "committed": False,
-            })
-            break
-
-        # ── Step 2: Build context ─────────────────────────────────────────────
-        current_code = TARGET_SCRIPT.read_text()
-        context_doc  = build_context_doc(
-            round_num=round_num,
-            current_metric=metric,
-            past_rounds=past_rounds,
-            current_code=current_code,
-            instances=args.instances,
-            program_goals=program_goals,
-        )
-
-        # Save context for debugging
-        CONTEXT_PATH.parent.mkdir(parents=True, exist_ok=True)
-        CONTEXT_PATH.write_text(context_doc)
-
-        if args.dry_run:
-            print(f"\n  [dry-run] context written to: {CONTEXT_PATH}")
-            append_journal({
-                "round": round_num,
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-                "metric": metric,
-                "hypothesis": "DRY_RUN",
-                "change_summary": "not applied",
-                "committed": False,
-            })
-            print(f"  [dry-run] done.")
-            break
-
-        # ── Step 3: Claude Code-style agent makes the change ──────────────────
-        result = run_claude_code_agent(context_doc)
-
-        print(f"\n  HYPOTHESIS:   {result['hypothesis'][:120]}")
-        print(f"  CHANGE:       {result['change_summary'][:120]}")
-        print(f"  EXPECTED:     {result['expected_improvement'][:120]}")
-        print(f"  NEXT STEPS:   {result['next_steps'][:120]}")
-
-        if not result["file_changed"]:
-            print(f"  [loop] no file change — skipping re-eval")
-            append_journal({
-                "round": round_num,
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-                "metric": metric,
-                "hypothesis": result["hypothesis"],
-                "change_summary": "no change made",
-                "expected_improvement": result["expected_improvement"],
-                "next_steps": result["next_steps"],
-                "committed": False,
-                "note": "Claude ran but file unchanged",
-            })
-            round_num  += 1
-            past_rounds = load_journal()
-            continue
-
-        # ── Step 4: Re-eval with new code ─────────────────────────────────────
-        print(f"\n  [loop] re-evaluating with new code...")
-        out_dir_new = REPO_ROOT / "results" / f"loop_round_{round_num:03d}_new"
-        metric_new  = run_batch(
-            instances=args.instances,
-            output_dir=out_dir_new,
-            workers=args.workers,
-            max_attempts=args.max_attempts,
-            stagger=args.stagger,
-        )
-        rate_new = metric_new["acceptance_rate"]
-        improved = rate_new > rate
-
-        print(f"\n  BEFORE: {rate:.1%}   AFTER: {rate_new:.1%}   {'↑ IMPROVED' if improved else '↓ NO IMPROVEMENT'}")
-
-        # ── Step 5: Commit or rollback ────────────────────────────────────────
-        committed = False
-        if improved:
-            msg = (
-                f"experiment(loop-r{round_num}): {result['change_summary'][:60]}\n\n"
-                f"Before: {rate:.1%}  After: {rate_new:.1%}\n"
-                f"Hypothesis: {result['hypothesis'][:120]}"
+        if not args.no_eval and not past_rounds:
+            # First round: run a baseline eval locally so we have something
+            print(f"  [loop] running baseline eval (round 1 only)...")
+            out_dir     = REPO_ROOT / "results" / f"loop_round_{round_num:03d}_baseline"
+            last_metric = run_local_eval(
+                args.instances, out_dir, args.workers, args.max_attempts, args.stagger
             )
-            committed = git_commit(msg)
-        else:
-            git_reset_target()
+            rate = last_metric.get("acceptance_rate", 0)
+            print(f"  Baseline: {rate:.1%} ({last_metric.get('accepted',0)}/{last_metric.get('total',0)})")
+            print(f"  fail_counts: {last_metric.get('fail_counts', {})}")
 
-        # ── Step 6: Write journal ─────────────────────────────────────────────
-        append_journal({
+            if rate >= args.target:
+                print(f"\n  TARGET REACHED at baseline: {rate:.1%}")
+                append_journal({
+                    "round": round_num,
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "metric": last_metric,
+                    "hypothesis": "TARGET_REACHED",
+                    "change_summary": "none",
+                    "committed": False,
+                })
+                break
+
+        # ── Step 2: Build context ──────────────────────────────────────────────
+        context = build_context(
+            round_num=round_num,
+            past_rounds=past_rounds,
+            instances=args.instances,
+        )
+
+        if args.context_only:
+            print(f"\n  [context-only] context length: {len(context)} chars")
+            print("\n" + "─"*62)
+            print(context[:3000])
+            if len(context) > 3000:
+                print(f"\n  ... ({len(context)-3000} more chars)")
+            break
+
+        # ── Step 3: Claude Code agent ──────────────────────────────────────────
+        hash_before = file_hash(TARGET_SCRIPT)
+        result      = run_claude_agent(context, round_num, args.claude_timeout)
+
+        print(f"\n  HYPOTHESIS:   {result.get('hypothesis','')[:120]}")
+        print(f"  CHANGE:       {result.get('change_summary','')[:120]}")
+        print(f"  EXPECTED:     {result.get('expected_improvement','')[:120]}")
+        print(f"  NEXT STEPS:   {result.get('next_steps','')[:120]}")
+        if result.get("actions_taken"):
+            print(f"  ACTIONS:      {result['actions_taken']}")
+
+        file_changed = result.get("file_changed", False)
+
+        # ── Step 4: Re-eval if file changed ───────────────────────────────────
+        metric_new = None
+        improved   = False
+        rate_new   = 0.0
+        rate_old   = last_metric.get("acceptance_rate", 0.0)
+
+        if file_changed:
+            print(f"\n  [loop] file changed — running eval to measure delta...")
+            out_dir_new = REPO_ROOT / "results" / f"loop_round_{round_num:03d}_new"
+            metric_new  = run_local_eval(
+                args.instances, out_dir_new, args.workers, args.max_attempts, args.stagger
+            )
+            rate_new = metric_new["acceptance_rate"]
+            improved = rate_new > rate_old
+            print(f"  BEFORE: {rate_old:.1%}   AFTER: {rate_new:.1%}   {'↑ IMPROVED' if improved else '↓ NO IMPROVEMENT'}")
+        else:
+            print(f"  [loop] no file change — skipping re-eval")
+
+        # ── Step 5: Commit or rollback ─────────────────────────────────────────
+        committed = False
+        if file_changed:
+            if improved:
+                msg = (
+                    f"experiment(loop-r{round_num}): {result.get('change_summary','')[:60]}\n\n"
+                    f"Before: {rate_old:.1%}  After: {rate_new:.1%}\n"
+                    f"Hypothesis: {result.get('hypothesis','')[:120]}"
+                )
+                committed = git_commit(msg)
+            else:
+                git_reset_target()
+
+        # ── Step 6: Journal ────────────────────────────────────────────────────
+        entry: dict = {
             "round": round_num,
             "timestamp": datetime.now(timezone.utc).isoformat(),
-            "metric": metric,
-            "metric_after": metric_new,
-            "delta": round(rate_new - rate, 4),
-            "improved": improved,
-            "hypothesis": result["hypothesis"],
-            "expected_improvement": result["expected_improvement"],
-            "change_summary": result["change_summary"],
-            "next_steps": result["next_steps"],
+            "hypothesis": result.get("hypothesis", ""),
+            "change_summary": result.get("change_summary", "none"),
+            "expected_improvement": result.get("expected_improvement", ""),
+            "next_steps": result.get("next_steps", ""),
+            "actions_taken": result.get("actions_taken", []),
             "committed": committed,
-            "claude_output_preview": result["raw_output"][:500],
-        })
+        }
+        if last_metric:
+            entry["metric"] = last_metric
+        if metric_new:
+            entry["metric_after"] = metric_new
+            entry["delta"]        = round(rate_new - rate_old, 4)
+            entry["improved"]     = improved
+        if result.get("note"):
+            entry["note"] = result["note"]
 
+        append_journal(entry)
+
+        # ── Step 7: Next round ────────────────────────────────────────────────
         if improved:
-            print(f"  [loop] committed. New baseline: {rate_new:.1%}")
-        else:
-            print(f"  [loop] rolled back. Baseline unchanged: {rate:.1%}")
+            print(f"  Committed. New baseline: {rate_new:.1%}")
+        elif file_changed:
+            print(f"  Rolled back. Baseline: {rate_old:.1%}")
 
         round_num  += 1
         past_rounds = load_journal()
 
-        final_rate = rate_new if improved else rate
+        final_rate = rate_new if improved else rate_old
         if final_rate >= args.target:
-            print(f"\n  TARGET REACHED after round {round_num-1}: {final_rate:.1%}")
+            print(f"\n  TARGET REACHED: {final_rate:.1%}")
             break
 
-    # ── Final summary ──────────────────────────────────────────────────────────
-    print(f"\n{'='*60}")
+    # ── Summary ────────────────────────────────────────────────────────────────
+    print(f"\n{'='*62}")
     print(f"  Loop finished. Journal: {JOURNAL_PATH}")
     all_rounds = load_journal()
     if all_rounds:
         rates = [r.get("metric", {}).get("acceptance_rate", 0) for r in all_rounds]
-        print(f"  Best:    {max(rates):.1%}")
-        print(f"  Latest:  {rates[-1]:.1%}")
-        print(f"  Rounds:  {len(all_rounds)}")
-    print(f"{'='*60}\n")
+        print(f"  Best:   {max(rates):.1%}")
+        print(f"  Rounds: {len(all_rounds)}")
+    print(f"{'='*62}\n")
 
 
 if __name__ == "__main__":
