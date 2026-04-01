@@ -19,6 +19,7 @@ const n = getArg("--n") ? parseInt(getArg("--n")!, 10) : 5
 const sequential = args.includes("--sequential")
 const parallelInstances = args.includes("--parallel-instances")
 const maxAttempts = getArg("--max-attempts") ? parseInt(getArg("--max-attempts")!, 10) : undefined
+const skipBaselineTest = args.includes("--skip-baseline-test")
 const strategySet = args.includes("--baseline")
   ? STRATEGIES_BASELINE
   : args.includes("--ablation")
@@ -104,7 +105,7 @@ async function runInstance(instance: BenchmarkInstance, wsBase: string, predicti
   const t0 = Date.now()
   console.log(`\n[${ts()}] === ${instance.instanceId} ===`)
 
-  const { best, all } = await runMultiStrategy(instance, wsBase, strategySet, { sequential, maxAttempts })
+  const { best, all } = await runMultiStrategy(instance, wsBase, strategySet, { sequential, maxAttempts, skipBaselineTest })
 
   const strategyStats: Record<string, StrategyMetrics> = {}
   for (const r of all) {

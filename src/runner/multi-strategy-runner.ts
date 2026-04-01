@@ -18,7 +18,7 @@ export async function runMultiStrategy(
   instance: BenchmarkInstance,
   workspaceBase: string,
   strategies: SearchStrategy[],
-  opts: { sequential?: boolean; maxAttempts?: number } = {}
+  opts: { sequential?: boolean; maxAttempts?: number; skipBaselineTest?: boolean } = {}
 ): Promise<MultiStrategyResult> {
   const instanceSlug = instance.instanceId.replace(/\//g, "__")
 
@@ -26,7 +26,10 @@ export async function runMultiStrategy(
   const cacheDir = join(workspaceBase, "__cache__", instanceSlug)
   const baselineCacheFile = join(workspaceBase, "__cache__", `${instanceSlug}.baseline.json`)
   let sharedBaseline: { passed: number; failed: number; errors: number } | undefined
-  if (existsSync(baselineCacheFile)) {
+  if (opts.skipBaselineTest) {
+    sharedBaseline = { passed: 0, failed: 0, errors: 0 }
+    console.log(`  [jingu] baseline (skipped)`)
+  } else if (existsSync(baselineCacheFile)) {
     sharedBaseline = JSON.parse(readFileSync(baselineCacheFile, "utf8"))
     console.log(`  [jingu] baseline (cached): passed=${sharedBaseline!.passed} failed=${sharedBaseline!.failed}`)
   } else if (existsSync(join(cacheDir, ".git"))) {
