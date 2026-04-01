@@ -324,34 +324,68 @@ def run_claude_agent(context: str, round_num: int, timeout_s: int) -> dict:
 
     hash_before = file_hash(TARGET_SCRIPT)
 
+    log_path = REPO_ROOT / "results" / f"loop_round_{round_num:03d}_agent.log"
     print(f"  [loop] invoking Claude Code (timeout={timeout_s}s)...")
     print(f"  [loop] result will be written to: {result_path.name}")
+    print(f"  [loop] live log: tail -f {log_path}")
 
     cmd = [CLAUDE_CLI, "--print", "--output-format", "text",
            "--dangerously-skip-permissions", "-p", context]
 
+    stdout_chunks = []
+    stderr_chunks = []
+    returncode = -1
+
     try:
-        proc = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=timeout_s,
-            cwd=str(REPO_ROOT),
-        )
-    except subprocess.TimeoutExpired:
-        print(f"  [loop] Claude Code timed out after {timeout_s}s")
-        return {"success": False, "note": "timeout", "file_changed": False}
+        with open(log_path, "w", buffering=1) as log_f:
+            import select
+            proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                cwd=str(REPO_ROOT),
+            )
+            deadline = time.monotonic() + timeout_s
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    proc.kill()
+                    proc.wait()
+                    print(f"  [loop] Claude Code timed out after {timeout_s}s")
+                    return {"success": False, "note": "timeout", "file_changed": False}
+                rlist, _, _ = select.select([proc.stdout, proc.stderr], [], [], min(remaining, 1.0))
+                for stream in rlist:
+                    line = stream.readline()
+                    if not line:
+                        continue
+                    log_f.write(line)
+                    if stream is proc.stdout:
+                        stdout_chunks.append(line)
+                    else:
+                        stderr_chunks.append(line)
+                if proc.poll() is not None and not rlist:
+                    # Drain remaining
+                    for line in proc.stdout:
+                        log_f.write(line); stdout_chunks.append(line)
+                    for line in proc.stderr:
+                        log_f.write(line); stderr_chunks.append(line)
+                    break
+            returncode = proc.wait()
     except FileNotFoundError:
         print(f"  [loop] ERROR: claude CLI not found at: {CLAUDE_CLI}")
         print(f"  [loop] Install: npm install -g @anthropic-ai/claude-code")
         sys.exit(1)
 
+    stdout = "".join(stdout_chunks)
+    stderr = "".join(stderr_chunks)
+
     hash_after   = file_hash(TARGET_SCRIPT)
     file_changed = (hash_after != hash_before)
 
-    print(f"  [loop] Claude exit={proc.returncode}  file_changed={file_changed}")
-    if proc.returncode != 0 and proc.stderr:
-        print(f"  [loop] stderr: {proc.stderr[:300]}")
+    print(f"  [loop] Claude exit={returncode}  file_changed={file_changed}")
+    if returncode != 0 and stderr:
+        print(f"  [loop] stderr: {stderr[:300]}")
 
     # Read result JSON written by Claude
     result = {}
@@ -365,7 +399,7 @@ def run_claude_agent(context: str, round_num: int, timeout_s: int) -> dict:
         print(f"  [loop] WARNING: Claude did not write result JSON to {result_path.name}")
         # Try to extract JSON from stdout as fallback
         import re
-        match = re.search(r'\{[^{}]*"hypothesis"[^{}]*\}', proc.stdout, re.DOTALL)
+        match = re.search(r'\{[^{}]*"hypothesis"[^{}]*\}', stdout, re.DOTALL)
         if match:
             try:
                 result = json.loads(match.group())
@@ -382,7 +416,7 @@ def run_claude_agent(context: str, round_num: int, timeout_s: int) -> dict:
         "next_steps": result.get("next_steps", ""),
         "actions_taken": result.get("actions_taken", []),
         "note": result.get("note", ""),
-        "stdout_tail": proc.stdout[-500:] if proc.stdout else "",
+        "stdout_tail": stdout[-500:] if stdout else "",
     }
 
 # ── Git helpers ────────────────────────────────────────────────────────────────
