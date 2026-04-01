@@ -549,87 +549,117 @@ def _ssh(cmd: str, timeout: int = 600, prefix: str = "") -> subprocess.Completed
 
 def run_cloud_eval(instances: list[str], output_dir: Path, workers: int,
                    max_attempts: int, stagger: int) -> dict:
-    """Two-stage eval: generate patches on cloud, then fast-eval resolve rate.
+    """Two-stage eval: generate patches locally, then fast-eval on cloud (Docker).
 
-    Stage 1 (~3-5 min): SSH → cloud → run_with_jingu_gate.py → patches
-    Stage 2 (~10s):     SSH → cloud → fast_eval.py → resolve_rate
+    Stage 1 (LOCAL, ~15-20 min): run_with_jingu_gate.py → patches via Bedrock
+    Stage 2 (CLOUD,  ~2-3 min):  ssh → fast_eval.py → Docker pytest → resolve_rate
 
     acceptance_rate = Jingu gate pass rate (structural)
     resolve_rate    = FAIL_TO_PASS test pass rate (semantic, fast signal)
     """
     import re
+    t_total = time.time()
     run_name = output_dir.name
     output_dir.mkdir(parents=True, exist_ok=True)
-    log_path  = output_dir / "run.log"
+    log_path = output_dir / "run.log"
 
-    # ── Refresh AWS credentials on cloud (Bedrock calls will fail if expired) ──
-    print(f"  [eval] refreshing AWS credentials on cloud...")
-    ada = _ssh(
-        "~/.toolbox/bin/ada credentials update "
-        "--account=235494812052 --provider=conduit "
-        "--role=IibsAdminAccess-DO-NOT-DELETE --once",
-        timeout=60, prefix="ada"
-    )
-    if ada.returncode != 0:
-        print(f"  [eval] WARNING: ada refresh failed")
-    else:
-        print(f"  [eval] credentials refreshed")
-
-    # ── Sync scripts to cloud ─────────────────────────────────────────────────
-    # Always sync both: run_with_jingu_gate.py (agent-modifiable) and
-    # swebench_infra.py (infrastructure, imported by gate file).
-    for local_file, remote_name in [
-        (TARGET_SCRIPT, "run_with_jingu_gate.py"),
-        (SCRIPT_DIR / "swebench_infra.py", "swebench_infra.py"),
-    ]:
-        sync = subprocess.run(
-            ["scp", str(local_file), f"{CLOUD_HOST}:{CLOUD_SCRIPTS}/{remote_name}"],
-            capture_output=True, text=True, timeout=30
-        )
-        if sync.returncode != 0:
-            print(f"  [eval] WARNING: scp sync failed for {remote_name}: {sync.stderr[:100]}")
-        else:
-            print(f"  [eval] synced {remote_name} to cloud")
-
-    # ── Stage 1: Generate patches on cloud ───────────────────────────────────
-    cloud_out = f"{CLOUD_RESULTS}/{run_name}"
-    gate_cmd = (
-        f"{CLOUD_PYTHON} {CLOUD_SCRIPTS}/run_with_jingu_gate.py "
-        f"--instance-ids {' '.join(instances)} "
-        f"--output {cloud_out} "
-        f"--workers {workers} "
-        f"--max-attempts {max_attempts} "
-        f"--stagger {stagger}"
-    )
-    print(f"  [eval:stage1] patch generation on cloud ({len(instances)} instances)...")
+    # ── Stage 1: Generate patches LOCALLY ────────────────────────────────────
+    # run_with_jingu_gate.py runs on the laptop, calls Bedrock directly.
+    # No ssh needed for patch generation.
+    LOCAL_PYTHON = sys.executable
+    gate_cmd = [
+        LOCAL_PYTHON, str(TARGET_SCRIPT),
+        "--instance-ids", *instances,
+        "--output", str(output_dir),
+        "--workers", str(workers),
+        "--max-attempts", str(max_attempts),
+        "--stagger", str(stagger),
+    ]
+    print(f"  [eval:stage1] patch generation LOCAL ({len(instances)} instances, "
+          f"workers={workers}, max_attempts={max_attempts})...")
     t0 = time.time()
-    r1 = _ssh(gate_cmd, timeout=max_attempts * len(instances) * 300 + 60, prefix="stage1")
+
+    with open(log_path, "w", buffering=1) as log_f:
+        proc = subprocess.Popen(
+            gate_cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True, cwd=str(REPO_ROOT),
+        )
+        import select as _sel
+        deadline = t0 + max_attempts * len(instances) * 400 + 60
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                proc.kill(); proc.wait()
+                print(f"  [eval:stage1] TIMEOUT")
+                break
+            rlist, _, _ = _sel.select([proc.stdout], [], [], min(remaining, 1.0))
+            if rlist:
+                line = proc.stdout.readline()
+                if line:
+                    log_f.write(line)
+                    print(f"  [stage1] {line.rstrip()}", flush=True)
+            if proc.poll() is not None:
+                for line in proc.stdout:
+                    log_f.write(line)
+                    print(f"  [stage1] {line.rstrip()}", flush=True)
+                break
+
     stage1_time = time.time() - t0
-    # Save log locally
-    with open(log_path, "w") as lf:
-        lf.write(r1.stdout + r1.stderr)
-    print(f"  [eval:stage1] done in {stage1_time:.0f}s")
+    print(f"  [eval:stage1] done in {stage1_time:.0f}s  (rc={proc.returncode})")
 
-    # ── Copy predictions back ─────────────────────────────────────────────────
-    preds_remote = f"{cloud_out}/jingu-predictions.jsonl"
+    # Parse run_report.json for LLM usage summary
+    report_path = output_dir / "run_report.json"
+    llm_summary = {}
+    if report_path.exists():
+        try:
+            rpt = json.loads(report_path.read_text())
+            mu = rpt.get("model_usage", {})
+            llm_summary = {
+                "api_calls":     mu.get("total_api_calls", 0),
+                "input_tokens":  mu.get("total_input_tokens", 0),
+                "output_tokens": mu.get("total_output_tokens", 0),
+                "cost_usd":      mu.get("total_cost_usd", 0),
+                "avg_calls":     mu.get("avg_calls_per_instance", 0),
+                "avg_cost":      mu.get("avg_cost_per_instance", 0),
+            }
+            print(f"\n  ┌─ Stage 1 Summary ───────────────────────────────────")
+            print(f"  │  wall_time   : {stage1_time:.0f}s")
+            print(f"  │  api_calls   : {llm_summary['api_calls']} total  ({llm_summary['avg_calls']} avg/instance)")
+            print(f"  │  tokens in   : {llm_summary['input_tokens']:,}")
+            print(f"  │  tokens out  : {llm_summary['output_tokens']:,}")
+            print(f"  │  cost        : ${llm_summary['cost_usd']:.4f} total  (${llm_summary['avg_cost']:.4f} avg/instance)")
+            per = mu.get("per_instance", {})
+            for iid in instances:
+                u = per.get(iid, {})
+                accepted = (output_dir / "jingu-predictions.jsonl").exists()
+                print(f"  │  {iid:35s}  calls={u.get('api_calls',0):3d}  cost=${u.get('cost_usd',0):.3f}")
+            print(f"  └────────────────────────────────────────────────────\n")
+        except Exception:
+            pass
+
+    # ── Copy predictions to cloud for fast_eval ───────────────────────────────
     preds_local  = output_dir / "jingu-predictions.jsonl"
-    print(f"  [eval] copying predictions from cloud...")
-    scp_r = subprocess.run(
-        ["scp", f"{CLOUD_HOST}:{preds_remote}", str(preds_local)],
-        capture_output=True, text=True, timeout=60
-    )
-    if scp_r.returncode != 0:
-        print(f"  [eval] WARNING: scp copy-back failed (rc={scp_r.returncode}): {scp_r.stderr.strip()[:200]}")
-    else:
-        size = preds_local.stat().st_size if preds_local.exists() else 0
-        print(f"  [eval] predictions copied ({size} bytes → {preds_local.name})")
+    cloud_out    = f"{CLOUD_RESULTS}/{run_name}"
+    preds_remote = f"{cloud_out}/jingu-predictions.jsonl"
 
-    # ── Stage 2: Fast resolve eval on cloud ───────────────────────────────────
+    # ── Stage 2: Fast resolve eval on cloud (Docker) ──────────────────────────
     resolve_rate = 0.0
     resolved_ids: list[str] = []
     fast_results: dict = {}
+    stage2_time = 0.0
 
-    if preds_local.exists():
+    if preds_local.exists() and preds_local.stat().st_size > 0:
+        # Ensure remote dir exists, then scp predictions up
+        _ssh(f"mkdir -p {cloud_out}", timeout=15, prefix="mkdir")
+        scp_up = subprocess.run(
+            ["scp", str(preds_local), f"{CLOUD_HOST}:{preds_remote}"],
+            capture_output=True, text=True, timeout=60,
+        )
+        if scp_up.returncode != 0:
+            print(f"  [eval] WARNING: scp predictions→cloud failed: {scp_up.stderr[:100]}")
+        else:
+            print(f"  [eval] predictions uploaded to cloud ({preds_local.stat().st_size} bytes)")
+
         fast_cmd = (
             f"{CLOUD_PYTHON} {CLOUD_SCRIPTS}/fast_eval.py "
             f"--predictions {preds_remote} "
@@ -637,13 +667,12 @@ def run_cloud_eval(instances: list[str], output_dir: Path, workers: int,
             f"--workers {min(workers, len(instances))} "
             f"--remote ''"
         )
-        print(f"  [eval:stage2] fast resolve eval on cloud...")
+        print(f"  [eval:stage2] fast resolve eval on cloud (Docker)...")
         t1 = time.time()
-        r2 = _ssh(fast_cmd, timeout=120, prefix="stage2")
+        r2 = _ssh(fast_cmd, timeout=180, prefix="stage2")
         stage2_time = time.time() - t1
         print(f"  [eval:stage2] done in {stage2_time:.0f}s")
 
-        # Parse fast_eval output
         for line in (r2.stdout + r2.stderr).splitlines():
             if "✓ resolved" in line:
                 iid = line.strip().split(":")[0].strip()
@@ -654,13 +683,30 @@ def run_cloud_eval(instances: list[str], output_dir: Path, workers: int,
                 fast_results[iid] = False
 
         resolve_rate = len(resolved_ids) / len(instances) if instances else 0.0
+    else:
+        print(f"  [eval:stage2] SKIPPED — no predictions file")
+
+    # ── Final summary ─────────────────────────────────────────────────────────
+    total_time = time.time() - t_total
+    print(f"\n  ┌─ Eval Summary ──────────────────────────────────────")
+    print(f"  │  stage1 (patch gen, local) : {stage1_time:.0f}s")
+    print(f"  │  stage2 (docker eval, cloud): {stage2_time:.0f}s")
+    print(f"  │  total                      : {total_time:.0f}s")
+    print(f"  │  resolve_rate               : {resolve_rate:.1%}  ({len(resolved_ids)}/{len(instances)})")
+    print(f"  │  resolved                   : {resolved_ids}")
+    for iid in instances:
+        sym = "✓" if fast_results.get(iid) else "✗"
+        print(f"  │    {sym} {iid}")
+    print(f"  └────────────────────────────────────────────────────\n")
 
     base_results = _parse_results(output_dir, instances, log_path)
-    base_results["resolve_rate"]  = resolve_rate
-    base_results["resolved_ids"]  = resolved_ids
-    base_results["fast_results"]  = fast_results
-    # Use resolve_rate as primary metric for loop decisions
+    base_results["resolve_rate"]   = resolve_rate
+    base_results["resolved_ids"]   = resolved_ids
+    base_results["fast_results"]   = fast_results
     base_results["acceptance_rate"] = resolve_rate
+    base_results["llm_summary"]    = llm_summary
+    base_results["stage1_time_s"]  = round(stage1_time, 1)
+    base_results["stage2_time_s"]  = round(stage2_time, 1)
     return base_results
 
 
