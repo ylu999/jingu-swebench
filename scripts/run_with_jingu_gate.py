@@ -13,8 +13,10 @@ Usage:
     --output results/mini-swe-agent/
 
 Environment:
-  Uses Modal (swerex_modal) for sandbox execution.
+  Uses Docker (local SWE-bench eval images) for sandbox execution.
   Uses Bedrock (global.anthropic.claude-sonnet-4-5-20250929-v1:0) for LLM.
+  Images must be pre-built via: python -m swebench.harness.prepare_images
+  Image naming: swebench/sweb.eval.x86_64.<id_with_1776>:latest
 """
 
 import argparse
@@ -55,13 +57,15 @@ BASE_CONFIG = {
         "model_class": "litellm",
         "model_name": MODEL,
         "model_kwargs": {
-            "parallel_tool_calls": False,
+            "drop_params": True,
+            # litellm 1.83 bug: parallel_tool_calls=true/false sends malformed tool_choice to Bedrock.
+            # Setting None suppresses the param entirely, which works correctly.
+            "parallel_tool_calls": None,
         },
     },
     "environment": {
-        "environment_class": "swerex_modal",
-        "startup_timeout": 120,
-        "runtime_timeout": 1800,
+        "environment_class": "docker",
+        "container_timeout": "30m",
     },
     "agent": {
         "mode": "yolo",
