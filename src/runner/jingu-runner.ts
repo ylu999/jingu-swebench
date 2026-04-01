@@ -24,17 +24,31 @@ const MAX_FILE_LINES = 350
 // centered on it. Falls back to head-of-file if no anchor found.
 const WINDOW_SIZE = 120
 function extractRelevantWindow(lines: string[], anchors: string[]): { content: string; note: string } {
+  // Helper: search for anchor in file (case-insensitive, also tries snake_case conversion)
+  const findAnchorLine = (anchor: string): number => {
+    // Exact match: def/class {anchor}
+    let idx = lines.findIndex((l) =>
+      l.match(new RegExp(`\\b(def|class)\\s+${anchor.replace(/[.*+?^${}()|[\\]\\]/g, "\\$&")}\\b`))
+    )
+    if (idx >= 0) return idx
+    // Case-insensitive match: def/class contains anchor (handles _get_FIELD_display vs GetFieldDisplay)
+    const anchorLower = anchor.toLowerCase().replace(/_/g, "")
+    idx = lines.findIndex((l) => {
+      const m = l.match(/\b(?:def|class)\s+(\w+)/)
+      if (!m) return false
+      return m[1].toLowerCase().replace(/_/g, "").includes(anchorLower.slice(0, 8))
+    })
+    return idx
+  }
   if (anchors.length > 0) {
     for (const anchor of anchors) {
-      const idx = lines.findIndex((l) =>
-        l.match(new RegExp(`\\b(def|class)\\s+${anchor.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`))
-      )
+      const idx = findAnchorLine(anchor)
       if (idx >= 0) {
         const start = Math.max(0, idx - 10)
         const end = Math.min(lines.length, idx + WINDOW_SIZE)
         return {
           content: lines.slice(start, end).join("\n"),
-          note: `(lines ${start + 1}–${end} of ${lines.length}, anchored on "${anchor}")`,
+          note: `(lines ${start + 1}\u2013${end} of ${lines.length}, anchored on "${anchor}")`,
         }
       }
     }
@@ -43,10 +57,9 @@ function extractRelevantWindow(lines: string[], anchors: string[]): { content: s
   const end = Math.min(lines.length, MAX_FILE_LINES)
   return {
     content: lines.slice(0, end).join("\n"),
-    note: lines.length > end ? `(lines 1–${end} of ${lines.length}, truncated)` : "",
+    note: lines.length > end ? `(lines 1\u2013${end} of ${lines.length}, truncated)` : "",
   }
 }
-
 function readWorkspaceFiles(
   workspace: Workspace,
   filePaths: string[],
@@ -227,12 +240,22 @@ function findFilesFromFailToPass(instance: BenchmarkInstance, workspace: Workspa
         mappedModulePaths.add(`${repoModule}.core.checks`)
       }
       // "migrations.test_X" → look in "{repoModule}/db/migrations/"
+      // Also add specific module path: "migrations.test_autodetector" → "django.db.migrations.autodetector"
       if (first === "migrations" && parts.length >= 2) {
         mappedModulePaths.add(`${repoModule}.db.migrations`)
+        const testSubjectMig = last.replace(/^test_/, "")  // e.g. "autodetector", "writer"
+        mappedModulePaths.add(`${repoModule}.db.migrations.${testSubjectMig}`)
       }
       // "invalid_models_tests.test_X" → look in "{repoModule}/db/models/"
       if (first === "invalid_models_tests") {
         mappedModulePaths.add(`${repoModule}.db.models.fields`)
+        mappedModulePaths.add(`${repoModule}.db.models`)
+      }
+      // "model_fields.X" → look in "{repoModule}/db/models/fields/" and related
+      // The Django test app "model_fields" tests django.db.models.fields AND django.db.models.base
+      if (first === "model_fields") {
+        mappedModulePaths.add(`${repoModule}.db.models.fields`)
+        mappedModulePaths.add(`${repoModule}.db.models.base`)
         mappedModulePaths.add(`${repoModule}.db.models`)
       }
       // "view_tests.tests.test_X" → look in "{repoModule}/views/"
@@ -286,6 +309,39 @@ function findFilesFromFailToPass(instance: BenchmarkInstance, workspace: Workspa
   }
   if (mappedDirectFiles.length > 0) {
     for (const f of mappedDirectFiles) sourceFiles.add(f)
+    // Also check: if FAIL_TO_PASS method names mention a subject that matches a sibling file
+    // in the same directory but wasn't captured by module mapping, add it too.
+    // Example: test_serialize_enums in writer test → "serial" keyword → sibling serializer.py
+    const methodKeywords = new Set<string>()
+    for (const t of failToPass) {
+      const methodMatch = t.match(/^(\w+)\s*\(/) ?? t.match(/::(\w+)$/)
+      if (methodMatch) {
+        const methodName = methodMatch[1].replace(/^test_/, "")
+        for (const part of methodName.split("_")) {
+          if (part.length >= 5) methodKeywords.add(part.toLowerCase())
+        }
+      }
+    }
+    if (methodKeywords.size > 0) {
+      const checkedDirs = new Set<string>()
+      for (const mf of mappedDirectFiles) {
+        const dir = mf.includes("/") ? mf.slice(0, mf.lastIndexOf("/")) : ""
+        if (dir && !checkedDirs.has(dir)) {
+          checkedDirs.add(dir)
+          try {
+            const siblings = readdirSync(joinPath(workspace.dir, dir))
+              .filter((f) => f.endsWith(".py") && !f.includes("test") && f !== "__init__.py")
+            for (const sib of siblings) {
+              const sibBase = sib.replace(/\.py$/, "").toLowerCase()
+              const sibPath = `${dir}/${sib}`
+              if (!sourceFiles.has(sibPath) && [...methodKeywords].some((kw) => sibBase.startsWith(kw.slice(0, 6)))) {
+                sourceFiles.add(sibPath)
+              }
+            }
+          } catch { /* skip */ }
+        }
+      }
+    }
   } else {
     // git grep source tree for each symbol — skip test files
     // Try primary symbols first; if nothing found, try fallback PascalCase parts
