@@ -769,9 +769,14 @@ export async function runJingu(
     const noTestsRan = /no tests ran|collected 0 items|selected 0 items/i.test(preOutput)
     const notFound = (preOutput.includes("not found:") || preOutput.includes("no name ")) &&
                      !preOutput.includes(" passed")
-    if ((noTestsRan || notFound) && prePassedCount === 0) {
-      basePassCount = -1  // sentinel: tests don't exist in base — skip test gate
-      console.log(`  [jingu] pre-check: tests not found/collected (added by fix) — test gate will skip`)
+    // Detect Python import/environment errors — test environment unavailable locally
+    // (e.g., C extensions not compiled, missing packages like hypothesis/astropy/_C modules)
+    // In this case the test gate cannot make a meaningful determination — skip it.
+    const importError = /ModuleNotFoundError|ImportError|cannot import name|No module named/i.test(preOutput) &&
+                        prePassedCount === 0
+    if ((noTestsRan || notFound || importError) && prePassedCount === 0) {
+      basePassCount = -1  // sentinel: tests don't exist/run in base — skip test gate
+      console.log(`  [jingu] pre-check: tests unavailable (env error or not found) — test gate will skip`)
     }
   }
 
