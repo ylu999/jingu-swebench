@@ -237,7 +237,9 @@ export async function runJingu(
   // Resolve strategy against runtime context (after file injection is known).
   // This handles the Layer A → Layer C dependency:
   //   if no files injected + strict-observed-only → downgrade to "standard"
-  const strategyCtx = { injectedFiles: Object.keys(fileContents) }
+  const injectedTotalLines = Object.values(fileContents).reduce((sum, c) => sum + c.split("\n").length, 0)
+  // anchors from FAIL_TO_PASS + backtick identifiers — proxy for localization evidence strength
+  const strategyCtx = { injectedFiles: Object.keys(fileContents), injectedTotalLines, injectedAnchorCount: anchors.length }
   const rawStrategy = opts.strategy
   const { effectiveStrategy, status: resStatus, reason: resReason } =
     rawStrategy ? resolveStrategy(rawStrategy, strategyCtx) : { effectiveStrategy: undefined, status: "valid" as const, reason: undefined }
