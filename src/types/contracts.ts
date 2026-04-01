@@ -26,6 +26,7 @@ export type GateResult = {
   code:
     | "EMPTY_PATCH"
     | "PARSE_FAILED"
+    | "UNGROUNDED_PATCH"
     | "PATCH_APPLY_FAILED"
     | "TEST_EXEC_FAILED"
     | "TEST_HARNESS_UNAVAILABLE"

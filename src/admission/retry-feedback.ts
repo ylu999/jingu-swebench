@@ -48,6 +48,13 @@ export function buildRetryFeedback(attempt: AttemptResult, workspace?: Workspace
       lines.push(`\nYour patch touched: ${touched.join(", ")}`)
     }
     lines.push("\nPlease revise the patch to fix the failing tests above.")
+  } else if (failedGate.code === "UNGROUNDED_PATCH") {
+    const injected = (failedGate.details?.injectedFiles as string[] | undefined) ?? []
+    lines.push("\nYour patch targeted a file that was NOT provided to you.")
+    if (injected.length > 0) {
+      lines.push(`You MUST select one of these provided files as your target: ${injected.join(", ")}`)
+    }
+    lines.push("Only modify code that appears verbatim in the provided file contents above.")
   } else if (failedGate.code === "EMPTY_PATCH" || failedGate.code === "PARSE_FAILED") {
     lines.push("\nYour previous response did not contain a valid unified diff patch.")
     lines.push("Output ONLY the patch in unified diff format (--- / +++ / @@ lines). No explanation, no markdown.")

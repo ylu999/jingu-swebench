@@ -92,6 +92,7 @@ function buildStrategyHint(strategy?: SearchStrategy): string {
   } else if (localizationPolicy === "symbol-first") {
     lines.push("Localization: extract the key symbol (function, class, variable) from the problem statement first.")
     lines.push("Find that symbol in the provided file contents before deciding where to apply the fix.")
+    lines.push("CRITICAL: You MUST select the target file from the provided file contents. Do NOT patch a file that was not shown to you.")
   } else if (localizationPolicy === "file-first") {
     lines.push("Localization: work through the provided file contents systematically to find the defect.")
     lines.push("Consider all provided files before selecting the one to modify.")
