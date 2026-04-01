@@ -4,7 +4,7 @@ import { resolveStrategy } from "./strategy-resolver.js"
 import { propose } from "../proposer/proposer-adapter.js"
 import { structuralGate } from "../admission/structural-gate.js"
 import { applyGate } from "../admission/apply-gate.js"
-import { testGate, runTestsBaseline } from "../admission/test-gate.js"
+import { testGate, runTestsBaseline, type TestCounts } from "../admission/test-gate.js"
 import { buildRetryFeedback } from "../admission/retry-feedback.js"
 import { Workspace } from "../workspace/workspace.js"
 import { join } from "node:path"
@@ -190,7 +190,7 @@ function extractAnchors(instance: BenchmarkInstance): string[] {
 export async function runJingu(
   instance: BenchmarkInstance,
   workspaceBase: string,
-  opts: { skipTestGate?: boolean; wsDir?: string; strategy?: SearchStrategy; maxAttempts?: number } = {}
+  opts: { skipTestGate?: boolean; wsDir?: string; strategy?: SearchStrategy; maxAttempts?: number; baseline?: TestCounts } = {}
 ): Promise<InstanceRunResult> {
   const t0 = Date.now()
   console.log(`[jingu] ${instance.instanceId}`)
@@ -220,9 +220,11 @@ export async function runJingu(
     console.log(`  [jingu] checkout done @ ${instance.baseCommit.slice(0, 8)}`)
   }
 
-  // Baseline test counts before any patch
-  const baseline = runTestsBaseline(workspace, TEST_CMD)
-  console.log(`  [jingu] baseline: passed=${baseline.passed} failed=${baseline.failed}`)
+  // Baseline test counts before any patch (shared across strategies when pre-computed)
+  const baseline = opts.baseline ?? runTestsBaseline(workspace, TEST_CMD)
+  if (!opts.baseline) {
+    console.log(`  [jingu] baseline: passed=${baseline.passed} failed=${baseline.failed}`)
+  }
 
   // Read relevant files from workspace to ground LLM in exact file content
   const candidateFiles = findCandidateFiles(instance, workspace)

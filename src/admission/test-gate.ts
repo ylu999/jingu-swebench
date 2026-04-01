@@ -1,7 +1,7 @@
 import type { GateResult } from "../types/contracts.js"
 import type { Workspace } from "../workspace/workspace.js"
 
-interface TestCounts {
+export interface TestCounts {
   passed: number
   failed: number
   errors: number
