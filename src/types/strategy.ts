@@ -73,5 +73,31 @@ export const STRATEGIES_PRINCIPLE: SearchStrategy[] = [
   },
 ]
 
+// Ablation strategies — for Exp-2 layer contribution analysis
+// ab-no-c: Layer A+B, no Layer C (localization + patching, no verification constraint)
+// ab-no-a: Layer B+C, no Layer A (patching + verification, no localization hint)
+export const STRATEGIES_ABLATION: SearchStrategy[] = [
+  {
+    id: "ab-no-c",
+    promptHints: {
+      localizationPolicy: "test-driven",
+      focusStyle: "minimal-fix",
+      analysisDepth: "light",
+      maxPatchLines: 10,
+      // no verificationPolicy = Layer C absent
+    },
+  },
+  {
+    id: "ab-no-a",
+    promptHints: {
+      // no localizationPolicy = Layer A absent
+      focusStyle: "minimal-fix",
+      analysisDepth: "light",
+      maxPatchLines: 10,
+      verificationPolicy: "strict-observed-only",
+    },
+  },
+]
+
 // Default export: principle-tagged set (used in experiments)
 export const STRATEGIES: SearchStrategy[] = STRATEGIES_PRINCIPLE
