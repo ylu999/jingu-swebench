@@ -347,12 +347,18 @@ function findFilesFromFailToPass(instance: BenchmarkInstance, workspace: Workspa
                 subjectKeywords.push(...methodName.split("_"))
               }
             }
-            const match = entries.find((e) =>
-              subjectKeywords.some((kw) => kw.length >= 4 && e.toLowerCase().includes(kw.toLowerCase().slice(0, 6)))
-            )
-            // For migration dirs: pick last entry (highest number)
+            // For migration dirs: always pick last entry (highest numbered migration)
+            // Keyword matching is unreliable for migrations (all have similar names)
             const isMigrationDir = dirPath.includes("migration")
-            sourceFiles.add(`${dirPath}/${match ?? (isMigrationDir ? entries[entries.length - 1] : entries[0])}`)
+            if (isMigrationDir) {
+              sourceFiles.add(`${dirPath}/${entries[entries.length - 1]}`)
+            } else {
+              // For non-migration dirs: find file matching subject keywords
+              const match = entries.find((e) =>
+                subjectKeywords.some((kw) => kw.length >= 4 && e.toLowerCase().includes(kw.toLowerCase().slice(0, 6)))
+              )
+              sourceFiles.add(`${dirPath}/${match ?? entries[0]}`)
+            }
           }
         } catch { /* skip */ }
         if (sourceFiles.size > 0) break
