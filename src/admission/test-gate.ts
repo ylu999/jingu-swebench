@@ -166,7 +166,13 @@ export function testGate(
 
 export function runTestsBaseline(workspace: Workspace, testCmd: string): TestCounts {
   const result = workspace.exec(testCmd)
-  return parseTestOutput(result.stdout + result.stderr)
+  const counts = parseTestOutput(result.stdout + result.stderr)
+  // Rule: empty result (0/0) is NOT a valid baseline — harness is unavailable or misconfigured.
+  // A valid baseline must show at least 1 test ran (passed or failed).
+  if (counts.passed === 0 && counts.failed === 0 && counts.errors === 0) {
+    return { passed: -1, failed: -1, errors: -1 }  // sentinel: invalid harness
+  }
+  return counts
 }
 
 function tailLines(s: string, n: number): string {

@@ -20,6 +20,8 @@ export class Workspace {
       cwd: this.dir,
       encoding: "utf8",
       stdio: ["pipe", "pipe", "pipe"],
+      // PYTHONPATH=. ensures the repo's own source is importable for dev installs (django, astropy etc.)
+      env: { ...process.env, PYTHONPATH: this.dir },
     }
     try {
       const stdout = execSync(cmd, execOpts) as unknown as string
@@ -55,8 +57,14 @@ export class Workspace {
   }
 
   reset(): void {
-    this.exec("git checkout -- .")
-    this.exec("git clean -fd")
+    this.exec("git checkout -f HEAD")
+    this.exec("git clean -fdx")
+  }
+
+  removeWorktree(cacheDir: string): void {
+    // Remove this worktree from the cache repo's worktree list
+    const cache = new Workspace(cacheDir)
+    cache.exec(`git worktree remove --force "${this.dir}" 2>/dev/null || true`)
   }
 
   diff(): string {
@@ -80,10 +88,10 @@ export class Workspace {
     return ws
   }
 
-  // Clone once into a shared cache dir, then cp -r to each strategy workspace.
-  // Much faster than cloning N times — avoids redundant network transfers.
+  // Clone once into a shared cache dir, then use git worktree for each strategy workspace.
+  // git worktree shares the .git object store — no file copying, near-instant setup.
   static checkoutFromCache(repoUrl: string, baseCommit: string, targetDir: string, cacheDir: string): Workspace {
-    // Step 1: ensure cache exists (clone once)
+    // Step 1: ensure cache repo exists (clone once)
     if (!existsSync(join(cacheDir, ".git"))) {
       mkdirSync(cacheDir, { recursive: true })
       execSync(`git clone --no-local "${repoUrl}" "${cacheDir}"`, {
@@ -94,15 +102,23 @@ export class Workspace {
       cache.exec(`git fetch origin ${baseCommit} 2>/dev/null || true`)
       cache.exec(`git checkout ${baseCommit}`, { throws: true })
       cache.reset()
+    } else {
+      // Cache exists — ensure the commit is available
+      const cache = new Workspace(cacheDir)
+      cache.exec(`git fetch origin ${baseCommit} 2>/dev/null || true`)
     }
 
-    // Step 2: copy cache → target (fast local copy, no network)
-    if (!existsSync(targetDir)) {
-      execSync(`cp -r "${cacheDir}" "${targetDir}"`, { stdio: "pipe" })
+    // Step 2: create worktree (shares .git objects, only creates working tree)
+    const absTargetDir = resolve(targetDir)
+    if (!existsSync(absTargetDir)) {
+      const cache = new Workspace(cacheDir)
+      // Ensure parent directory exists
+      mkdirSync(absTargetDir.split("/").slice(0, -1).join("/"), { recursive: true })
+      // Create a detached worktree at the target commit (use absolute path — cache.exec runs in cacheDir)
+      cache.exec(`git worktree add --detach "${absTargetDir}" ${baseCommit}`, { throws: true })
     }
 
     const ws = new Workspace(targetDir)
-    ws.exec(`git checkout ${baseCommit}`, { throws: true })
     ws.reset()
     return ws
   }

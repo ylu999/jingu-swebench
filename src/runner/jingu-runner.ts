@@ -82,13 +82,166 @@ function readWorkspaceFiles(
   return result
 }
 
+// Derive source files from FAIL_TO_PASS test entries via test-class → source-class mapping.
+// Strategy:
+//   1. Parse failToPass entries to extract the test module path
+//   2. Locate the test file in the workspace tests/ directory
+//   3. Extract the "Subject under test" class name (e.g. "CharFieldTests" → "CharField")
+//   4. git grep the source tree for that class/function definition
+// Returns empty array when failToPass is absent or mapping fails.
+function findFilesFromFailToPass(instance: BenchmarkInstance, workspace: Workspace): string[] {
+  const failToPass = instance.failToPass
+  if (!failToPass || failToPass.length === 0) return []
+
+  const repoModule = instance.repo.split("/")[1] ?? ""
+  const sourceFiles = new Set<string>()
+
+  // Collect test class names and module paths from all failToPass entries.
+  // Use DOMINANT class only: the test class that appears most often in failToPass.
+  // This avoids mixing signals from unrelated test classes (e.g. admin tests + forms tests).
+  const classCounts = new Map<string, { count: number; module: string }>()
+  for (const t of failToPass) {
+    // Unittest format: "test_method (module.path.TestClass)"
+    const unittestMatch = t.match(/\(([^)]+)\)$/)
+    if (unittestMatch) {
+      const dotted = unittestMatch[1]
+      const parts = dotted.split(".")
+      if (parts.length >= 2) {
+        const cls = parts[parts.length - 1]
+        const mod = parts.slice(0, -1).join(".")
+        const entry = classCounts.get(cls) ?? { count: 0, module: mod }
+        classCounts.set(cls, { count: entry.count + 1, module: mod })
+      }
+      continue
+    }
+    // Pytest format: "path/to/test_file.py::TestClass::test_method"
+    const pytestMatch = t.match(/^([^:]+\.py)(?:::(\w+))?/)
+    if (pytestMatch) {
+      const pyPath = pytestMatch[1]
+      const cls = pytestMatch[2] ?? "__default__"
+      const mod = pyPath.replace(/\//g, ".").replace(/\.py$/, "")
+      const entry = classCounts.get(cls) ?? { count: 0, module: mod }
+      classCounts.set(cls, { count: entry.count + 1, module: mod })
+    }
+  }
+
+  // Pick top-1 class (most tests = strongest signal) as the focus
+  const testModules = new Set<string>()
+  const testClasses = new Set<string>()
+  const sorted = [...classCounts.entries()].sort((a, b) => b[1].count - a[1].count)
+  for (const [cls, { module }] of sorted.slice(0, 1)) {
+    testClasses.add(cls)
+    testModules.add(module)
+  }
+
+  // For each test class name, derive the likely source class/function name
+  // Primary: "CharFieldTests" → "CharField", "FormsMediaTestCase" → "FormsMedia", "TestValidation" → "Validation"
+  // Fallback parts (used only when primary not found): "FormsMedia" → ["Forms", "Media"]
+  const sourceSymbolsPrimary = new Set<string>()
+  const sourceSymbolsFallback = new Set<string>()
+  for (const cls of testClasses) {
+    // Strip common test class naming patterns
+    const stripped = cls.replace(/TestCase$/, "").replace(/Tests$/, "").replace(/^Test/, "")
+    if (stripped.length >= 3) sourceSymbolsPrimary.add(stripped)
+    // PascalCase parts as fallback — e.g. "FormsMedia" → ["Forms", "Media"] (last 2, most specific)
+    const parts = stripped.replace(/([A-Z])/g, " $1").trim().split(" ").filter((p) => p.length >= 3)
+    for (const part of parts.slice(-2)) {
+      if (part !== stripped) sourceSymbolsFallback.add(part)
+    }
+  }
+  // Use primary symbols first; add fallback symbols if primary produces nothing
+  const sourceSymbols = sourceSymbolsPrimary
+
+  // Also use test module path to find the test file and extract source module imports
+  // We extract "from django.X.Y import Z" → source module paths → git grep for symbols
+  const sourceModulePaths = new Set<string>()
+  for (const mod of testModules) {
+    // Try two forms: "tests/module/path.py" and "module/path.py"
+    const relPath = mod.replace(/\./g, "/") + ".py"
+    const candidates = [relPath, `tests/${relPath}`]
+    for (const candidate of candidates) {
+      const abs = joinPath(workspace.dir, candidate)
+      if (!existsSync(abs)) continue
+      try {
+        const content = readFileSync(abs, "utf8")
+        // Single-line imports only: "from django.X import Y" — avoid multiline capture
+        for (const m of content.matchAll(/^from\s+([\w.]+)\s+import\s+/gm)) {
+          const srcMod = m[1]
+          // Keep only non-test source module paths
+          if (!srcMod.includes("test") && !srcMod.startsWith(".")) {
+            sourceModulePaths.add(srcMod)
+          }
+        }
+      } catch { /* skip */ }
+      break
+    }
+  }
+
+  // Determine search scope: prefer narrowing to directories of modules referenced in test imports
+  // e.g. ["django.db", "django.forms"] → search within "django/db/" and "django/forms/"
+  // git grep takes directory paths directly (no globstar needed)
+  // Falls back to repo module root if no source modules found
+  const searchDirs: string[] = []
+  for (const srcMod of [...sourceModulePaths].slice(0, 4)) {
+    searchDirs.push(srcMod.replace(/\./g, "/") + "/")
+  }
+  if (searchDirs.length === 0 && repoModule) {
+    searchDirs.push(repoModule + "/")
+  }
+  const scopeArg = searchDirs.map((d) => `"${d}"`).join(" ")
+
+  // git grep source tree for each symbol — skip test files
+  // Try primary symbols first; if nothing found, try fallback PascalCase parts
+  const symbolSets = [sourceSymbols, sourceSymbolsFallback]
+  for (const symSet of symbolSets) {
+    for (const sym of [...symSet].slice(0, 6)) {
+      const result = workspace.exec(
+        `git grep -l "^class ${sym}\\b\\|^def ${sym}\\b" -- ${scopeArg} 2>/dev/null | grep -v test | head -2`
+      )
+      for (const line of result.stdout.split("\n").filter(Boolean)) {
+        sourceFiles.add(line.trim())
+      }
+    }
+    if (sourceFiles.size > 0) break  // found with primary symbols, skip fallback
+  }
+
+  // Fallback: if symbol grep found nothing but we have import-derived module paths,
+  // resolve the most specific module path to an actual file.
+  // e.g. "django.forms" → check django/forms/__init__.py, django/forms.py
+  //      "django.db.models.expressions" → django/db/models/expressions.py etc.
+  // Prefer the deepest (most specific) module that resolves to a file.
+  if (sourceFiles.size === 0 && sourceModulePaths.size > 0) {
+    const sorted = [...sourceModulePaths].sort((a, b) => b.split(".").length - a.split(".").length)
+    for (const mod of sorted.slice(0, 3)) {
+      const modPath = mod.replace(/\./g, "/")
+      for (const suffix of [".py", "/__init__.py"]) {
+        const candidate = modPath + suffix
+        if (existsSync(joinPath(workspace.dir, candidate)) && !candidate.includes("test")) {
+          sourceFiles.add(candidate)
+          break
+        }
+      }
+    }
+  }
+
+  return rankBySize(workspace, [...sourceFiles]).slice(0, 2)
+}
+
 // Find candidate files to inject into the prompt.
 // Priority order:
+//   0. failToPass test-class analysis (highest precision — replaces text-matching when found)
 //   1. Explicit .py paths in hints_text
 //   2. Dotted module paths in problem statement (e.g. "ascii.rst" → astropy/io/ascii/rst.py)
 //   3. Explicit .py paths in problem statement
 //   4. git grep for long identifiers (>6 chars) in backticks, restricted to repo module dir
 function findCandidateFiles(instance: BenchmarkInstance, workspace: Workspace): string[] {
+  // Step 0: failToPass-based file discovery (highest precision)
+  // If this produces results, skip text-matching entirely — text matching causes wrong file injection
+  const failToPassFiles = findFilesFromFailToPass(instance, workspace)
+  if (failToPassFiles.length > 0) {
+    return failToPassFiles
+  }
+
   const files = new Set<string>()
 
   // Only collect .py source files — docs/txt/rst excluded to prevent hallucinated line numbers

@@ -30,13 +30,27 @@ export async function runMultiStrategy(
     sharedBaseline = { passed: 0, failed: 0, errors: 0 }
     console.log(`  [jingu] baseline (skipped)`)
   } else if (existsSync(baselineCacheFile)) {
-    sharedBaseline = JSON.parse(readFileSync(baselineCacheFile, "utf8"))
-    console.log(`  [jingu] baseline (cached): passed=${sharedBaseline!.passed} failed=${sharedBaseline!.failed}`)
+    const cached = JSON.parse(readFileSync(baselineCacheFile, "utf8"))
+    if (cached.passed === -1) {
+      console.log(`  [jingu] baseline (cached INVALID — removing stale cache)`)
+      // Remove the invalid cache so we retry next time
+      try { require("node:fs").unlinkSync(baselineCacheFile) } catch {}
+    } else {
+      sharedBaseline = cached
+      console.log(`  [jingu] baseline (cached): passed=${sharedBaseline!.passed} failed=${sharedBaseline!.failed}`)
+    }
   } else if (existsSync(join(cacheDir, ".git"))) {
     const cacheWs = new Workspace(cacheDir)
-    sharedBaseline = runTestsBaseline(cacheWs, TEST_CMD)
-    writeFileSync(baselineCacheFile, JSON.stringify(sharedBaseline), "utf8")
-    console.log(`  [jingu] baseline (computed+cached): passed=${sharedBaseline.passed} failed=${sharedBaseline.failed}`)
+    const computed = runTestsBaseline(cacheWs, TEST_CMD)
+    if (computed.passed === -1) {
+      // Invalid harness: 0/0 result means test env is broken — do not cache, do not use
+      console.log(`  [jingu] baseline (INVALID HARNESS — no tests ran, skipping)`)
+      sharedBaseline = undefined
+    } else {
+      sharedBaseline = computed
+      writeFileSync(baselineCacheFile, JSON.stringify(sharedBaseline), "utf8")
+      console.log(`  [jingu] baseline (computed+cached): passed=${sharedBaseline.passed} failed=${sharedBaseline.failed}`)
+    }
   }
 
   async function runOne(strategy: SearchStrategy): Promise<StrategyRunResult> {
