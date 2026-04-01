@@ -31,7 +31,7 @@ export async function runMultiStrategy(
     console.log(`  [jingu] baseline (skipped)`)
   } else if (existsSync(baselineCacheFile)) {
     const cached = JSON.parse(readFileSync(baselineCacheFile, "utf8"))
-    if (cached.passed === -1) {
+    if (cached.passed === -1 || (cached.passed === 0 && cached.failed === 0 && cached.errors === 0)) {
       console.log(`  [jingu] baseline (cached INVALID — removing stale cache)`)
       // Remove the invalid cache so we retry next time
       try { require("node:fs").unlinkSync(baselineCacheFile) } catch {}
