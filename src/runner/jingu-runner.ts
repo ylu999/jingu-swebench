@@ -1,4 +1,5 @@
 import type { BenchmarkInstance, InstanceRunResult, AttemptResult } from "../types/contracts.js"
+import type { SearchStrategy } from "../types/strategy.js"
 import { propose } from "../proposer/proposer-adapter.js"
 import { structuralGate } from "../admission/structural-gate.js"
 import { applyGate } from "../admission/apply-gate.js"
@@ -124,12 +125,12 @@ function rankBySize(workspace: Workspace, filePaths: string[]): string[] {
 export async function runJingu(
   instance: BenchmarkInstance,
   workspaceBase: string,
-  opts: { skipTestGate?: boolean } = {}
+  opts: { skipTestGate?: boolean; wsDir?: string; strategy?: SearchStrategy } = {}
 ): Promise<InstanceRunResult> {
   const t0 = Date.now()
   console.log(`[jingu] ${instance.instanceId}`)
 
-  const wsDir = join(workspaceBase, instance.instanceId.replace(/\//g, "__"))
+  const wsDir = opts.wsDir ?? join(workspaceBase, instance.instanceId.replace(/\//g, "__"))
   let workspace: Workspace
 
   if (existsSync(join(wsDir, ".git"))) {
@@ -162,7 +163,7 @@ export async function runJingu(
   let finalPatchText: string | undefined
 
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
-    const candidate = await propose(instance, attempt, { previousFeedback, fileContents })
+    const candidate = await propose(instance, attempt, { previousFeedback, fileContents, strategy: opts.strategy })
 
     // Gate 1: structural
     const sg = structuralGate(candidate.patchText)

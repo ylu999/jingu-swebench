@@ -1,4 +1,5 @@
 import type { BenchmarkInstance } from "../types/contracts.js"
+import type { SearchStrategy } from "../types/strategy.js"
 
 export function buildSystemPrompt(): string {
   return `You are an expert software engineer solving GitHub issues.
@@ -37,7 +38,11 @@ Before writing any patch, answer these three questions in a <analysis> block:
 
 export function buildUserPrompt(
   instance: BenchmarkInstance,
-  opts: { fileContents?: Record<string, string>; previousFeedback?: string } = {}
+  opts: {
+    fileContents?: Record<string, string>
+    previousFeedback?: string
+    strategy?: SearchStrategy
+  } = {}
 ): string {
   const parts: string[] = []
 
@@ -59,9 +64,51 @@ export function buildUserPrompt(
     parts.push(`## Previous Attempt Feedback\n${opts.previousFeedback}`)
   }
 
+  const strategyHint = buildStrategyHint(opts.strategy)
+  if (strategyHint) {
+    parts.push(`## Search Strategy\n${strategyHint}`)
+  }
+
   parts.push(`## Task
 First, write a <analysis> block answering the three reasoning questions (ROOT CAUSE / WHY WRONG / MINIMAL FIX).
 Then output the unified diff patch using EXACT lines from the provided file contents as context lines.`)
 
   return parts.join("\n\n")
+}
+
+// Pure function: strategy → instruction segment injected into user prompt.
+// Returns empty string when no strategy or no meaningful hints.
+function buildStrategyHint(strategy?: SearchStrategy): string {
+  if (!strategy) return ""
+
+  const lines: string[] = []
+  const { focusStyle, analysisDepth, maxPatchLines, extraInstruction } = strategy.promptHints
+
+  if (focusStyle === "minimal-fix") {
+    lines.push("Focus: find the SINGLE smallest change that fixes the root cause.")
+    lines.push("Prefer changing one expression or condition over restructuring logic.")
+  } else if (focusStyle === "root-cause") {
+    lines.push("Focus: trace the bug to its deepest root cause before proposing a fix.")
+    lines.push("Do not fix symptoms — identify why the code is structurally wrong.")
+  } else if (focusStyle === "defensive") {
+    lines.push("Focus: fix the root cause AND add guards against related edge cases.")
+    lines.push("Consider what other inputs could trigger the same class of failure.")
+  }
+
+  if (analysisDepth === "light") {
+    lines.push("Analysis depth: light — identify the bug quickly, do not over-analyze.")
+  } else if (analysisDepth === "deep") {
+    lines.push("Analysis depth: deep — examine call sites, callers, and related code paths before deciding on the fix.")
+  }
+
+  if (maxPatchLines !== undefined) {
+    lines.push(`Patch size constraint: the patch MUST be at most ${maxPatchLines} lines of actual changes (+ and - lines combined).`)
+    lines.push("If your patch exceeds this limit, re-examine — you are likely fixing a symptom.")
+  }
+
+  if (extraInstruction) {
+    lines.push(extraInstruction)
+  }
+
+  return lines.join("\n")
 }
