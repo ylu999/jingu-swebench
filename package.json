@@ -8,6 +8,7 @@
     "run:raw": "node dist/src/cli/run.js --mode raw",
     "run:jingu": "node dist/src/cli/run.js --mode jingu",
     "run:compare": "node dist/src/cli/run.js --mode compare",
+    "run:multi": "node dist/src/cli/run-multi.js",
     "evaluate": "python scripts/evaluate.py"
   },
   "dependencies": {

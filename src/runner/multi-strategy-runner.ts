@@ -1,8 +1,7 @@
 import type { BenchmarkInstance } from "../types/contracts.js"
 import type { SearchStrategy, StrategyRunResult } from "../types/strategy.js"
 import { runJingu } from "./jingu-runner.js"
-import { scoreRun } from "./scorer.js"
-import { pickBest } from "./scorer.js"
+import { scoreRun, pickBest } from "./scorer.js"
 import { join } from "node:path"
 
 export type MultiStrategyResult = {
@@ -22,9 +21,9 @@ export async function runMultiStrategy(
     const wsDir = join(workspaceBase, instanceSlug, strategy.id)
     const runResult = await runJingu(instance, workspaceBase, { wsDir, strategy })
     const verdict = runResult.accepted ? "accepted" : "rejected"
-    const partial: StrategyRunResult = { strategyId: strategy.id, verdict, runResult, score: -Infinity }
-    const score = scoreRun(partial)
-    return { ...partial, score }
+    const result: StrategyRunResult = { strategyId: strategy.id, verdict, runResult, score: 0 }
+    result.score = scoreRun(result)
+    return result
   }
 
   let all: StrategyRunResult[]
