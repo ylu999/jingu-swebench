@@ -771,27 +771,29 @@ export async function runJingu(
           }
         }
       }
-      // PARSE_FAILED: LLM output analysis but no patch — it may need different file context.
-      // On attempt 1, try to find additional files via backtick identifier grep from problem statement.
-      if (sg.code === "PARSE_FAILED" && attempt === 1 && Object.keys(currentFileContents).length === 0) {
-        // No files injected at all — use findCandidateFiles result (already done) or grep identifiers
-        const backtickIds = [...instance.problemStatement.matchAll(/`([A-Za-z_]\w{5,})`/g)].map(m => m[1])
+      // PARSE_FAILED: LLM output analysis but no patch — it may have wrong file context.
+      // On attempt 1, grep backtick identifiers from problem statement to add the right file.
+      if (sg.code === "PARSE_FAILED" && attempt === 1) {
+        const backtickIds = [...instance.problemStatement.matchAll(/`([A-Za-z_]\w{4,})`/g)]
+          .map(m => m[1])
+          .filter(id => !id.startsWith("__"))  // skip dunder names
         const repoMod = instance.repo.split("/")[1] ?? ""
         const extraCandidates: string[] = []
-        for (const id of backtickIds.slice(0, 4)) {
+        for (const id of backtickIds.slice(0, 6)) {
           const r = workspace.exec(
             `git grep -l "def ${id}\\b\\|class ${id}\\b" -- "${repoMod}" 2>/dev/null | grep -v test | head -2`
           )
           for (const line of r.stdout.split("\n").filter(Boolean)) {
-            extraCandidates.push(line.trim())
+            const f = line.trim()
+            if (!currentInjectedFiles.includes(f)) extraCandidates.push(f)
           }
         }
         if (extraCandidates.length > 0) {
-          const extraContents = readWorkspaceFiles(workspace, extraCandidates, anchors)
+          const extraContents = readWorkspaceFiles(workspace, extraCandidates.slice(0, 2), anchors)
           if (Object.keys(extraContents).length > 0) {
             currentFileContents = { ...currentFileContents, ...extraContents }
             currentInjectedFiles = Object.keys(currentFileContents)
-            console.log(`  [jingu] adding parse-fail context files: ${Object.keys(extraContents).join(", ")}`)
+            console.log(`  [jingu] adding parse-fail context: ${Object.keys(extraContents).join(", ")}`)
           }
         }
       }
