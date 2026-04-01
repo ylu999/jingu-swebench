@@ -77,13 +77,27 @@ Then output the unified diff patch using EXACT lines from the provided file cont
 }
 
 // Pure function: strategy → instruction segment injected into user prompt.
+// Three sections: Layer A (localization), Layer B (patching), Layer C (verification).
 // Returns empty string when no strategy or no meaningful hints.
 function buildStrategyHint(strategy?: SearchStrategy): string {
   if (!strategy) return ""
 
   const lines: string[] = []
-  const { focusStyle, analysisDepth, maxPatchLines, extraInstruction } = strategy.promptHints
+  const { localizationPolicy, focusStyle, analysisDepth, maxPatchLines, verificationPolicy, extraInstruction } = strategy.promptHints
 
+  // --- Layer A: Localization ---
+  if (localizationPolicy === "test-driven") {
+    lines.push("Localization: start from the failing test name(s) to identify the source function or class under test.")
+    lines.push("Do NOT guess which file to edit — only modify code that is directly exercised by the failing test.")
+  } else if (localizationPolicy === "symbol-first") {
+    lines.push("Localization: extract the key symbol (function, class, variable) from the problem statement first.")
+    lines.push("Find that symbol in the provided file contents before deciding where to apply the fix.")
+  } else if (localizationPolicy === "file-first") {
+    lines.push("Localization: work through the provided file contents systematically to find the defect.")
+    lines.push("Consider all provided files before selecting the one to modify.")
+  }
+
+  // --- Layer B: Patching ---
   if (focusStyle === "minimal-fix") {
     lines.push("Focus: find the SINGLE smallest change that fixes the root cause.")
     lines.push("Prefer changing one expression or condition over restructuring logic.")
@@ -104,6 +118,12 @@ function buildStrategyHint(strategy?: SearchStrategy): string {
   if (maxPatchLines !== undefined) {
     lines.push(`Patch size constraint: the patch MUST be at most ${maxPatchLines} lines of actual changes (+ and - lines combined).`)
     lines.push("If your patch exceeds this limit, re-examine — you are likely fixing a symptom.")
+  }
+
+  // --- Layer C: Verification ---
+  if (verificationPolicy === "strict-observed-only") {
+    lines.push("Verification constraint: ONLY modify lines that appear verbatim in the provided file contents.")
+    lines.push("Do NOT edit any file that was not shown to you. Do NOT invent context lines.")
   }
 
   if (extraInstruction) {

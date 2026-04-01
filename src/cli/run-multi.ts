@@ -1,6 +1,6 @@
 import { loadInstances } from "../dataset/swebench-loader.js"
 import { runMultiStrategy } from "../runner/multi-strategy-runner.js"
-import { STRATEGIES } from "../types/strategy.js"
+import { STRATEGIES, STRATEGIES_BASELINE, STRATEGIES_PRINCIPLE } from "../types/strategy.js"
 import { writePrediction } from "../output/predictions-writer.js"
 import type { BenchmarkInstance } from "../types/contracts.js"
 import { join } from "node:path"
@@ -17,6 +17,7 @@ const dataset = (getArg("--dataset") ?? "lite") as "lite" | "verified"
 const n = getArg("--n") ? parseInt(getArg("--n")!, 10) : 5
 const sequential = args.includes("--sequential")
 const parallelInstances = args.includes("--parallel-instances")
+const strategySet = args.includes("--baseline") ? STRATEGIES_BASELINE : STRATEGIES_PRINCIPLE
 const instanceIdsIdx = args.indexOf("--instance-ids")
 const instanceIds: string[] =
   instanceIdsIdx >= 0 ? args.slice(instanceIdsIdx + 1).filter((a) => !a.startsWith("--")) : []
@@ -40,7 +41,7 @@ async function runInstance(instance: BenchmarkInstance, wsBase: string, predicti
   const t0 = Date.now()
   console.log(`\n[${ts()}] === ${instance.instanceId} ===`)
 
-  const { best, all } = await runMultiStrategy(instance, wsBase, STRATEGIES, { sequential })
+  const { best, all } = await runMultiStrategy(instance, wsBase, strategySet, { sequential })
 
   const strategyStats: Record<string, { verdict: string; score: number; patchLines: number; durationMs: number }> = {}
   for (const r of all) {
@@ -78,7 +79,7 @@ async function runInstance(instance: BenchmarkInstance, wsBase: string, predicti
 }
 
 async function main() {
-  console.log(`\n[${ts()}] jingu-swebench multi-strategy — dataset=${dataset} n=${n} strategies=${STRATEGIES.map((s) => s.id).join(",")} parallel-instances=${parallelInstances}\n`)
+  console.log(`\n[${ts()}] jingu-swebench multi-strategy — dataset=${dataset} n=${n} strategies=${strategySet.map((s) => s.id).join(",")} parallel-instances=${parallelInstances}\n`)
 
   let instances = await loadInstances({ dataset, n, noCache: false })
   if (instanceIds.length > 0) {
