@@ -472,6 +472,19 @@ def run_local_eval(instances: list[str], output_dir: Path, workers: int,
     output_dir.mkdir(parents=True, exist_ok=True)
     log_path  = output_dir / "run.log"
 
+    # ── Refresh AWS credentials on cloud (Bedrock calls will fail if expired) ──
+    print(f"  [eval] refreshing AWS credentials on cloud...")
+    ada = _ssh(
+        "~/.toolbox/bin/ada credentials update "
+        "--account=235494812052 --provider=conduit "
+        "--role=IibsAdminAccess-DO-NOT-DELETE --once",
+        timeout=60
+    )
+    if ada.returncode != 0:
+        print(f"  [eval] WARNING: ada refresh failed: {ada.stderr[:100]}")
+    else:
+        print(f"  [eval] credentials refreshed")
+
     # ── Sync updated run_with_jingu_gate.py to cloud ──────────────────────────
     sync = subprocess.run(
         ["scp", str(TARGET_SCRIPT), f"{CLOUD_HOST}:{CLOUD_SCRIPTS}/run_with_jingu_gate.py"],
