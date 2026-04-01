@@ -3,7 +3,7 @@ import type { SearchStrategy } from "../types/strategy.js"
 import { resolveStrategy } from "./strategy-resolver.js"
 import { propose } from "../proposer/proposer-adapter.js"
 import { structuralGate } from "../admission/structural-gate.js"
-import { applyGate } from "../admission/apply-gate.js"
+import { applyGate, normalizePatch } from "../admission/apply-gate.js"
 import { testGate, runTestsBaseline, type TestCounts } from "../admission/test-gate.js"
 import { buildRetryFeedback } from "../admission/retry-feedback.js"
 import { Workspace } from "../workspace/workspace.js"
@@ -498,8 +498,10 @@ export async function runJingu(
     }
 
     // Apply with the same fuzz level that passed the dry-run
+    // Use normalized patch if that's what passed (normalization fixes hunk counts etc.)
+    const patchToApply = ag.details?.normalized ? normalizePatch(candidate.patchText) : candidate.patchText
     const fuzz = (ag.details?.apply_strictness === "fuzz") ? 5 : 0
-    workspace.applyPatchForReal(candidate.patchText, fuzz)
+    workspace.applyPatchForReal(patchToApply, fuzz)
 
     // Gate 3: test delta (use FAIL_TO_PASS ground truth when available)
     const tg = testGate(workspace, TEST_CMD, baseline, {
