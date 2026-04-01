@@ -577,13 +577,21 @@ def run_cloud_eval(instances: list[str], output_dir: Path, workers: int,
     else:
         print(f"  [eval] credentials refreshed")
 
-    # ── Sync updated run_with_jingu_gate.py to cloud ──────────────────────────
-    sync = subprocess.run(
-        ["scp", str(TARGET_SCRIPT), f"{CLOUD_HOST}:{CLOUD_SCRIPTS}/run_with_jingu_gate.py"],
-        capture_output=True, text=True, timeout=30
-    )
-    if sync.returncode != 0:
-        print(f"  [eval] WARNING: scp sync failed: {sync.stderr[:100]}")
+    # ── Sync scripts to cloud ─────────────────────────────────────────────────
+    # Always sync both: run_with_jingu_gate.py (agent-modifiable) and
+    # swebench_infra.py (infrastructure, imported by gate file).
+    for local_file, remote_name in [
+        (TARGET_SCRIPT, "run_with_jingu_gate.py"),
+        (SCRIPT_DIR / "swebench_infra.py", "swebench_infra.py"),
+    ]:
+        sync = subprocess.run(
+            ["scp", str(local_file), f"{CLOUD_HOST}:{CLOUD_SCRIPTS}/{remote_name}"],
+            capture_output=True, text=True, timeout=30
+        )
+        if sync.returncode != 0:
+            print(f"  [eval] WARNING: scp sync failed for {remote_name}: {sync.stderr[:100]}")
+        else:
+            print(f"  [eval] synced {remote_name} to cloud")
 
     # ── Stage 1: Generate patches on cloud ───────────────────────────────────
     cloud_out = f"{CLOUD_RESULTS}/{run_name}"
