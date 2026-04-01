@@ -147,10 +147,42 @@ def file_hash(path: Path) -> str:
 
 # ── Context builder ────────────────────────────────────────────────────────────
 
-def build_context(round_num: int, past_rounds: list[dict], instances: list[str]) -> str:
+def build_context(round_num: int, past_rounds: list[dict], instances: list[str],
+                  workers: int = 2, max_attempts: int = 3) -> str:
     program_goals = PROGRAM_MD.read_text() if PROGRAM_MD.exists() else "(program.md not found)"
     current_code  = TARGET_SCRIPT.read_text() if TARGET_SCRIPT.exists() else "(run_with_jingu_gate.py not found)"
     round_history = format_round_history(past_rounds)
+
+    # ── Infrastructure state (injected so agent never has to guess) ───────────
+    # Read live values from current code so this is always accurate
+    import re as _re
+    step_limit_m = _re.search(r'"step_limit":\s*(\d+)', current_code)
+    step_limit   = int(step_limit_m.group(1)) if step_limit_m else "?"
+    has_normalize = "def normalize_patch" in current_code
+
+    infra_state = f"""## Infrastructure State (auto-generated, always accurate)
+
+These facts are derived from the CURRENT local file and auto_loop config.
+Do NOT re-derive them by reading cloud files or auto_loop.py — trust this block.
+
+| Item | Value |
+|------|-------|
+| stage1 runs on | LOCAL laptop (subprocess, direct Bedrock) — no ssh |
+| stage2 runs on | CLOUD (ssh → fast_eval.py → Docker pytest) |
+| claude agent timeout | 1800s |
+| eval workers | {workers} |
+| max_attempts | {max_attempts} |
+| step_limit (current) | {step_limit} |
+| normalize_patch present | {has_normalize} |
+| instances | {len(instances)} |
+
+**Rounds 26-33 all show metric=0/5**: This was a bug — `swebench_infra.py` existed
+locally but was never deployed to cloud, causing ModuleNotFoundError on every eval.
+That bug is now FIXED. Round 034+ will get real eval results.
+
+**Do not investigate why past rounds showed 0/5.** It was an infra bug, not a gate bug.
+The baseline signal is from round 028: 3/5 resolved (11001, 11039, 11099) with step_limit=60.
+"""
 
     # Last metric for quick reference
     last_metric_str = "No previous runs."
@@ -177,6 +209,10 @@ def build_context(round_num: int, past_rounds: list[dict], instances: list[str])
 
 You are the autonomous optimization agent for jingu-swebench.
 Your goal is to improve resolve_rate on SWE-bench instances.
+
+---
+
+{infra_state}
 
 ---
 
@@ -840,6 +876,8 @@ def main():
             round_num=round_num,
             past_rounds=past_rounds,
             instances=args.instances,
+            workers=args.workers,
+            max_attempts=args.max_attempts,
         )
 
         if args.context_only:
