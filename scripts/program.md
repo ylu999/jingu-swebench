@@ -42,6 +42,7 @@ ONLY `scripts/run_with_jingu_gate.py`:
 - `program.md` — this file
 - `compare_groups.py` — eval reporting
 - `submit-sbcli.mjs` — official submission
+- `swebench_infra.py` — eval infrastructure (timing, dataset loading, agent runner, parallelism)
 - Any file outside `scripts/run_with_jingu_gate.py`
 
 ## CRITICAL: Eval Is Owned by auto_loop, Not the Agent

@@ -278,7 +278,7 @@ You CAN:
 - Read the docs in `{DOCS_DIR}/`
 
 You MUST NOT:
-- Modify `auto_loop.py`, `program.md`, or `compare_groups.py`
+- Modify `auto_loop.py`, `program.md`, `compare_groups.py`, or `swebench_infra.py`
 - Make compound changes (ONE change at a time)
 - Modify the acceptance_rate metric definition
 
@@ -584,10 +584,16 @@ def run_cloud_eval(instances: list[str], output_dir: Path, workers: int,
     # ── Copy predictions back ─────────────────────────────────────────────────
     preds_remote = f"{cloud_out}/jingu-predictions.jsonl"
     preds_local  = output_dir / "jingu-predictions.jsonl"
-    subprocess.run(
+    print(f"  [eval] copying predictions from cloud...")
+    scp_r = subprocess.run(
         ["scp", f"{CLOUD_HOST}:{preds_remote}", str(preds_local)],
-        capture_output=True, text=True, timeout=30
+        capture_output=True, text=True, timeout=60
     )
+    if scp_r.returncode != 0:
+        print(f"  [eval] WARNING: scp copy-back failed (rc={scp_r.returncode}): {scp_r.stderr.strip()[:200]}")
+    else:
+        size = preds_local.stat().st_size if preds_local.exists() else 0
+        print(f"  [eval] predictions copied ({size} bytes → {preds_local.name})")
 
     # ── Stage 2: Fast resolve eval on cloud ───────────────────────────────────
     resolve_rate = 0.0
