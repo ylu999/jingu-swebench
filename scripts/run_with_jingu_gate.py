@@ -30,6 +30,118 @@ import traceback
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
+# ── Timing ────────────────────────────────────────────────────────────────────
+
+_t0_global = time.monotonic()
+
+class Timer:
+    """Hierarchical timing recorder."""
+    def __init__(self, name: str, parent: "Timer | None" = None):
+        self.name = name
+        self.parent = parent
+        self.t0 = time.monotonic()
+        self.t1: float | None = None
+        self.children: list["Timer"] = []
+        if parent is not None:
+            parent.children.append(self)
+
+    def stop(self) -> float:
+        self.t1 = time.monotonic()
+        return self.elapsed
+
+    @property
+    def elapsed(self) -> float:
+        end = self.t1 if self.t1 is not None else time.monotonic()
+        return end - self.t0
+
+    def report(self, indent: int = 0) -> list[str]:
+        bar_width = 30
+        total = _timing_root.elapsed if _timing_root else self.elapsed
+        frac = self.elapsed / total if total > 0 else 0
+        bar = "█" * int(frac * bar_width) + "░" * (bar_width - int(frac * bar_width))
+        prefix = "  " * indent
+        lines = [f"{prefix}{bar} {self.elapsed:6.1f}s  {self.name}"]
+        for c in self.children:
+            lines.extend(c.report(indent + 1))
+        return lines
+
+_timing_root: Timer | None = None
+_instance_timers: dict[str, Timer] = {}  # iid -> Timer
+
+# ── Model Usage Tracker ───────────────────────────────────────────────────────
+
+class ModelUsage:
+    """Usage data for one instance × attempt."""
+    def __init__(self, instance_id: str, attempt: int):
+        self.instance_id = instance_id
+        self.attempt = attempt
+        self.api_calls: int = 0
+        self.input_tokens: int = 0
+        self.output_tokens: int = 0
+        self.cost_usd: float = 0.0
+
+    def load_from_traj(self, traj_path: Path) -> None:
+        """Parse traj.json — primary source is info.model_stats; tokens from messages."""
+        if not traj_path.exists():
+            return
+        try:
+            traj = json.loads(traj_path.read_text())
+        except (json.JSONDecodeError, OSError):
+            return
+
+        stats = traj.get("info", {}).get("model_stats", {})
+        self.api_calls = int(stats.get("api_calls", 0))
+        self.cost_usd  = float(stats.get("instance_cost", 0.0))
+
+        for m in traj.get("messages", []):
+            if m.get("role") != "assistant":
+                continue
+            usage = m.get("extra", {}).get("response", {}).get("usage", {})
+            if usage:
+                self.input_tokens  += int(usage.get("prompt_tokens", 0))
+                self.output_tokens += int(usage.get("completion_tokens", 0))
+
+    def as_dict(self) -> dict:
+        return {
+            "api_calls":     self.api_calls,
+            "input_tokens":  self.input_tokens,
+            "output_tokens": self.output_tokens,
+            "cost_usd":      round(self.cost_usd, 4),
+        }
+
+
+class ModelUsageTracker:
+    """Aggregates ModelUsage across all instances and attempts."""
+    def __init__(self):
+        self._by_instance: dict[str, list[ModelUsage]] = {}
+
+    def record(self, usage: ModelUsage) -> None:
+        self._by_instance.setdefault(usage.instance_id, []).append(usage)
+
+    def per_instance(self) -> dict[str, dict]:
+        out = {}
+        for iid, usages in self._by_instance.items():
+            out[iid] = {
+                "api_calls":     sum(u.api_calls for u in usages),
+                "input_tokens":  sum(u.input_tokens for u in usages),
+                "output_tokens": sum(u.output_tokens for u in usages),
+                "cost_usd":      round(sum(u.cost_usd for u in usages), 4),
+                "attempts":      len(usages),
+            }
+        return out
+
+    def totals(self) -> dict:
+        all_u = [u for usages in self._by_instance.values() for u in usages]
+        return {
+            "api_calls":     sum(u.api_calls for u in all_u),
+            "input_tokens":  sum(u.input_tokens for u in all_u),
+            "output_tokens": sum(u.output_tokens for u in all_u),
+            "cost_usd":      round(sum(u.cost_usd for u in all_u), 4),
+        }
+
+
+_usage_tracker = ModelUsageTracker()
+
 # ── Jingu gates ───────────────────────────────────────────────────────────────
 
 def jingu_structural_check(patch_text: str) -> dict:
@@ -70,6 +182,7 @@ BASE_CONFIG = {
     "agent": {
         "mode": "yolo",
         "confirm_exit": False,  # critical: don't wait for user input
+        "step_limit": 30,       # default=250 is way too slow; 30 steps is enough for most bugs
     },
 }
 
@@ -98,6 +211,7 @@ def run_agent(
     output_dir: Path,
     attempt: int,
     previous_failure: str = "",
+    parent_timer: Timer | None = None,
 ) -> str | None:
     """Run mini-SWE-agent on one instance. Returns submission patch or None."""
     from minisweagent.run.benchmarks.swebench import process_instance
@@ -108,16 +222,27 @@ def run_agent(
     attempt_dir = output_dir / f"attempt_{attempt}"
     attempt_dir.mkdir(parents=True, exist_ok=True)
 
+    t_agent = Timer(f"agent attempt={attempt}", parent=parent_timer)
+
     # Start from swebench.yaml defaults (provides system_template, instance_template, etc.)
+    t_cfg = Timer("config load", parent=t_agent)
     config = get_config_from_spec("swebench.yaml")
-    # Merge our overrides on top
     config = recursive_merge(config, BASE_CONFIG)
-    # Inject retry hint if retrying
+    # Build instance_template_extra: tests that must pass + optional retry hint
+    extra_parts = []
+    fail_to_pass = instance.get("FAIL_TO_PASS", [])
+    if fail_to_pass:
+        tests_str = "\n".join(f"  - {t}" for t in fail_to_pass[:10])
+        extra_parts.append(
+            f"IMPORTANT: Your fix must make the following tests pass:\n{tests_str}"
+        )
     if previous_failure:
-        hint = f"Previous attempt failed: {previous_failure[:300]}"
+        extra_parts.append(f"Previous attempt failed: {previous_failure[:300]}")
+    if extra_parts:
         config = recursive_merge(config, {
-            "agent": {"instance_template_extra": hint}
+            "agent": {"instance_template_extra": "\n\n".join(extra_parts)}
         })
+    t_cfg.stop()
 
     print(f"    [agent] running {instance_id} attempt={attempt}...")
 
@@ -126,12 +251,36 @@ def run_agent(
     preds_path = attempt_dir / "preds.json"
     progress = RunBatchProgressManager(num_instances=1)
 
-    # Call process_instance (handles traj save + preds.json, confirm_exit=False in config)
+    t_llm = Timer("LLM agent loop (Bedrock)", parent=t_agent)
     try:
         process_instance(instance, attempt_dir, config, progress)
     except Exception as e:
         print(f"    [agent] ERROR: {e}")
         traceback.print_exc()
+    t_llm.stop()
+
+    # Parse traj for usage + submission
+    traj_path = attempt_dir / instance_id / f"{instance_id}.traj.json"
+    usage = ModelUsage(instance_id, attempt)
+    usage.load_from_traj(traj_path)
+    _usage_tracker.record(usage)
+
+    sub_from_traj = None
+    if traj_path.exists():
+        try:
+            traj = json.loads(traj_path.read_text())
+            sub_from_traj = traj.get("info", {}).get("submission", "")
+        except (json.JSONDecodeError, OSError):
+            pass
+
+    t_agent.llm_calls = usage.api_calls  # stash for timing tree
+    avg_s = t_llm.elapsed / usage.api_calls if usage.api_calls else 0
+    print(f"    [agent] LLM loop done in {t_llm.elapsed:.1f}s  "
+          f"bedrock_calls={usage.api_calls}  avg={avg_s:.1f}s/call  "
+          f"tokens={usage.input_tokens}in/{usage.output_tokens}out  "
+          f"cost=${usage.cost_usd:.4f}")
+
+    t_agent.stop()
 
     # Read submission from preds.json
     if preds_path.exists():
@@ -141,13 +290,8 @@ def run_agent(
             if sub:
                 return sub
 
-    # Fallback: read from traj
-    traj_path = attempt_dir / instance_id / f"{instance_id}.traj.json"
-    if traj_path.exists():
-        traj = json.loads(traj_path.read_text())
-        sub = traj.get("info", {}).get("submission", "")
-        if sub:
-            return sub
+    if sub_from_traj:
+        return sub_from_traj
 
     return None
 
@@ -155,40 +299,47 @@ def run_agent(
 
 def run_with_jingu(instance_id: str, output_dir: Path, max_attempts: int = 3) -> dict:
     """Run agent + Jingu gate with retry. Returns best result."""
+    t_inst = Timer(f"instance: {instance_id}", parent=_timing_root)
+    _instance_timers[instance_id] = t_inst
+
     print(f"  [jingu] loading instance {instance_id}...")
+    t_load = Timer("dataset load", parent=t_inst)
     instance = _load_instance(instance_id)
+    t_load.stop()
 
     candidates = []
     last_failure = ""
+    total_llm_calls = 0
 
     for attempt in range(1, max_attempts + 1):
         print(f"  [attempt {attempt}/{max_attempts}] {instance_id}")
 
-        patch = run_agent(instance, output_dir, attempt, previous_failure=last_failure)
+        patch = run_agent(instance, output_dir, attempt,
+                          previous_failure=last_failure, parent_timer=t_inst)
 
+        # llm_calls are recorded in _usage_tracker; no separate accumulation needed
+
+        t_gate = Timer(f"jingu gate attempt={attempt}", parent=t_inst)
         if not patch:
             print(f"    [gate] EMPTY — no submission")
             last_failure = "No patch was generated"
+            t_gate.stop()
             continue
 
-        # Gate: structural check
         sg = jingu_structural_check(patch)
         if not sg["pass"]:
             print(f"    [gate] FAIL structural: {sg['code']} — {sg.get('message','')}")
             last_failure = f"Structural gate failed: {sg['message']}"
+            t_gate.stop()
             continue
 
         score = score_patch(patch)
         patch_lines = len(patch.splitlines())
         print(f"    [gate] OK  score={score:.0f}  lines={patch_lines}")
+        t_gate.stop()
 
-        candidates.append({
-            "attempt": attempt,
-            "patch": patch,
-            "score": score,
-        })
+        candidates.append({"attempt": attempt, "patch": patch, "score": score})
 
-        # Feed quality hint to next attempt: if patch is over-engineered, say so
         if patch_lines > 50:
             last_failure = (
                 f"Previous patch was {patch_lines} lines — too large. "
@@ -198,16 +349,26 @@ def run_with_jingu(instance_id: str, output_dir: Path, max_attempts: int = 3) ->
         else:
             last_failure = ""
 
+    t_inst.stop()
+
+    inst_usage = _usage_tracker.per_instance().get(instance_id, {})
+    llm_calls = inst_usage.get("api_calls", 0)
+    t_inst.llm_calls = llm_calls
+
     if not candidates:
         return {
             "instance_id": instance_id,
             "accepted": False,
             "patch": "",
             "attempts": max_attempts,
+            "elapsed_s": t_inst.elapsed,
+            "model_usage": inst_usage,
         }
 
     best = max(candidates, key=lambda c: c["score"])
-    print(f"  [result] ACCEPTED  best_attempt={best['attempt']}  score={best['score']:.0f}")
+    print(f"  [result] ACCEPTED  best_attempt={best['attempt']}  score={best['score']:.0f}  "
+          f"elapsed={t_inst.elapsed:.1f}s  bedrock_calls={llm_calls}  "
+          f"cost=${inst_usage.get('cost_usd', 0):.4f}")
     return {
         "instance_id": instance_id,
         "accepted": True,
@@ -215,6 +376,8 @@ def run_with_jingu(instance_id: str, output_dir: Path, max_attempts: int = 3) ->
         "attempts": max_attempts,
         "best_attempt": best["attempt"],
         "score": best["score"],
+        "elapsed_s": t_inst.elapsed,
+        "model_usage": inst_usage,
     }
 
 def write_predictions(results: list, output_path: Path):
@@ -241,19 +404,23 @@ def main():
                         help="Seconds between sandbox starts to avoid image-pull contention (default: 15)")
     args = parser.parse_args()
 
+    global _timing_root
+    _timing_root = Timer("total run")
+
     output_dir = Path(args.output)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # Pre-load all instances in a single dataset pass (avoids N redundant downloads)
     print(f"[jingu] loading {len(args.instance_ids)} instances from dataset...")
+    t_ds = Timer("dataset prefetch", parent=_timing_root)
     _load_instances(args.instance_ids)
-    print(f"[jingu] loaded. launching {args.workers} parallel workers...")
+    t_ds.stop()
+    print(f"[jingu] loaded in {t_ds.elapsed:.1f}s. launching {args.workers} parallel workers...")
 
+    t_parallel = Timer(f"parallel workers (×{min(args.workers, len(args.instance_ids))})", parent=_timing_root)
     results = [None] * len(args.instance_ids)
 
     def _run(idx: int, iid: str):
-        # Stagger sandbox starts: idx=0 starts immediately, idx=1 waits stagger seconds, etc.
-        # This avoids all workers hammering Modal image-pull simultaneously.
         delay = idx * args.stagger
         if delay > 0:
             print(f"[jingu] {iid} waiting {delay:.0f}s before start (stagger)")
@@ -261,7 +428,7 @@ def main():
         print(f"\n[jingu] START {iid}")
         r = run_with_jingu(iid, output_dir, max_attempts=args.max_attempts)
         status = "ACCEPTED" if r["accepted"] else "FAILED"
-        print(f"\n[jingu] {status} {iid}")
+        print(f"\n[jingu] {status} {iid}  ({r.get('elapsed_s', 0):.1f}s)")
         return idx, r
 
     with ThreadPoolExecutor(max_workers=args.workers) as pool:
@@ -277,14 +444,91 @@ def main():
             except Exception as e:
                 print(f"\n[jingu] ERROR {iid}: {e}")
                 idx = args.instance_ids.index(iid)
-                results[idx] = {"instance_id": iid, "accepted": False, "patch": "", "attempts": args.max_attempts}
+                results[idx] = {"instance_id": iid, "accepted": False, "patch": "",
+                                 "attempts": args.max_attempts, "elapsed_s": 0}
             print(f"[progress] {done}/{len(args.instance_ids)} done")
 
-    print(f"\n--- Summary ---")
-    accepted = sum(1 for r in results if r and r["accepted"])
-    print(f"Accepted: {accepted}/{len(results)}")
+    t_parallel.stop()
 
+    t_write = Timer("write predictions", parent=_timing_root)
     write_predictions(results, output_dir / "jingu-predictions.jsonl")
+    t_write.stop()
+
+    _timing_root.stop()
+
+    # ── Run Report ─────────────────────────────────────────────────────────────
+    total     = _timing_root.elapsed
+    totals    = _usage_tracker.totals()
+    per_inst  = _usage_tracker.per_instance()
+    max_elapsed = max((r.get("elapsed_s", 0) for r in results if r), default=1)
+    seq_total = sum(r.get("elapsed_s", 0) for r in results if r)
+    speedup   = seq_total / t_parallel.elapsed if t_parallel.elapsed > 0 else 1
+
+    report = {
+        "instances":        len(args.instance_ids),
+        "workers":          args.workers,
+        "step_limit":       BASE_CONFIG["agent"].get("step_limit", None),
+        "wall_time_s":      round(total, 1),
+        "status":           "completed",
+        "patches_generated": sum(1 for r in results if r and r["accepted"]),
+        "model_usage": {
+            "total_api_calls":    totals["api_calls"],
+            "total_input_tokens": totals["input_tokens"],
+            "total_output_tokens":totals["output_tokens"],
+            "total_cost_usd":     totals["cost_usd"],
+            "avg_calls_per_instance": round(totals["api_calls"] / len(args.instance_ids), 1) if args.instance_ids else 0,
+            "avg_cost_per_instance":  round(totals["cost_usd"] / len(args.instance_ids), 4) if args.instance_ids else 0,
+            "per_instance": per_inst,
+        },
+        "parallelism": {
+            "sequential_would_be_s": round(seq_total, 1),
+            "actual_wall_s":         round(t_parallel.elapsed, 1),
+            "speedup_x":             round(speedup, 1),
+        },
+    }
+
+    # Save machine-readable report
+    report_path = output_dir / "run_report.json"
+    report_path.write_text(json.dumps(report, indent=2))
+
+    # Print human-readable
+    print(f"\n{'='*62}")
+    print(f"  RUN REPORT")
+    print(f"{'='*62}")
+    print(f"  instances={report['instances']}  workers={report['workers']}  "
+          f"step_limit={report['step_limit']}  wall={total:.1f}s")
+    print()
+    print(f"  ── MODEL USAGE (primary) ──")
+    print(f"    total_api_calls    : {totals['api_calls']}")
+    print(f"    total_input_tokens : {totals['input_tokens']:,}")
+    print(f"    total_output_tokens: {totals['output_tokens']:,}")
+    print(f"    total_cost_usd     : ${totals['cost_usd']:.4f}")
+    print(f"    avg calls/instance : {report['model_usage']['avg_calls_per_instance']}")
+    print(f"    avg cost/instance  : ${report['model_usage']['avg_cost_per_instance']:.4f}")
+    print()
+    print(f"  ── PER-INSTANCE ──")
+    for r in results:
+        if r is None:
+            continue
+        iid     = r["instance_id"]
+        status  = "✓" if r["accepted"] else "✗"
+        elapsed = r.get("elapsed_s", 0)
+        u       = per_inst.get(iid, {})
+        calls   = u.get("api_calls", 0)
+        cost    = u.get("cost_usd", 0)
+        avg_c   = elapsed / calls if calls else 0
+        bar_w   = int(elapsed / max_elapsed * 20) if max_elapsed > 0 else 0
+        print(f"    {status} {iid:35s}  calls={calls:3d}  cost=${cost:.3f}  "
+              f"{elapsed:5.1f}s  avg={avg_c:.1f}s/call  {'█'*bar_w}")
+    print()
+    print(f"  ── TIMING ──")
+    print(f"    dataset prefetch   : {t_ds.elapsed:.1f}s")
+    print(f"    parallel workers   : {t_parallel.elapsed:.1f}s  ({t_parallel.elapsed/total:.0%} of total)")
+    print(f"    parallelism gain   : {seq_total:.1f}s → {t_parallel.elapsed:.1f}s  (×{speedup:.1f})")
+    print(f"    write predictions  : {t_write.elapsed:.1f}s")
+    print()
+    print(f"  report saved → {report_path}")
+    print(f"{'='*62}\n")
 
 if __name__ == "__main__":
     main()

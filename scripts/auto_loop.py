@@ -327,7 +327,8 @@ def run_claude_agent(context: str, round_num: int, timeout_s: int) -> dict:
     print(f"  [loop] invoking Claude Code (timeout={timeout_s}s)...")
     print(f"  [loop] result will be written to: {result_path.name}")
 
-    cmd = [CLAUDE_CLI, "--print", "--no-markdown", "-p", context]
+    cmd = [CLAUDE_CLI, "--print", "--output-format", "text",
+           "--dangerously-skip-permissions", "-p", context]
 
     try:
         proc = subprocess.run(
