@@ -270,15 +270,17 @@ You have FULL AUTONOMY to do whatever is needed to improve the acceptance_rate.
 
 You CAN:
 - Read the round history above and identify the dominant failure pattern
-- SSH to cloud desktop (`ssh cloud`) to investigate, run tests, check Docker logs
-- Run a dry-run or full eval batch on cloud desktop
-- Read any log file, check environment state, debug root causes
+- SSH to cloud desktop (`ssh cloud`) to investigate logs, read files, check environment state
+- Read any log file, read patches, inspect traj.json files
 - Modify `{TARGET_SCRIPT}` (the ONLY code file you may change)
 - Fetch documentation from the web if needed
 - Read the docs in `{DOCS_DIR}/`
 
 You MUST NOT:
-- Modify `auto_loop.py`, `program.md`, `compare_groups.py`, or `swebench_infra.py`
+- Modify `auto_loop.py`, `program.md`, `compare_groups.py`, `swebench_infra.py`, or `fast_eval.py`
+- Run `fast_eval.py` yourself (auto_loop runs it automatically after detecting your file change)
+- Run `run_with_jingu_gate.py` on cloud yourself (auto_loop runs eval after your change)
+- Start Docker containers or run `swebench.harness.run_evaluation`
 - Make compound changes (ONE change at a time)
 - Modify the acceptance_rate metric definition
 

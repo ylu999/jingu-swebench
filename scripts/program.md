@@ -43,6 +43,7 @@ ONLY `scripts/run_with_jingu_gate.py`:
 - `compare_groups.py` — eval reporting
 - `submit-sbcli.mjs` — official submission
 - `swebench_infra.py` — eval infrastructure (timing, dataset loading, agent runner, parallelism)
+- `fast_eval.py` — fast resolve evaluator; triggered automatically by auto_loop after each round
 - Any file outside `scripts/run_with_jingu_gate.py`
 
 ## CRITICAL: Eval Is Owned by auto_loop, Not the Agent
@@ -51,13 +52,20 @@ ONLY `scripts/run_with_jingu_gate.py`:
 
 This means:
 - Do NOT run `run_with_jingu_gate.py` on cloud
-- Do NOT run `fast_eval.py`
+- Do NOT run `fast_eval.py` (auto_loop runs this automatically after each round)
 - Do NOT start Docker containers
 - Do NOT run `swebench.harness.run_evaluation`
 - Do NOT poll results or wait for containers
+- Do NOT SSH to cloud to check eval progress — the next round context will have results
 
-**Why:** auto_loop.py runs eval automatically after detecting a file change.
-If the agent also runs eval, the round takes 1+ hour instead of 5 minutes.
+**Why:** auto_loop.py owns the entire eval pipeline:
+1. Detects file change → syncs run_with_jingu_gate.py to cloud
+2. Runs run_with_jingu_gate.py on cloud → generates patches
+3. Runs fast_eval.py on cloud → measures resolve_rate
+4. Writes results to journal → feeds next round context
+
+fast_eval.py is part of the eval pipeline. The agent modifying it would corrupt the measurement.
+If the agent also triggers eval, the round takes 1+ hour instead of 5 minutes.
 
 **The agent job is ONLY:**
 1. Analyze round history and metrics already provided in context
