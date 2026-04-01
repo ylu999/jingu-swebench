@@ -5,7 +5,7 @@ import { propose } from "../proposer/proposer-adapter.js"
 import { structuralGate } from "../admission/structural-gate.js"
 import { applyGate, normalizePatch } from "../admission/apply-gate.js"
 import { testGate, runTestsBaseline, type TestCounts } from "../admission/test-gate.js"
-import { ecsTestGate } from "../admission/ecs-test-gate.js"
+import { sshTestGate } from "../admission/ssh-test-gate.js"
 import { buildRetryFeedback } from "../admission/retry-feedback.js"
 import { Workspace } from "../workspace/workspace.js"
 import { join } from "node:path"
@@ -874,17 +874,17 @@ export async function runJingu(
     const fuzz = (ag.details?.apply_strictness === "fuzz") ? 5 : 0
     workspace.applyPatchForReal(patchToApply, fuzz)
 
-    // Gate 3: test (use ECS when local env is broken and FAIL_TO_PASS is available)
+    // Gate 3: test (use SSH+Docker when local env is broken and FAIL_TO_PASS is available)
     // When basePassCount===-1, local Python can't run the tests (missing C extensions etc.).
-    // Use the official SWE-bench Docker image on ECS Fargate for accurate evaluation.
+    // Use the official SWE-bench Docker image on the cloud dev desktop via SSH.
     let tg
     if (
       basePassCount === -1 &&
       instance.failToPass &&
       instance.failToPass.length > 0
     ) {
-      console.log(`  [jingu] attempt=${attempt} using ECS test gate (local env unavailable)`)
-      tg = await ecsTestGate(instance.instanceId, instance.repo, candidate.patchText, instance.failToPass)
+      console.log(`  [jingu] attempt=${attempt} using SSH+Docker test gate (local env unavailable)`)
+      tg = sshTestGate(instance.instanceId, instance.repo, instance.version ?? "latest", candidate.patchText, instance.failToPass)
     } else {
       tg = testGate(workspace, TEST_CMD, baseline, {
         skipIfNoBaseline: opts.skipTestGate,
