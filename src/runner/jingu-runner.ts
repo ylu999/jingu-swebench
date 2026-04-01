@@ -285,6 +285,32 @@ function findFilesFromFailToPass(instance: BenchmarkInstance, workspace: Workspa
           mappedModulePaths.add(`${repoModule}.db.backends.${backendName}`)
         }
       }
+
+      // Generic pytest convention: "pkg.tests.test_X" → "pkg.X" (test_X.py → X.py in parent)
+      // Handles: "astropy.modeling.tests.test_separable" → "astropy.modeling.separable"
+      //          "sympy.core.tests.test_basic" → "sympy.core.basic"
+      //          "requests.tests.test_hooks" → "requests.hooks"
+      if (parts.length >= 2 && last.startsWith("test_")) {
+        const subjectName = last.replace(/^test_/, "")  // e.g. "separable"
+        const testsIdx = parts.indexOf("tests")
+        if (testsIdx >= 1) {
+          // "pkg.tests.test_X" → "pkg.X"
+          const pkgPath = parts.slice(0, testsIdx).join(".")  // e.g. "astropy.modeling"
+          const candidate = pkgPath.replace(/\./g, "/") + "/" + subjectName + ".py"
+          if (existsSync(joinPath(workspace.dir, candidate))) {
+            mappedModulePaths.add(pkgPath + "." + subjectName)
+          }
+          // Also add the package dir itself
+          mappedModulePaths.add(pkgPath)
+        } else {
+          // "pkg.test_X" → "pkg.X" (no tests subdir)
+          const pkgPath = parts.slice(0, -1).join(".")
+          const candidate = pkgPath.replace(/\./g, "/") + "/" + subjectName + ".py"
+          if (existsSync(joinPath(workspace.dir, candidate))) {
+            mappedModulePaths.add(pkgPath + "." + subjectName)
+          }
+        }
+      }
     }
   }
 
