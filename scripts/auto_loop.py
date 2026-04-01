@@ -214,31 +214,34 @@ scripts/
 
 ```
 Step 1 — invoke you (claude --print) with this context
-Step 2 — detect if run_with_jingu_gate.py changed (file hash)
+Step 2 — detect if run_with_jingu_gate.py changed (file hash before vs after)
 Step 3 — if changed:
-    scp run_with_jingu_gate.py → cloud:~/jingu-swebench/scripts/
-    scp swebench_infra.py      → cloud:~/jingu-swebench/scripts/   ← ALWAYS synced
-Step 4 — ssh cloud: python run_with_jingu_gate.py --instance-ids ... → patches
-Step 5 — scp predictions back to laptop
-Step 6 — ssh cloud: python fast_eval.py → resolve_rate
-Step 7 — write results to journal → feed into next round context
+    Stage 1 (LOCAL, ~15-20 min):
+      python run_with_jingu_gate.py --instance-ids ... → patches
+      (runs on laptop, calls Bedrock directly, no ssh needed)
+    Stage 2 (CLOUD,  ~2-3 min):
+      scp predictions → cloud
+      ssh cloud: python fast_eval.py → Docker pytest → resolve_rate
+Step 4 — write results to journal → feed into next round context
 ```
 
-**Key point**: auto_loop ALWAYS syncs BOTH files to cloud. The cloud will always have
-the same version as your local `run_with_jingu_gate.py` after you make a change.
-You do NOT need to manually scp anything. You do NOT need to verify cloud state.
+**Key points:**
+- `run_with_jingu_gate.py` runs LOCALLY. The cloud is only used for Docker eval (fast_eval.py).
+- There is NO sync of scripts to cloud. The local file IS what gets executed.
+- You do NOT need to check cloud script versions — they are irrelevant.
+- You do NOT need to scp anything. You do NOT need ssh for patch generation.
 
-### Cloud layout (for read-only investigation only)
+### Cloud layout (for read-only investigation of past runs only)
 
 ```
-~/jingu-swebench/scripts/run_with_jingu_gate.py   ← synced by auto_loop before each eval
-~/jingu-swebench/scripts/swebench_infra.py        ← synced by auto_loop before each eval
-~/jingu-swebench/results/loop_round_NNN_*/        ← run outputs, traj files, logs
+~/jingu-swebench/results/loop_round_NNN_*/   ← old run outputs from before this change
+                                                (when stage1 still ran on cloud)
 ```
 
-**Do not try to read the cloud's current script version to check if it matches local.**
-The cloud version is irrelevant — auto_loop will overwrite it before running eval.
-What matters is the LOCAL `run_with_jingu_gate.py` shown below in this context.
+**Note:** Logs from rounds ≤ 033 show stage1 running on cloud (step_limit=60 on cloud).
+From round 034 onwards, stage1 runs locally — cloud logs will only contain stage2 (fast_eval).
+
+**Do not SSH to check script versions.** The LOCAL file shown below is what gets executed.
 
 ---
 
