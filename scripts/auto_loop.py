@@ -340,12 +340,14 @@ def run_claude_agent(context: str, round_num: int, timeout_s: int) -> dict:
     try:
         import select
         with open(log_path, "w", buffering=1) as log_f:
+            # Use /tmp as cwd so claude doesn't load jingu's CLAUDE.md rules
+            # (RPP/Architect hooks are irrelevant for swebench agent)
             proc = subprocess.Popen(
                 cmd,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
-                cwd=str(REPO_ROOT),
+                cwd="/tmp",
             )
             deadline = time.monotonic() + timeout_s
             while True:
