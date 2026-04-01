@@ -58,8 +58,24 @@ CLAUDE_AGENT_TIMEOUT_S = int(os.environ.get("CLAUDE_TIMEOUT", "1800"))
 
 # ── Scripts to sync to cloud before each eval ─────────────────────────────────
 # Relative to SCRIPT_DIR in auto_loop.py.
-# Add swebench_infra.py here so it's always in sync.
 CLOUD_SYNC_SCRIPTS = [
     "run_with_jingu_gate.py",
     "swebench_infra.py",
+    # B1: jingu-trust-gate bridge files
+    "jingu_gate_bridge.py",
+    "gate_runner.js",
+    "patch_admission_policy.js",
 ]
+
+# ── B1: jingu-trust-gate dist sync ────────────────────────────────────────────
+# The TS gate dist (~456K) must be present on cloud for gate_runner.js to import.
+# Local dist is built from jingu-trust-gate repo; cloud receives it via rsync/scp.
+JINGU_TRUST_GATE_DIST_LOCAL = os.environ.get(
+    "JINGU_TRUST_GATE_DIST_LOCAL",
+    str(Path(__file__).parent.parent.parent / "jingu-trust-gate" / "dist" / "src"),
+)
+# Where it lands on cloud (gate_runner.js reads JINGU_TRUST_GATE_DIST env var)
+CLOUD_TRUST_GATE_DIST = os.environ.get(
+    "CLOUD_TRUST_GATE_DIST",
+    "~/jingu-swebench/jingu-trust-gate-dist",
+)

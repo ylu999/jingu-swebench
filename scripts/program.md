@@ -29,11 +29,26 @@ increases on the same 5 instances.
 
 ## Current Position
 
-**B1 integration in progress.**
+**B1 active.**
 
-The loop is currently in the B1 phase: jingu-trust-gate has been (or is being)
-integrated. The agent's job is to tune the gate parameters within the already-defined
-trust-gate design — not to redesign the system.
+jingu-trust-gate is now integrated via subprocess bridge (Python → Node.js → TS gate).
+Gate mode: `GATE_MODE = "trust_gate"` in `run_with_jingu_gate.py`.
+
+The loop is in the B1 phase: every patch goes through `PatchAdmissionPolicy` before
+being accepted as a candidate. The agent's job is to tune gate parameters within the
+already-defined trust-gate design — not to redesign the system.
+
+B1 gate pipeline:
+  mini-SWE-agent patch
+    → normalize_patch()
+    → jingu_gate_bridge.evaluate_patch_from_traj()  ← NEW
+      → gate_runner.js (Node subprocess)
+        → PatchAdmissionPolicy (TS)
+          R1: parse/structural validity
+          R2: trajectory evidence (submitted vs LimitsExceeded)
+          R3: apply_result (if git apply ran)
+    → admit/reject/downgrade-speculative
+    → retry with gate's retry_hint if rejected
 
 ## Metrics (IMMUTABLE — never modify the definitions)
 
@@ -55,10 +70,16 @@ acceptance_rate = accepted_instances / total_instances
 ## What the Loop Can Modify
 
 ONLY `scripts/run_with_jingu_gate.py`:
-- Gate parameters and thresholds (within the current stage's design)
-- retry_hint logic: what failure context to inject on retry
-- score_patch: scoring function for candidate selection
-- Stage-specific config (e.g. trust-gate strictness level)
+- `GATE_MODE`: switch between "trust_gate" (B1) and "structural" (B0 fallback)
+- Gate parameters via `options` dict passed to `evaluate_patch_from_traj()`
+  e.g. `options={"require_trajectory": False}` to relax evidence requirement
+- `score_patch`: scoring function for candidate selection
+- `BASE_CONFIG["agent"]["step_limit"]`: step budget for mini-SWE-agent
+- retry_hint logic: fallback hints when gate feedback is absent
+
+**In `scripts/patch_admission_policy.js`** (B1 Layer 3 params, loop-tunable):
+- `GATE_PARAMS.require_trajectory`: require traj evidence to avoid speculative downgrade
+- `GATE_PARAMS.max_files_changed`: reject patches touching too many files
 
 **Rule: auto-loop may tune policies, but must not define them.**
 **Search over a fixed design; don't search for the design itself.**
@@ -72,7 +93,9 @@ ONLY `scripts/run_with_jingu_gate.py`:
 - `submit-sbcli.mjs` — official submission
 - `swebench_infra.py` — eval infrastructure
 - `fast_eval.py` — fast resolve evaluator
-- Any file outside `scripts/run_with_jingu_gate.py`
+- `jingu_gate_bridge.py` — Python→TS subprocess bridge (infra)
+- `gate_runner.js` — Node.js gate entry point (infra)
+- Any file outside `scripts/run_with_jingu_gate.py` and `scripts/patch_admission_policy.js`
 
 ## CRITICAL: Eval Is Owned by auto_loop, Not the Agent
 

@@ -89,6 +89,7 @@ from loop_config import (  # noqa: E402
     DEFAULT_INSTANCES, STAGE1_LOCAL,
     STAGE1_PER_INSTANCE_BUDGET_S, STAGE1_HEADROOM_S, STAGE2_TIMEOUT_S,
     CLAUDE_AGENT_TIMEOUT_S, CLOUD_SYNC_SCRIPTS,
+    JINGU_TRUST_GATE_DIST_LOCAL, CLOUD_TRUST_GATE_DIST,
 )
 
 # ── Journal ────────────────────────────────────────────────────────────────────
@@ -616,10 +617,35 @@ def run_cloud_eval(instances: list[str], output_dir: Path, workers: int,
             else:
                 print(f"  [eval:sync] {name} → cloud OK")
 
+    # ── Sync jingu-trust-gate dist to cloud (B1 gate dependency, ~456K) ──────
+    import pathlib as _pl
+    gate_dist_local = _pl.Path(JINGU_TRUST_GATE_DIST_LOCAL)
+    if gate_dist_local.exists():
+        print(f"  [eval:sync] syncing jingu-trust-gate dist to cloud...")
+        # Create remote dir first
+        subprocess.run(
+            ["ssh", CLOUD_HOST, f"mkdir -p {CLOUD_TRUST_GATE_DIST}"],
+            capture_output=True, timeout=10,
+        )
+        r = subprocess.run(
+            ["rsync", "-a", "--delete",
+             f"{gate_dist_local}/",
+             f"{CLOUD_HOST}:{CLOUD_TRUST_GATE_DIST}/"],
+            capture_output=True, text=True, timeout=60,
+        )
+        if r.returncode != 0:
+            print(f"  [eval:sync] WARNING rsync trust-gate dist failed: {r.stderr[:200]}")
+        else:
+            print(f"  [eval:sync] jingu-trust-gate dist → cloud OK")
+    else:
+        print(f"  [eval:sync] WARNING: trust-gate dist not found at {gate_dist_local}")
+
     # ── Stage 1: Generate patches on CLOUD (Docker available there) ───────────
     cloud_out = f"{CLOUD_RESULTS}/{run_name}"
     gate_cmd = (
         f"mkdir -p {cloud_out} && "
+        f"JINGU_TRUST_GATE_DIST={CLOUD_TRUST_GATE_DIST} "
+        f"JINGU_SWEBENCH_SCRIPTS={CLOUD_SCRIPTS} "
         f"{CLOUD_PYTHON} {CLOUD_SCRIPTS}/run_with_jingu_gate.py "
         f"--instance-ids {' '.join(instances)} "
         f"--output {cloud_out} "
