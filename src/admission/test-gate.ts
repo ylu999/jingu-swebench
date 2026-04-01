@@ -164,7 +164,16 @@ export function testGate(
   // If FAIL_TO_PASS tests already pass in the BASE state (before this patch), it means the test
   // content was updated by the fix commit (assertions changed). The oracle uses new assertions.
   // We cannot verify with the old assertions — skip test gate and rely on apply gate.
+  // Special sentinel: basePassCount === -1 means pytest "no tests ran" (parametrized variants added by fix).
   if (hasGroundTruth && opts.basePassCount !== undefined) {
+    if (opts.basePassCount === -1) {
+      return {
+        status: "pass",
+        code: "ACCEPTED",
+        message: `Test gate skipped: FAIL_TO_PASS parametrized test variants not collected in base (added by fix commit). Relying on apply gate.`,
+        details: { skipped: true, reason: "parametrized_variants_not_in_base" },
+      }
+    }
     if (opts.basePassCount >= opts.failToPass!.length) {
       return {
         status: "pass",

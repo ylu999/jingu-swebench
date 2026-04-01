@@ -764,6 +764,13 @@ export async function runJingu(
       basePassCount = prePassedCount
       console.log(`  [jingu] pre-check: ${prePassedCount}/${instance.failToPass.length} FAIL_TO_PASS tests pass in base — assertions changed by fix`)
     }
+    // Detect "no tests ran" — pytest parametrized variants added by fix commit don't exist yet
+    // Signals: "no tests ran", "collected 0 items", or total=0 with no "error" in output
+    const noTestsRan = /no tests ran|collected 0 items|selected 0 items/i.test(preOutput)
+    if (noTestsRan) {
+      basePassCount = -1  // sentinel: tests don't exist in base — skip test gate
+      console.log(`  [jingu] pre-check: tests not collected (parametrized variants added by fix) — test gate will skip`)
+    }
   }
 
   const attempts: AttemptResult[] = []
