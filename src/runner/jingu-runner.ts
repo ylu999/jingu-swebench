@@ -318,7 +318,7 @@ function findFilesFromFailToPass(instance: BenchmarkInstance, workspace: Workspa
       if (methodMatch) {
         const methodName = methodMatch[1].replace(/^test_/, "")
         for (const part of methodName.split("_")) {
-          if (part.length >= 5) methodKeywords.add(part.toLowerCase())
+          if (part.length >= 7) methodKeywords.add(part.toLowerCase())  // >= 7 to avoid generic words like "module", "method", "object"
         }
       }
     }
