@@ -1,5 +1,30 @@
 import type { InstanceRunResult } from "./contracts.js"
 
+/**
+ * Strategy Design Principles (derived from ablation experiments 2026-03)
+ *
+ * Three layers:
+ *   Layer A — Localization: hints to guide where the model looks (localizationPolicy)
+ *   Layer B — Patching:     how to generate the fix (focusStyle, analysisDepth, maxPatchLines)
+ *   Layer C — Verification: output-time constraints (verificationPolicy)
+ *
+ * Experimental findings (9 django instances, k=3 attempts):
+ *   A+B+C: pass=55.6%, apply_fail=40%, parse_fail=14%
+ *   A+B:   pass=55.6%, apply_fail=35.3%, parse_fail=11.8%  ← current default
+ *   B+C:   pass=55.6%, apply_fail=25.0%, parse_fail=18.8%
+ *   B:     pass=44.4%, apply_fail=42%,   parse_fail=12%
+ *
+ * Layer attribution:
+ *   B (retry quality): provides net pass_rate lift vs baseline (+11pp at k=3)
+ *   A (localization):  reduces apply_fail but introduces mild parse friction
+ *   C (strict-observed-only): no net pass_rate benefit; increases parse_fail
+ *
+ * Design rule:
+ *   Default strategies include only layers with net positive contribution.
+ *   Guardrails (Layer C) must not enter the main path unless ablation confirms net gain.
+ *   A layer that reduces parse success rate is a friction layer, not a safety layer.
+ */
+
 export type SearchStrategy = {
   id: string
   promptHints: {
