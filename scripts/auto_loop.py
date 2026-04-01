@@ -685,7 +685,7 @@ def main():
     parser.add_argument("--stagger", type=int, default=20)
     parser.add_argument("--target", type=float,
                         default=float(os.environ.get("LOOP_TARGET", "0.6")))
-    parser.add_argument("--claude-timeout", type=int, default=600,
+    parser.add_argument("--claude-timeout", type=int, default=1800,
                         help="Timeout for Claude Code agent in seconds (default 600)")
     parser.add_argument("--context-only", action="store_true",
                         help="Just build and print the context document, don't call Claude")
