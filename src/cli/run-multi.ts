@@ -162,14 +162,25 @@ async function main() {
   const predictionsPath = join(outDir, "predictions.jsonl")
   const wsBase = join("workspaces")
 
+  async function runInstanceSafe(inst: BenchmarkInstance): Promise<Row | null> {
+    try {
+      return await runInstance(inst, wsBase, predictionsPath)
+    } catch (err) {
+      console.error(`[${ts()}] ERROR ${inst.instanceId}: ${err instanceof Error ? err.message : String(err)}`)
+      return null
+    }
+  }
+
   let rows: Row[]
   if (parallelInstances) {
     console.log(`[${ts()}] Running all ${instances.length} instances in parallel`)
-    rows = await Promise.all(instances.map((inst) => runInstance(inst, wsBase, predictionsPath)))
+    const results = await Promise.all(instances.map(runInstanceSafe))
+    rows = results.filter((r): r is Row => r !== null)
   } else {
     rows = []
     for (const instance of instances) {
-      rows.push(await runInstance(instance, wsBase, predictionsPath))
+      const r = await runInstanceSafe(instance)
+      if (r) rows.push(r)
     }
   }
 
