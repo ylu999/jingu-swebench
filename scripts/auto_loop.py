@@ -526,7 +526,7 @@ def _ssh(cmd: str, timeout: int = 600, prefix: str = "") -> subprocess.Completed
     )
 
 
-def run_local_eval(instances: list[str], output_dir: Path, workers: int,
+def run_cloud_eval(instances: list[str], output_dir: Path, workers: int,
                    max_attempts: int, stagger: int) -> dict:
     """Two-stage eval: generate patches on cloud, then fast-eval resolve rate.
 
@@ -732,7 +732,7 @@ def main():
             # First round: run a baseline eval locally so we have something
             print(f"  [loop] running baseline eval (round 1 only)...")
             out_dir     = REPO_ROOT / "results" / f"loop_round_{round_num:03d}_baseline"
-            last_metric = run_local_eval(
+            last_metric = run_cloud_eval(
                 args.instances, out_dir, args.workers, args.max_attempts, args.stagger
             )
             rate = last_metric.get("acceptance_rate", 0)
@@ -788,7 +788,7 @@ def main():
         if file_changed:
             print(f"\n  [loop] file changed — running eval to measure delta...")
             out_dir_new = REPO_ROOT / "results" / f"loop_round_{round_num:03d}_new"
-            metric_new  = run_local_eval(
+            metric_new  = run_cloud_eval(
                 args.instances, out_dir_new, args.workers, args.max_attempts, args.stagger
             )
             rate_new = metric_new["acceptance_rate"]
