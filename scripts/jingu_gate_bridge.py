@@ -97,6 +97,7 @@ def build_support_pool(
     exit_status: Optional[str] = None,
     apply_success: Optional[bool] = None,
     apply_error: Optional[str] = None,
+    jingu_body: Optional[dict] = None,
 ) -> list[dict]:
     """
     Build the support pool for the gate from available evidence.
@@ -106,6 +107,7 @@ def build_support_pool(
     - task_description (always present — ensures task intent in pool)
     - apply_result (if we tried to apply the patch locally)
     - test_output (if available in traj)
+    - jingu_body (structured agent behavior summary, if available)
     """
     pool: list[dict] = []
     sup_id = 0
@@ -189,6 +191,27 @@ def build_support_pool(
                     },
                 })
                 break  # one test_output ref is enough
+
+    # 5. jingu_body — structured agent behavior summary (B1+)
+    # Also read from traj.json if it was written back there
+    body = jingu_body
+    if body is None and traj:
+        body = traj.get("jingu_body")
+    if body and body.get("schema_version") == "jingu-body-v0":
+        pool.append({
+            "id": _sid(),
+            "sourceType": "jingu_body",
+            "sourceId": "agent_behavior_summary",
+            "attributes": {
+                "schema_version": body["schema_version"],
+                "exit_status": body.get("exit_status", ""),
+                "files_written": body.get("files_written", []),
+                "test_ran": body.get("test_results", {}).get("ran_tests", False),
+                "test_passed": body.get("test_results", {}).get("last_passed"),
+                "patch_files_changed": body.get("patch_summary", {}).get("files_changed", 0),
+                "patch_hunks": body.get("patch_summary", {}).get("hunks", 0),
+            },
+        })
 
     return pool
 
@@ -338,15 +361,17 @@ def evaluate_patch_from_traj(
     exit_status: Optional[str] = None,
     proposal_id: str = "patch-proposal",
     options: Optional[dict] = None,
+    jingu_body: Optional[dict] = None,
 ) -> GateResult:
     """
     High-level entry point for run_with_jingu_gate.py.
-    Builds support pool from traj.json, then runs gate.
+    Builds support pool from traj.json + jingu_body, then runs gate.
     """
     pool = build_support_pool(
         patch_text=patch_text,
         traj_path=traj_path,
         exit_status=exit_status,
+        jingu_body=jingu_body,
     )
     return run_patch_gate(
         patch_text=patch_text,

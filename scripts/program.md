@@ -29,26 +29,32 @@ increases on the same 5 instances.
 
 ## Current Position
 
-**B1 active.**
+**B2 active.**
 
-jingu-trust-gate is now integrated via subprocess bridge (Python → Node.js → TS gate).
+B1 (jingu-trust-gate) + B2 (adversarial reviewer) are both integrated.
 Gate mode: `GATE_MODE = "trust_gate"` in `run_with_jingu_gate.py`.
 
-The loop is in the B1 phase: every patch goes through `PatchAdmissionPolicy` before
-being accepted as a candidate. The agent's job is to tune gate parameters within the
-already-defined trust-gate design — not to redesign the system.
+The loop is in the B2 phase: every patch goes through `PatchAdmissionPolicy` (B1) and
+then `patch_reviewer.py` (B2) before being accepted as a candidate.
 
-B1 gate pipeline:
+B1+B2 pipeline:
   mini-SWE-agent patch
     → normalize_patch()
-    → jingu_gate_bridge.evaluate_patch_from_traj()  ← NEW
+    → extract_jingu_body()                         ← NEW: deterministic behavior summary
+    → jingu_gate_bridge.evaluate_patch_from_traj()  ← B1
       → gate_runner.js (Node subprocess)
         → PatchAdmissionPolicy (TS)
           R1: parse/structural validity
           R2: trajectory evidence (submitted vs LimitsExceeded)
           R3: apply_result (if git apply ran)
+          R4: LimitsExceeded downgrade
+          R5: jingu_body.files_written consistency check  ← NEW
     → admit/reject/downgrade-speculative
-    → retry with gate's retry_hint if rejected
+    → if admitted: review_patch_bedrock()           ← B2
+        → 5-dimension adversarial review
+        → deterministic verdict: any high → reject, 2+ medium → reject
+    → if reviewer pass: add to candidates
+    → retry with gate/reviewer hint if rejected
 
 ## Metrics (IMMUTABLE — never modify the definitions)
 
@@ -95,6 +101,7 @@ ONLY `scripts/run_with_jingu_gate.py`:
 - `fast_eval.py` — fast resolve evaluator
 - `jingu_gate_bridge.py` — Python→TS subprocess bridge (infra)
 - `gate_runner.js` — Node.js gate entry point (infra)
+- `patch_reviewer.py` — B2 adversarial reviewer (infra)
 - Any file outside `scripts/run_with_jingu_gate.py` and `scripts/patch_admission_policy.js`
 
 ## CRITICAL: Eval Is Owned by auto_loop, Not the Agent

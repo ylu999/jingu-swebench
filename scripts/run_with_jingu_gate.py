@@ -32,6 +32,8 @@ from pathlib import Path
 
 # B1: jingu-trust-gate bridge (subprocess → TS gate)
 from jingu_gate_bridge import evaluate_patch_from_traj, build_support_pool, run_patch_gate
+# B2: adversarial reviewer (cognitive governance)
+from patch_reviewer import review_patch_bedrock, ReviewResult
 
 # B1 gate mode: "trust_gate" (B1) or "structural" (B0 fallback)
 GATE_MODE = "trust_gate"
@@ -215,6 +217,89 @@ def score_patch(patch_text: str) -> float:
     score = 1000.0 - files * 50
     return score
 
+
+def extract_jingu_body(traj: dict, patch_text: str, problem_statement: str = "") -> dict:
+    """
+    Derive structured jingu_body from traj messages — no LLM call needed.
+
+    jingu_body schema v0: deterministic extraction from observable agent behavior.
+    Used by jingu-trust-gate B1+ as structured evidence for admission decisions.
+    """
+    messages = traj.get("messages", [])
+    info = traj.get("info", {})
+    exit_status = info.get("exit_status", "")
+
+    # Files read and written — parse from tool call content
+    files_read: set[str] = set()
+    files_written: set[str] = set()
+    test_ran = False
+    last_test_passed: bool | None = None
+    last_test_excerpt = ""
+    tool_calls_made = 0
+
+    for msg in messages:
+        role = msg.get("role", "")
+        extra = msg.get("extra", {})
+        actions = extra.get("actions", []) if role == "assistant" else []
+        for action in actions:
+            action_str = str(action)
+            tool_calls_made += 1
+            # Detect file reads
+            if any(kw in action_str for kw in ("open_file", "view_file", "cat ", "read_file")):
+                # Extract path heuristic: word after command
+                parts = action_str.split()
+                for i, p in enumerate(parts):
+                    if p in ("open_file", "view_file", "read_file") and i + 1 < len(parts):
+                        path_candidate = parts[i + 1].strip("'\"")
+                        if "/" in path_candidate or path_candidate.endswith(".py"):
+                            files_read.add(path_candidate)
+            # Detect file writes/edits
+            if any(kw in action_str for kw in ("edit_file", "write_file", "str_replace", "create_file")):
+                parts = action_str.split()
+                for i, p in enumerate(parts):
+                    if p in ("edit_file", "write_file", "create_file", "str_replace") and i + 1 < len(parts):
+                        path_candidate = parts[i + 1].strip("'\"")
+                        if "/" in path_candidate or path_candidate.endswith(".py"):
+                            files_written.add(path_candidate)
+
+        # Detect test results from tool outputs
+        if role == "tool":
+            content = str(msg.get("content", ""))
+            if any(kw in content for kw in ("PASSED", "FAILED", "passed", "failed", "ERROR", "error")):
+                test_ran = True
+                if "FAILED" in content or "failed" in content.lower() or "ERROR" in content:
+                    last_test_passed = False
+                else:
+                    last_test_passed = True
+                last_test_excerpt = content[:200]
+
+    # Patch summary from patch structure
+    patch_lines = patch_text.splitlines() if patch_text else []
+    patch_files_changed = sum(1 for l in patch_lines if l.startswith("+++ b/"))
+    patch_hunks = sum(1 for l in patch_lines if l.startswith("@@"))
+    patch_lines_added = sum(1 for l in patch_lines if l.startswith("+") and not l.startswith("+++"))
+    patch_lines_removed = sum(1 for l in patch_lines if l.startswith("-") and not l.startswith("---"))
+
+    return {
+        "schema_version": "jingu-body-v0",
+        "exit_status": exit_status,
+        "problem_understanding": (problem_statement or info.get("problem_statement", ""))[:300],
+        "tool_calls_made": tool_calls_made,
+        "files_read": sorted(files_read)[:20],
+        "files_written": sorted(files_written)[:10],
+        "test_results": {
+            "ran_tests": test_ran,
+            "last_passed": last_test_passed,
+            "excerpt": last_test_excerpt,
+        },
+        "patch_summary": {
+            "files_changed": patch_files_changed,
+            "hunks": patch_hunks,
+            "lines_added": patch_lines_added,
+            "lines_removed": patch_lines_removed,
+        },
+    }
+
 # ── mini-SWE-agent runner (direct Python API) ─────────────────────────────────
 
 MODEL = "bedrock/global.anthropic.claude-sonnet-4-5-20250929-v1:0"
@@ -267,8 +352,8 @@ def run_agent(
     attempt: int,
     previous_failure: str = "",
     parent_timer: Timer | None = None,
-) -> tuple[str | None, str | None]:
-    """Run mini-SWE-agent on one instance. Returns (submission patch or None, exit_status)."""
+) -> tuple[str | None, str | None, dict | None]:
+    """Run mini-SWE-agent on one instance. Returns (submission patch or None, exit_status, jingu_body or None)."""
     from minisweagent.run.benchmarks.swebench import process_instance
     from minisweagent.config import get_config_from_spec
     from minisweagent.utils.serialize import recursive_merge
@@ -328,6 +413,7 @@ def run_agent(
     sub_from_traj = None
     sub_from_traj_diff = None  # fallback: last valid git diff in tool outputs
     exit_status = None
+    jingu_body = None
     if traj_path.exists():
         try:
             traj = json.loads(traj_path.read_text())
@@ -352,6 +438,17 @@ def run_agent(
                         print(f"    [agent] fallback: extracted git diff from traj "
                               f"({len(output)} chars)")
                         break
+            # Build jingu_body from traj (deterministic, no LLM call)
+            patch_for_body = sub_from_traj or sub_from_traj_diff or ""
+            problem_stmt = instance.get("problem_statement", "")
+            jingu_body = extract_jingu_body(traj, patch_for_body, problem_stmt)
+            # Write jingu_body back into traj.json so gate_runner.js can read it
+            traj["jingu_body"] = jingu_body
+            traj_path.write_text(json.dumps(traj, indent=2))
+            print(f"    [jingu_body] extracted: exit={jingu_body['exit_status']} "
+                  f"files_written={len(jingu_body['files_written'])} "
+                  f"tests_ran={jingu_body['test_results']['ran_tests']} "
+                  f"patch_hunks={jingu_body['patch_summary']['hunks']}")
         except (json.JSONDecodeError, OSError):
             pass
 
@@ -370,15 +467,15 @@ def run_agent(
         if instance_id in preds:
             sub = preds[instance_id].get("model_patch", "")
             if sub:
-                return sub, exit_status
+                return sub, exit_status, jingu_body
 
     if sub_from_traj:
-        return sub_from_traj, exit_status
+        return sub_from_traj, exit_status, jingu_body
 
     if sub_from_traj_diff:
-        return sub_from_traj_diff, exit_status
+        return sub_from_traj_diff, exit_status, jingu_body
 
-    return None, exit_status
+    return None, exit_status, jingu_body
 
 # ── Main loop ─────────────────────────────────────────────────────────────────
 
@@ -399,8 +496,8 @@ def run_with_jingu(instance_id: str, output_dir: Path, max_attempts: int = 3) ->
     for attempt in range(1, max_attempts + 1):
         print(f"  [attempt {attempt}/{max_attempts}] {instance_id}")
 
-        patch, agent_exit = run_agent(instance, output_dir, attempt,
-                                      previous_failure=last_failure, parent_timer=t_inst)
+        patch, agent_exit, jingu_body = run_agent(instance, output_dir, attempt,
+                                                  previous_failure=last_failure, parent_timer=t_inst)
 
         # llm_calls are recorded in _usage_tracker; no separate accumulation needed
 
@@ -430,6 +527,7 @@ def run_with_jingu(instance_id: str, output_dir: Path, max_attempts: int = 3) ->
                 traj_path=traj_path if traj_path.exists() else None,
                 exit_status=agent_exit,
                 proposal_id=f"{instance_id}-attempt-{attempt}",
+                jingu_body=jingu_body,
             )
             exp = gate_result.explanation
             exp_str = (f"units={exp.total_units} approved={exp.approved} "
@@ -441,12 +539,41 @@ def run_with_jingu(instance_id: str, output_dir: Path, max_attempts: int = 3) ->
                 grade = gate_result.gate_code  # ADMITTED or ADMITTED_SPECULATIVE
                 print(f"    [gate] {grade}  score={score:.0f}  lines={patch_lines}  {exp_str}")
                 t_gate.stop()
+
+                # B2: adversarial reviewer — cognitive governance on top of B1 structural admission
+                t_review = Timer(f"B2 reviewer attempt={attempt}", parent=t_inst)
+                fail_to_pass = instance.get("FAIL_TO_PASS", [])
+                review = review_patch_bedrock(
+                    problem_statement=instance.get("problem_statement", ""),
+                    patch_text=patch,
+                    instance_id=instance_id,
+                    fail_to_pass_tests=fail_to_pass if isinstance(fail_to_pass, list) else [],
+                )
+                t_review.stop()
+                issue_summary = ", ".join(
+                    f"[{i.severity}]{i.dimension}" for i in review.issues
+                ) if review.issues else "none"
+                print(f"    [reviewer] verdict={review.verdict}  issues={len(review.issues)}  "
+                      f"({issue_summary})")
+                if review.verdict == "reject":
+                    # B2 rejected — build retry hint from reviewer reasoning
+                    high_issues = [i for i in review.issues if i.severity == "high"]
+                    medium_issues = [i for i in review.issues if i.severity == "medium"]
+                    top_issues = (high_issues + medium_issues)[:2]
+                    reviewer_hint = "; ".join(
+                        f"{i.dimension}: {i.description[:120]}" for i in top_issues
+                    )
+                    last_failure = f"Reviewer rejected patch: {reviewer_hint}"[:400]
+                    continue
+
                 candidates.append({
                     "attempt": attempt,
                     "patch": patch,
                     "score": score,
                     "gate_code": gate_result.gate_code,
                     "gate_reason_codes": gate_result.reason_codes,
+                    "reviewer_verdict": review.verdict,
+                    "reviewer_issues": len(review.issues),
                 })
                 last_failure = ""
                 agent_exit = None
@@ -503,9 +630,10 @@ def run_with_jingu(instance_id: str, output_dir: Path, max_attempts: int = 3) ->
 
     best = max(candidates, key=lambda c: c["score"])
     gate_code = best.get("gate_code", "ADMITTED")
+    reviewer_verdict = best.get("reviewer_verdict", "pass")
     print(f"  [result] ACCEPTED  best_attempt={best['attempt']}  score={best['score']:.0f}  "
-          f"gate={gate_code}  elapsed={t_inst.elapsed:.1f}s  bedrock_calls={llm_calls}  "
-          f"cost=${inst_usage.get('cost_usd', 0):.4f}")
+          f"gate={gate_code}  reviewer={reviewer_verdict}  elapsed={t_inst.elapsed:.1f}s  "
+          f"bedrock_calls={llm_calls}  cost=${inst_usage.get('cost_usd', 0):.4f}")
     return {
         "instance_id": instance_id,
         "accepted": True,
@@ -515,6 +643,8 @@ def run_with_jingu(instance_id: str, output_dir: Path, max_attempts: int = 3) ->
         "score": best["score"],
         "gate_code": gate_code,
         "gate_reason_codes": best.get("gate_reason_codes", []),
+        "reviewer_verdict": reviewer_verdict,
+        "reviewer_issues": best.get("reviewer_issues", 0),
         "elapsed_s": t_inst.elapsed,
         "model_usage": inst_usage,
     }

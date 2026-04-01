@@ -65,6 +65,8 @@ CLOUD_SYNC_SCRIPTS = [
     "jingu_gate_bridge.py",
     "gate_runner.js",
     "patch_admission_policy.js",
+    # B2: adversarial reviewer
+    "patch_reviewer.py",
 ]
 
 # ── B1: jingu-trust-gate dist sync ────────────────────────────────────────────

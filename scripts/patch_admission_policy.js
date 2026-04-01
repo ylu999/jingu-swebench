@@ -14,13 +14,15 @@
  *   - source_type: "apply_result"     — did git apply succeed? (attributes.success: bool)
  *   - source_type: "test_output"      — test run output excerpt (attributes.passed: bool)
  *   - source_type: "task_description" — problem_statement excerpt (always present)
+ *   - source_type: "jingu_body"       — structured agent behavior summary (B1+, optional)
  *
  * Gate rules (evaluateUnit):
  *   R1  hunk has no diff markers (--- / +++ / @@)     → PARSE_FAILED           → reject
  *   R2  no trajectory evidence in support pool        → NO_TRAJECTORY_EVIDENCE → downgrade to "speculative"
  *   R3  apply_result support says success=false       → APPLY_FAILED           → reject
  *   R4  exit_status is LimitsExceeded (no submit)     → LIMITS_EXCEEDED        → downgrade to "speculative"
- *   R5  all checks pass                               → approve
+ *   R5  jingu_body says no files_written (if present) → NO_FILES_WRITTEN       → downgrade to "speculative"
+ *   R6  all checks pass                               → approve
  *
  * Conflict detection:
  *   C1  two hunks touch overlapping line ranges in the same file → OVERLAPPING_HUNKS → blocking
@@ -89,8 +91,8 @@ export class PatchAdmissionPolicy {
 
   // Step 2 — bind support to each unit
   bindSupport(unit, supportPool) {
-    // Bind global evidence (apply_result, exit_status, task_description) to every hunk
-    const globalTypes = new Set(["apply_result", "exit_status", "task_description"]);
+    // Bind global evidence (apply_result, exit_status, task_description, jingu_body) to every hunk
+    const globalTypes = new Set(["apply_result", "exit_status", "task_description", "jingu_body"]);
     const global = supportPool.filter(s => globalTypes.has(s.sourceType));
 
     // Also bind any refs explicitly declared in unit.evidence_refs
@@ -111,6 +113,7 @@ export class PatchAdmissionPolicy {
       this._checkApplyFailed(uws),
       this._checkLimitsExceeded(uws),
       this._checkTrajectoryEvidence(uws),
+      this._checkJinguBody(uws),
     ]) ?? approve(uws.unit.id);
   }
 
@@ -164,6 +167,26 @@ export class PatchAdmissionPolicy {
             + "Patch admitted as speculative — no execution confirmation.",
       });
     }
+    return undefined;
+  }
+
+  _checkJinguBody(uws) {
+    // R5: if jingu_body is present, validate consistency with patch
+    const bodyRef = uws.supportRefs.find(s => s.sourceType === "jingu_body");
+    if (!bodyRef) return undefined;  // jingu_body is optional — skip if absent
+
+    const attrs = bodyRef.attributes ?? {};
+
+    // If agent wrote no files, the patch is structurally suspicious
+    if (Array.isArray(attrs.files_written) && attrs.files_written.length === 0
+        && attrs.patch_hunks > 0) {
+      return downgrade(uws.unit.id, "NO_FILES_WRITTEN", "speculative", {
+        note: "jingu_body reports no files written but patch contains hunks. "
+            + "Agent may not have executed the fix — admitted as speculative.",
+        bodyRef: bodyRef.sourceId,
+      });
+    }
+
     return undefined;
   }
 
@@ -247,6 +270,7 @@ export class PatchAdmissionPolicy {
       EMPTY_PATCH: "No patch was generated — the agent must produce a diff before submitting.",
       EMPTY_HUNK: "A hunk has no content — ensure the diff includes actual line changes.",
       TOO_MANY_FILES: `Patch touches too many files. Focus on the minimum files needed.`,
+      NO_FILES_WRITTEN: "Agent trajectory shows no files were written — make sure to actually apply your fix before submitting.",
     };
 
     const errors = failed.map(r => ({
