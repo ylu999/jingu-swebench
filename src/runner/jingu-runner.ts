@@ -237,9 +237,16 @@ function findFilesFromFailToPass(instance: BenchmarkInstance, workspace: Workspa
 function findCandidateFiles(instance: BenchmarkInstance, workspace: Workspace): string[] {
   // Step 0: failToPass-based file discovery (highest precision)
   // If this produces results, skip text-matching entirely — text matching causes wrong file injection
+  // Quality gate: reject if total injected lines < 50 (likely __init__.py stubs = wrong file)
   const failToPassFiles = findFilesFromFailToPass(instance, workspace)
   if (failToPassFiles.length > 0) {
-    return failToPassFiles
+    const totalLines = failToPassFiles.reduce((sum, f) => {
+      try { return sum + readFileSync(joinPath(workspace.dir, f), "utf8").split("\n").length } catch { return sum }
+    }, 0)
+    if (totalLines >= 50) {
+      return failToPassFiles
+    }
+    // Files are too small — likely wrong __init__.py stubs, fall through to text-based search
   }
 
   const files = new Set<string>()
@@ -289,7 +296,11 @@ function findCandidateFiles(instance: BenchmarkInstance, workspace: Workspace): 
     const plainIds = [...instance.problemStatement.matchAll(/\b([a-z][a-z0-9]*(?:_[a-z0-9]+){1,})\b/g)]
       .map((m) => m[1])
       .filter((id) => id.length > 8)  // skip short generic words
-    const identifiers = [...new Set([...backtickIds, ...plainIds])].slice(0, 5)
+    // Plain single-word identifiers (e.g. "sqlmigrate", "validators") from first sentence
+    const singleWords = [...instance.problemStatement.slice(0, 200).matchAll(/\b([a-z][a-z0-9]{5,})\b/g)]
+      .map((m) => m[1])
+      .filter((w) => !["description", "related", "changes", "instead", "correct", "should", "problem", "please", "example", "because", "feature", "version", "returns", "calling", "working", "setting", "getting", "invalid", "allowed", "default", "message"].includes(w))
+    const identifiers = [...new Set([...backtickIds, ...plainIds, ...singleWords])].slice(0, 8)
     // Infer module root from repo name (e.g. "astropy/astropy" → search in "astropy/")
     const repoModule = instance.repo.split("/")[1] ?? ""
     for (const id of identifiers) {
@@ -298,6 +309,16 @@ function findCandidateFiles(instance: BenchmarkInstance, workspace: Workspace): 
       )
       for (const line of result.stdout.split("\n").filter(Boolean)) {
         files.add(line.trim())
+      }
+    }
+    // Also try finding a file named after the command mentioned in the problem statement
+    // e.g. "sqlmigrate" → find */management/commands/sqlmigrate.py
+    for (const word of singleWords.slice(0, 3)) {
+      const found = workspace.exec(
+        `find . -name "${word}.py" -not -path "*/test*" -not -path "*/.git/*" 2>/dev/null | head -2`
+      ).stdout.trim()
+      for (const line of found.split("\n").filter(Boolean)) {
+        files.add(line.replace(/^\.\//, ""))
       }
     }
   }
