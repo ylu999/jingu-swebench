@@ -30,10 +30,36 @@ Environment:
   CLAUDE_CLI   — path to claude CLI (default: claude)
   LOOP_TARGET  — stop when acceptance_rate >= this (default: 0.6)
 
-Cloud desktop:
-  Accessible via: ssh cloud
-  Runs all Docker containers for SWE-bench
-  Docker uses AWS Bedrock as the LLM inside containers
+Four-layer architecture:
+  1. Laptop (control plane)  — auto_loop.py + claude --print live here
+  2. Cloud Dev Desktop       — ssh cloud; Docker host; 1.2TB disk, 8 CPUs
+  3. Docker containers       — fast feedback loop: git apply + pytest in ~30s/instance
+  4. sb-cli submit           — ground truth / leaderboard evaluation (DO NOT substitute)
+
+Cloud desktop commands:
+  Refresh creds:  ssh cloud "~/.toolbox/bin/ada credentials update --account=235494812052 --provider=conduit --role=IibsAdminAccess-DO-NOT-DELETE --once"
+  Python:         ssh cloud "~/.local/share/mise/shims/python ..."
+  Docker images:  sweb.eval.x86_64.django__django-NNNNN:latest (built locally via prepare_images)
+  Tag for agent:  docker tag sweb.eval.x86_64.X:latest swebench/sweb.eval.x86_64.X_with_1776:latest
+
+Fast feedback eval (30s/instance, NOT ground truth):
+  ssh cloud "docker run --rm -w /testbed sweb.eval.x86_64.django__django-11039:latest bash -c \
+    'git apply /tmp/patch.diff && python -m pytest tests/... -x -q'"
+
+Official eval (ground truth, use sparingly):
+  ssh cloud "~/.local/share/mise/shims/python -m swebench.harness.run_evaluation \
+    --dataset_name SWE-bench/SWE-bench_Lite \
+    --predictions_path ~/jingu-swebench/results/run/jingu-predictions.jsonl \
+    --instance_ids django__django-11039 --max_workers 4 --run_id test_X"
+
+Generate patches (mini-SWE-agent + Jingu gate, run on cloud desktop):
+  ssh cloud "~/.local/share/mise/shims/python ~/jingu-swebench/scripts/run_with_jingu_gate.py \
+    --instance-ids django__django-11039 django__django-11001 \
+    --max-attempts 3 --workers 4 --output ~/jingu-swebench/results/run_X/"
+
+IMPORTANT:
+  Docker pytest = fast iteration signal, NOT leaderboard ground truth
+  sb-cli = ground truth judge; use only to validate significant improvements
 """
 
 import argparse
@@ -152,14 +178,52 @@ Your goal is to improve the acceptance_rate on SWE-bench instances.
 
 ## System Architecture
 
-- **Local Mac**: You are running here. `run_with_jingu_gate.py` is here.
-- **Cloud Desktop**: All Docker containers run here. Access via `ssh cloud`.
-  - Path on cloud: `~/jingu-swebench/`
-  - Docker is running, SWE-bench images may be cached
-  - Python available: `~/.local/share/mise/shims/python`
-  - AWS Bedrock credentials already configured
-- **Modal**: mini-SWE-agent uses Modal for sandbox execution
-- **sb-cli**: For official SWE-bench cloud evaluation (no Docker needed)
+## Four-Layer Architecture
+
+```
+Laptop (control plane)         ← you are here; auto_loop.py + claude --print
+   ↓ ssh cloud
+Cloud Dev Desktop               ← execution plane; 1.2TB disk, 8 CPUs
+   ↓ docker run
+Docker container                ← fast feedback: git apply + pytest (~30s/instance)
+   ↓ after patch is good
+sb-cli submit                   ← ground truth / leaderboard judge
+```
+
+**CRITICAL DISTINCTION:**
+- Docker pytest = fast iteration signal (seconds, NOT ground truth)
+- `swebench.harness.run_evaluation` = official Docker harness (minutes, closer to truth)
+- `sb-cli submit` = final leaderboard judge (do not substitute)
+
+## Cloud Desktop Commands
+
+```bash
+# Refresh AWS credentials (needed if Bedrock calls fail):
+ssh cloud "~/.toolbox/bin/ada credentials update --account=235494812052 --provider=conduit --role=IibsAdminAccess-DO-NOT-DELETE --once"
+
+# Python:
+ssh cloud "~/.local/share/mise/shims/python ..."
+
+# Generate patches (mini-SWE-agent + Jingu gate):
+ssh cloud "~/.local/share/mise/shims/python ~/jingu-swebench/scripts/run_with_jingu_gate.py \
+  --instance-ids django__django-11039 \
+  --max-attempts 3 --workers 4 --output ~/jingu-swebench/results/run_X/"
+
+# Fast feedback: apply patch + run tests in Docker (~30s):
+ssh cloud "docker run --rm -v /tmp/patch.diff:/tmp/patch.diff -w /testbed \
+  sweb.eval.x86_64.django__django-11039:latest bash -c \
+  'git apply /tmp/patch.diff && python -m pytest tests/migrations/ -x -q 2>&1 | tail -20'"
+
+# Official harness eval (use sparingly, ~2min/instance):
+ssh cloud "~/.local/share/mise/shims/python -m swebench.harness.run_evaluation \
+  --dataset_name SWE-bench/SWE-bench_Lite \
+  --predictions_path ~/jingu-swebench/results/run_X/jingu-predictions.jsonl \
+  --instance_ids django__django-11039 --max_workers 4 --run_id test_X"
+
+# Available Docker images (built locally, not from registry):
+# sweb.eval.x86_64.django__django-11039:latest  (and 11001, 11019, 11049, 11099)
+# minisweagent naming: swebench/sweb.eval.x86_64.django_1776_django-NNNNN:latest
+```
 
 ## Reference Docs (read these if needed)
 - `{DOCS_DIR}/README.md` — quick reference + prediction format
