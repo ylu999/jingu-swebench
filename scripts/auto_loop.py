@@ -176,69 +176,83 @@ def build_context(round_num: int, past_rounds: list[dict], instances: list[str])
     return f"""# AutoResearch Loop — Round {round_num}
 
 You are the autonomous optimization agent for jingu-swebench.
-Your goal is to improve the acceptance_rate on SWE-bench instances.
+Your goal is to improve resolve_rate on SWE-bench instances.
 
 ---
 
-## System Architecture
+## YOUR ROLE (read carefully before doing anything)
 
-## Four-Layer Architecture
+You have ONE job: **analyze round history → form hypothesis → change ONE thing in
+`run_with_jingu_gate.py` → write result JSON → EXIT.**
 
-```
-Laptop (control plane)         ← you are here; auto_loop.py + claude --print
-   ↓ ssh cloud
-Cloud Dev Desktop               ← execution plane; 1.2TB disk, 8 CPUs
-   ↓ docker run
-Docker container                ← fast feedback: git apply + pytest (~30s/instance)
-   ↓ after patch is good
-sb-cli submit                   ← ground truth / leaderboard judge
-```
-
-**CRITICAL DISTINCTION:**
-- Docker pytest = fast iteration signal (seconds, NOT ground truth)
-- `swebench.harness.run_evaluation` = official Docker harness (minutes, closer to truth)
-- `sb-cli submit` = final leaderboard judge (do not substitute)
-
-## Cloud Desktop Commands
-
-```bash
-# Refresh AWS credentials (needed if Bedrock calls fail):
-ssh cloud "~/.toolbox/bin/ada credentials update --account=235494812052 --provider=conduit --role=IibsAdminAccess-DO-NOT-DELETE --once"
-
-# Python:
-ssh cloud "~/.local/share/mise/shims/python ..."
-
-# Generate patches (mini-SWE-agent + Jingu gate):
-ssh cloud "~/.local/share/mise/shims/python ~/jingu-swebench/scripts/run_with_jingu_gate.py \
-  --instance-ids django__django-11039 \
-  --max-attempts 3 --workers 4 --output ~/jingu-swebench/results/run_X/"
-
-# Fast feedback: apply patch + run tests in Docker (~30s):
-ssh cloud "docker run --rm -v /tmp/patch.diff:/tmp/patch.diff -w /testbed \
-  sweb.eval.x86_64.django__django-11039:latest bash -c \
-  'git apply /tmp/patch.diff && python -m pytest tests/migrations/ -x -q 2>&1 | tail -20'"
-
-# Official harness eval (use sparingly, ~2min/instance):
-ssh cloud "~/.local/share/mise/shims/python -m swebench.harness.run_evaluation \
-  --dataset_name SWE-bench/SWE-bench_Lite \
-  --predictions_path ~/jingu-swebench/results/run_X/jingu-predictions.jsonl \
-  --instance_ids django__django-11039 --max_workers 4 --run_id test_X"
-
-# Available Docker images (built locally, not from registry):
-# sweb.eval.x86_64.django__django-11039:latest  (and 11001, 11019, 11049, 11099)
-# minisweagent naming: swebench/sweb.eval.x86_64.django_1776_django-NNNNN:latest
-```
-
-## Reference Docs (read these if needed)
-- `{DOCS_DIR}/README.md` — quick reference + prediction format
-- `{DOCS_DIR}/evaluation.md` — harness evaluation commands
-- `{DOCS_DIR}/datasets.md` — dataset structure, FAIL_TO_PASS semantics
-- `{DOCS_DIR}/harness_reference.md` — full parameter reference
-- `{DOCS_DIR}/docker_setup.md` — Docker setup and caching
+You do NOT run eval. You do NOT trigger patch generation. You do NOT check cloud logs
+unless you need to diagnose a specific failure. auto_loop owns the entire eval pipeline.
 
 ---
 
-## Program Goals (FIXED — never modify)
+## HOW THE SYSTEM WORKS (complete picture)
+
+### Files and ownership
+
+```
+scripts/
+  run_with_jingu_gate.py   ← THE ONLY FILE YOU MAY MODIFY
+                              Contains: jingu gate logic, BASE_CONFIG, normalize_patch,
+                              jingu_structural_check, score_patch, run_with_jingu()
+                              Imports from: swebench_infra.py
+
+  swebench_infra.py        ← DO NOT TOUCH (infrastructure, not gate logic)
+                              Contains: Timer, ModelUsage, run_agent(), write_predictions(),
+                              run_parallel(), _load_instances()
+
+  auto_loop.py             ← DO NOT TOUCH (runs on laptop, owns eval pipeline)
+  fast_eval.py             ← DO NOT TOUCH (resolve evaluator, owned by auto_loop)
+  program.md               ← DO NOT TOUCH (fixed goals)
+```
+
+### What auto_loop does each round (you do NOT do any of this)
+
+```
+Step 1 — invoke you (claude --print) with this context
+Step 2 — detect if run_with_jingu_gate.py changed (file hash)
+Step 3 — if changed:
+    scp run_with_jingu_gate.py → cloud:~/jingu-swebench/scripts/
+    scp swebench_infra.py      → cloud:~/jingu-swebench/scripts/   ← ALWAYS synced
+Step 4 — ssh cloud: python run_with_jingu_gate.py --instance-ids ... → patches
+Step 5 — scp predictions back to laptop
+Step 6 — ssh cloud: python fast_eval.py → resolve_rate
+Step 7 — write results to journal → feed into next round context
+```
+
+**Key point**: auto_loop ALWAYS syncs BOTH files to cloud. The cloud will always have
+the same version as your local `run_with_jingu_gate.py` after you make a change.
+You do NOT need to manually scp anything. You do NOT need to verify cloud state.
+
+### Cloud layout (for read-only investigation only)
+
+```
+~/jingu-swebench/scripts/run_with_jingu_gate.py   ← synced by auto_loop before each eval
+~/jingu-swebench/scripts/swebench_infra.py        ← synced by auto_loop before each eval
+~/jingu-swebench/results/loop_round_NNN_*/        ← run outputs, traj files, logs
+```
+
+**Do not try to read the cloud's current script version to check if it matches local.**
+The cloud version is irrelevant — auto_loop will overwrite it before running eval.
+What matters is the LOCAL `run_with_jingu_gate.py` shown below in this context.
+
+---
+
+## EVAL PIPELINE INVARIANTS
+
+- `resolve_rate` = fraction of instances where FAIL_TO_PASS tests pass in Docker
+- `acceptance_rate` = fraction where Jingu structural gate passes (format check only)
+- High acceptance + low resolve = gate too weak (not your optimization target)
+- Optimize for `resolve_rate`, not `acceptance_rate`
+- fast_eval.py is the signal source — DO NOT modify it
+
+---
+
+## Program Goals
 
 {program_goals}
 
@@ -256,7 +270,7 @@ ssh cloud "~/.local/share/mise/shims/python -m swebench.harness.run_evaluation \
 
 ---
 
-## Current run_with_jingu_gate.py
+## Current run_with_jingu_gate.py (LOCAL — this is what will be synced to cloud)
 
 ```python
 {current_code}
@@ -266,51 +280,35 @@ ssh cloud "~/.local/share/mise/shims/python -m swebench.harness.run_evaluation \
 
 ## Your Task for Round {round_num}
 
-You have FULL AUTONOMY to do whatever is needed to improve the acceptance_rate.
+**Step 1 — Analyze**: Read the round history above. What is the dominant failure pattern?
+What changed between rounds? What hypotheses have already been tested?
 
-You CAN:
-- Read the round history above and identify the dominant failure pattern
-- SSH to cloud desktop (`ssh cloud`) to investigate logs, read files, check environment state
-- Read any log file, read patches, inspect traj.json files
-- Modify `{TARGET_SCRIPT}` (the ONLY code file you may change)
-- Fetch documentation from the web if needed
-- Read the docs in `{DOCS_DIR}/`
+**Step 2 — Investigate (only if needed)**: SSH to cloud to read logs or traj files.
+- Read logs: `ssh cloud "cat ~/jingu-swebench/results/loop_round_NNN_*/run.log"`
+- Read traj: `ssh cloud "cat ~/jingu-swebench/results/loop_round_NNN_*/attempt_1/INSTANCE/INSTANCE.traj.json"`
+- DO NOT check cloud script versions (irrelevant — auto_loop overwrites before eval)
+- DO NOT run any eval commands on cloud
 
-You MUST NOT:
-- Modify `auto_loop.py`, `program.md`, `compare_groups.py`, `swebench_infra.py`, or `fast_eval.py`
-- Run `fast_eval.py` yourself (auto_loop runs it automatically after detecting your file change)
-- Run `run_with_jingu_gate.py` on cloud yourself (auto_loop runs eval after your change)
-- Start Docker containers or run `swebench.harness.run_evaluation`
-- Make compound changes (ONE change at a time)
-- Modify the acceptance_rate metric definition
+**Step 3 — Hypothesize**: Form ONE testable hypothesis about what will improve resolve_rate.
 
-## Workflow
+**Step 4 — Implement**: Make ONE targeted change to `{TARGET_SCRIPT}`.
+Only change what your hypothesis requires. No compound changes.
 
-1. Analyze — study round history, identify the highest-impact failure mode
-2. Investigate — if you need more data, SSH to cloud and look at logs/outputs
-3. Hypothesize — form ONE testable hypothesis
-4. Implement — make ONE targeted change to `run_with_jingu_gate.py`
-5. Record — write your result to `{REPO_ROOT}/results/loop_round_{round_num:03d}_result.json`
-
-## Result Format
-
-After completing your work, write this exact JSON to:
-`{REPO_ROOT}/results/loop_round_{round_num:03d}_result.json`
+**Step 5 — Record**: Write result JSON to `{REPO_ROOT}/results/loop_round_{round_num:03d}_result.json`
+then EXIT. auto_loop will detect the file change, sync to cloud, run eval, and report in round {round_num + 1}.
 
 ```json
 {{
   "round": {round_num},
-  "hypothesis": "one sentence: what you believe will improve acceptance_rate and why",
+  "hypothesis": "one sentence: what you believe will improve resolve_rate and why",
   "change_summary": "what specific change you made to run_with_jingu_gate.py (or 'none')",
-  "expected_improvement": "e.g. +5pp acceptance_rate by reducing PARSE_FAILED",
+  "expected_improvement": "e.g. +1 resolve (11019) by allowing step_limit=100",
   "next_steps": "what to try next if this hypothesis is wrong or if it works",
   "actions_taken": ["list", "of", "things", "you", "did"]
 }}
 ```
 
-If you made no change, set change_summary to "none" and explain why in hypothesis.
-
-Go ahead — analyze the situation and take action.
+If you made no change, set `change_summary` to `"none"` and explain in `hypothesis`.
 """.strip()
 
 # ── Claude Code executor ───────────────────────────────────────────────────────
