@@ -9,20 +9,33 @@ import type { InstanceRunResult } from "./contracts.js"
  *   Layer C — Verification: output-time constraints (verificationPolicy)
  *
  * Experimental findings (9 django instances, k=3 attempts):
- *   A+B+C: pass=55.6%, apply_fail=40%, parse_fail=14%
- *   A+B:   pass=55.6%, apply_fail=35.3%, parse_fail=11.8%  ← current default
- *   B+C:   pass=55.6%, apply_fail=25.0%, parse_fail=18.8%
- *   B:     pass=44.4%, apply_fail=42%,   parse_fail=12%
+ *   A+B+C (strict): pass=55.6%, apply_fail=88.9%, parse_fail=29.6%
+ *   A+B (no C):     pass=55.6%, apply_fail=81.5%, parse_fail=29.6%
+ *   B+C (no A):     pass=55.6%, apply_fail=25.0%, parse_fail=18.8%
+ *   B only:         pass=44.4%, apply_fail=92.6%, parse_fail=25.9%
+ *   A+B + conf:     pass=55.6%, apply_fail=74.1%, parse_fail=29.6%  ← current default
+ *   (per-strategy averages differ; instance-level numbers above)
  *
  * Layer attribution:
- *   B (retry quality): provides net pass_rate lift vs baseline (+11pp at k=3)
- *   A (localization):  reduces apply_fail but introduces mild parse friction
- *   C (strict-observed-only): no net pass_rate benefit; increases parse_fail
+ *   B (retry quality):      net pass_rate lift vs baseline (+11pp at k=3); retry recovers
+ *                           hard instances (e.g. 11133 rescued via p-root-cause retry)
+ *   A (localization):       reduces apply_fail (-18.5pp from baseline with confidence gate)
+ *                           but requires confidence gate — blind A hint adds parse friction
+ *   C (strict-observed-only): no net pass_rate benefit; increases parse_fail on sensitive
+ *                           instances (e.g. 11049); demoted to optional guardrail only
  *
- * Design rule:
- *   Default strategies include only layers with net positive contribution.
- *   Guardrails (Layer C) must not enter the main path unless ablation confirms net gain.
- *   A layer that reduces parse success rate is a friction layer, not a safety layer.
+ * Layer A confidence gate (computeLocalizationConfidence in strategy-resolver.ts):
+ *   tier=off    (score<20):  no files → remove localizationPolicy entirely
+ *   tier=weak   (score<50):  sparse evidence → downgrade to "file-first" (soft hint)
+ *   tier=strong (score≥50):  adequate grounding → keep full localizationPolicy
+ *   Signals: file count (0-30pt) + total injected lines (0-40pt) + anchor count (0-30pt)
+ *
+ * Design rules:
+ *   1. Default strategies include only layers with net positive contribution.
+ *   2. Guardrails (Layer C) must not enter the main path unless ablation confirms net gain.
+ *   3. A layer that reduces parse success rate is a friction layer, not a safety layer.
+ *   4. Layer A must be gated by evidence quality — "files exist" is not sufficient confidence.
+ *      Assertive localization hints with weak evidence become noise, not signal.
  */
 
 export type SearchStrategy = {
