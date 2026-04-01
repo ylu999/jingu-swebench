@@ -235,6 +235,24 @@ function findFilesFromFailToPass(instance: BenchmarkInstance, workspace: Workspa
         mappedModulePaths.add(`${repoModule}.db.models.fields`)
         mappedModulePaths.add(`${repoModule}.db.models`)
       }
+      // "view_tests.tests.test_X" → look in "{repoModule}/views/"
+      if (first === "view_tests") {
+        const viewsDir = `${repoModule}/views`
+        if (existsSync(joinPath(workspace.dir, viewsDir))) {
+          mappedModulePaths.add(`${repoModule}.views`)
+          // Add specific view file hint from test module last part
+          const testSubject = last.replace(/^test_/, "")  // e.g. "debug"
+          mappedModulePaths.add(`${repoModule}.views.${testSubject}`)
+        }
+      }
+      // "backends.{backend}.test_X" → look in "{repoModule}/db/backends/{backend}/"
+      if (first === "backends" && parts.length >= 3) {
+        const backendName = parts[1]  // e.g. "sqlite"
+        const backendDir = `${repoModule}/db/backends/${backendName}`
+        if (existsSync(joinPath(workspace.dir, backendDir))) {
+          mappedModulePaths.add(`${repoModule}.db.backends.${backendName}`)
+        }
+      }
     }
   }
 
@@ -257,19 +275,33 @@ function findFilesFromFailToPass(instance: BenchmarkInstance, workspace: Workspa
   }
   const scopeArg = searchDirs.map((d) => `"${d}"`).join(" ")
 
-  // git grep source tree for each symbol — skip test files
-  // Try primary symbols first; if nothing found, try fallback PascalCase parts
-  const symbolSets = [sourceSymbols, sourceSymbolsFallback]
-  for (const symSet of symbolSets) {
-    for (const sym of [...symSet].slice(0, 6)) {
-      const result = workspace.exec(
-        `git grep -l "^class ${sym}\\b\\|^def ${sym}\\b" -- ${scopeArg} 2>/dev/null | grep -v test | head -2`
-      )
-      for (const line of result.stdout.split("\n").filter(Boolean)) {
-        sourceFiles.add(line.trim())
-      }
+  // If any mapped path resolves to a direct file, use it immediately — no symbol grep needed.
+  // Mapped paths are high-precision (derived from test module structure), so skip uncertain grep.
+  const mappedDirectFiles: string[] = []
+  for (const mp of [...mappedModulePaths].sort((a, b) => b.split(".").length - a.split(".").length)) {
+    const candidate = mp.replace(/\./g, "/") + ".py"
+    if (existsSync(joinPath(workspace.dir, candidate)) && !candidate.includes("test")) {
+      mappedDirectFiles.push(candidate)
     }
-    if (sourceFiles.size > 0) break  // found with primary symbols, skip fallback
+  }
+  if (mappedDirectFiles.length > 0) {
+    for (const f of mappedDirectFiles) sourceFiles.add(f)
+  } else {
+    // git grep source tree for each symbol — skip test files
+    // Try primary symbols first; if nothing found, try fallback PascalCase parts
+    // Only use fallback symbols if they are specific enough (>= 6 chars) to avoid generic matches
+    const symbolSets = [sourceSymbols, new Set([...sourceSymbolsFallback].filter((s) => s.length >= 6))]
+    for (const symSet of symbolSets) {
+      for (const sym of [...symSet].slice(0, 6)) {
+        const result = workspace.exec(
+          `git grep -l "^class ${sym}\\b\\|^def ${sym}\\b" -- ${scopeArg} 2>/dev/null | grep -v test | head -2`
+        )
+        for (const line of result.stdout.split("\n").filter(Boolean)) {
+          sourceFiles.add(line.trim())
+        }
+      }
+      if (sourceFiles.size > 0) break  // found with primary symbols, skip fallback
+    }
   }
 
   // Fallback: if symbol grep found nothing, resolve module paths to actual files.
@@ -282,19 +314,10 @@ function findFilesFromFailToPass(instance: BenchmarkInstance, workspace: Workspa
     const sorted = [...priorityPaths, ...fallbackPaths].slice(0, 8)
     for (const mod of sorted) {
       const modPath = mod.replace(/\./g, "/")
-      // First: try exact file
-      for (const suffix of [".py", "/__init__.py"]) {
-        const candidate = modPath + suffix
-        if (existsSync(joinPath(workspace.dir, candidate)) && !candidate.includes("test")) {
-          // Skip tiny __init__.py files (< 20 lines) — usually empty
-          try {
-            const lineCount = readFileSync(joinPath(workspace.dir, candidate), "utf8").split("\n").length
-            if (lineCount >= 20 || !candidate.endsWith("__init__.py")) {
-              sourceFiles.add(candidate)
-              break
-            }
-          } catch { /* skip */ }
-        }
+      // First: try exact file (not __init__.py — that's a package stub, not the bug site)
+      const exactCandidate = modPath + ".py"
+      if (existsSync(joinPath(workspace.dir, exactCandidate)) && !exactCandidate.includes("test")) {
+        sourceFiles.add(exactCandidate)
       }
       if (sourceFiles.size > 0) break
 
@@ -309,15 +332,23 @@ function findFilesFromFailToPass(instance: BenchmarkInstance, workspace: Workspa
             .sort()  // alphabetical
           if (entries.length > 0) {
             // Try to find file matching test module subject (e.g. "model_checks" → "models.py")
-            // Extract subject keywords from test module names
+            // Also use FAIL_TO_PASS method names as subject hints (e.g. "test_serialize_enums" → "serialize")
             const subjectKeywords: string[] = []
             for (const tm of testModules) {
               const parts = tm.split(".")
               const last = parts[parts.length - 1].replace(/^test_/, "")  // e.g. "model_checks"
               subjectKeywords.push(...last.split("_"))  // ["model", "checks"]
             }
+            // Extract keywords from FAIL_TO_PASS method names (e.g. test_serialize_enums → ["serial", "enum"])
+            for (const t of failToPass) {
+              const methodMatch = t.match(/^(\w+)\s*\(/) ?? t.match(/::(\w+)$/)
+              if (methodMatch) {
+                const methodName = methodMatch[1].replace(/^test_/, "")
+                subjectKeywords.push(...methodName.split("_"))
+              }
+            }
             const match = entries.find((e) =>
-              subjectKeywords.some((kw) => kw.length >= 4 && e.includes(kw))
+              subjectKeywords.some((kw) => kw.length >= 4 && e.toLowerCase().includes(kw.toLowerCase().slice(0, 6)))
             )
             // For migration dirs: pick last entry (highest number)
             const isMigrationDir = dirPath.includes("migration")
@@ -562,6 +593,46 @@ export async function runJingu(
     console.log(`  [proposer] strategy degraded: ${resReason} (${rawStrategy?.id})`)
   }
 
+  // Pre-check: run FAIL_TO_PASS tests on the CLEAN (pre-patch) workspace.
+  // If they already pass in base, the test assertions were updated by the fix commit.
+  // We must skip test gate in that case (our base assertions ≠ oracle assertions).
+  let basePassCount: number | undefined
+  if (instance.failToPass && instance.failToPass.length > 0) {
+    const repoOrg = instance.repo.split("/")[0]
+    let preCheckCmd: string
+    if (repoOrg === "django") {
+      const testIds = new Set<string>()
+      for (const t of instance.failToPass) {
+        const unittestMatch = t.match(/^(\w+)\s*\(([^)]+)\)$/)
+        if (unittestMatch) testIds.add(`${unittestMatch[2]}.${unittestMatch[1]}`)
+      }
+      preCheckCmd = `python tests/runtests.py --verbosity=0 ${[...testIds].join(" ")} 2>&1 || true`
+    } else {
+      preCheckCmd = `python -m pytest -x -q --tb=short ${instance.failToPass.join(" ")} 2>&1 || true`
+    }
+    const preResult = workspace.exec(preCheckCmd)
+    const preOutput = preResult.stdout + preResult.stderr
+    // Handle pytest format: "N passed" and unittest format: "Ran N tests...OK"
+    const pytestPassed = preOutput.match(/(\d+) passed/)
+    const unittestRan = preOutput.match(/Ran (\d+) tests/)
+    const unittestOk = /^OK\s*$/m.test(preOutput)
+    let prePassedCount = 0
+    if (pytestPassed) {
+      prePassedCount = parseInt(pytestPassed[1], 10)
+    } else if (unittestRan && unittestOk) {
+      // All ran tests passed (no failures/errors)
+      const utFailed = parseInt(preOutput.match(/failures=(\d+)/)?.[1] ?? "0", 10)
+      const utErrors = parseInt(preOutput.match(/errors=(\d+)/)?.[1] ?? "0", 10)
+      if (utFailed === 0 && utErrors === 0) {
+        prePassedCount = parseInt(unittestRan[1], 10)
+      }
+    }
+    if (prePassedCount > 0) {
+      basePassCount = prePassedCount
+      console.log(`  [jingu] pre-check: ${prePassedCount}/${instance.failToPass.length} FAIL_TO_PASS tests pass in base — assertions changed by fix`)
+    }
+  }
+
   const attempts: AttemptResult[] = []
   let previousFeedback: string | undefined
   let finalPatchText: string | undefined
@@ -634,6 +705,7 @@ export async function runJingu(
       skipIfNoBaseline: opts.skipTestGate,
       failToPass: instance.failToPass,
       repo: instance.repo,
+      basePassCount,
     })
     workspace.reset() // always reset after test run
 

@@ -73,25 +73,44 @@ function buildTestCommand(repo: string, failToPass: string[]): string {
 // Check if the specific test methods in failToPass exist in the workspace test files.
 // SWE-bench FAIL_TO_PASS tests are sometimes added by the fix commit itself, not in the base.
 // Returns true if all tests exist (can run them), false if any test method is missing.
+// IMPORTANT: For unittest format, checks ONLY in the specific test file for that class —
+// generic method names like test_str exist in many files but may not exist in the target class.
 function failToPassTestsExistInWorkspace(workspace: Workspace, failToPass: string[]): boolean {
   for (const t of failToPass) {
     // unittest format: "test_method_name (module.path.TestClass)"
     const unittestMatch = t.match(/^(\w+)\s*\(([^)]+)\)$/)
     if (unittestMatch) {
-      const methodName = unittestMatch[1]  // e.g. "test_main_module_is_resolved"
-      // Search for this method name in the tests directory
-      const searchResult = workspace.exec(
-        `grep -r "def ${methodName}\\b" tests/ 2>/dev/null | head -1`
-      )
-      if (!searchResult.stdout.trim()) return false
+      const methodName = unittestMatch[1]  // e.g. "test_str"
+      const classDotted = unittestMatch[2]  // e.g. "model_enums.tests.ChoicesTests"
+
+      // Derive the test file path from the module path (strip class name from end)
+      const parts = classDotted.split(".")
+      // Last segment is the class; rest is the module path
+      const moduleParts = parts.slice(0, -1)  // e.g. ["model_enums", "tests"]
+      const relPath = moduleParts.join("/") + ".py"
+      // Try "tests/<relPath>" first, then bare "<relPath>"
+      const candidates = [`tests/${relPath}`, relPath]
+      let foundInSpecificFile = false
+      for (const candidate of candidates) {
+        const searchResult = workspace.exec(
+          `grep "def ${methodName}\\b" "${candidate}" 2>/dev/null | head -1`
+        )
+        if (searchResult.stdout.trim()) {
+          foundInSpecificFile = true
+          break
+        }
+      }
+      if (!foundInSpecificFile) return false
       continue
     }
     // Pytest format: "path/to/test.py::TestClass::test_method"
     const pytestMatch = t.match(/^([^:]+\.py)(?:::(\w+))?(?:::(\w+))?/)
     if (pytestMatch && pytestMatch[3]) {
+      const testFile = pytestMatch[1]
       const methodName = pytestMatch[3]
+      // Check in the specific test file
       const searchResult = workspace.exec(
-        `grep -r "def ${methodName}\\b" tests/ 2>/dev/null | head -1`
+        `grep "def ${methodName}\\b" "${testFile}" 2>/dev/null | head -1`
       )
       if (!searchResult.stdout.trim()) return false
     }
@@ -103,7 +122,7 @@ export function testGate(
   workspace: Workspace,
   _testCmd: string,  // kept for API compat, overridden when failToPass available
   beforeCounts: TestCounts,
-  opts: { skipIfNoBaseline?: boolean; failToPass?: string[]; repo?: string } = {}
+  opts: { skipIfNoBaseline?: boolean; failToPass?: string[]; repo?: string; basePassCount?: number } = {}
 ): GateResult {
   // If failToPass is provided, we have a reliable test command — baseline=0/0 is OK
   // (means the failing tests haven't passed yet, which is expected before the patch)
@@ -134,6 +153,20 @@ export function testGate(
       code: "ACCEPTED",
       message: `Test gate skipped: FAIL_TO_PASS test methods not present in base commit (tests added by fix). Relying on apply gate.`,
       details: { skipped: true, reason: "tests_added_by_fix" },
+    }
+  }
+
+  // If FAIL_TO_PASS tests already pass in the BASE state (before this patch), it means the test
+  // content was updated by the fix commit (assertions changed). The oracle uses new assertions.
+  // We cannot verify with the old assertions — skip test gate and rely on apply gate.
+  if (hasGroundTruth && opts.basePassCount !== undefined) {
+    if (opts.basePassCount >= opts.failToPass!.length) {
+      return {
+        status: "pass",
+        code: "ACCEPTED",
+        message: `Test gate skipped: FAIL_TO_PASS tests already pass in base state (test assertions changed by fix commit). Relying on apply gate.`,
+        details: { skipped: true, reason: "tests_already_pass_in_base" },
+      }
     }
   }
 
