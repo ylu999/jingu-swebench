@@ -26,7 +26,8 @@ RUN pip install --no-cache-dir \
     "litellm==1.83.0" \
     "swebench==4.1.0" \
     "boto3==1.42.1" \
-    "pydantic==2.12.5"
+    "pydantic==2.12.5" \
+    "awscli"
 
 # Working dir
 WORKDIR /app
