@@ -37,6 +37,7 @@ from patch_reviewer import review_patch_bedrock, ReviewResult
 
 # B1 gate mode: "trust_gate" (B1) or "structural" (B0 fallback)
 GATE_MODE = "trust_gate"
+REVIEWER_ENABLED = False  # B2 reviewer — set True to re-enable
 
 # ── Timing ────────────────────────────────────────────────────────────────────
 
@@ -559,41 +560,12 @@ def run_with_jingu(instance_id: str, output_dir: Path, max_attempts: int = 3) ->
                 print(f"    [gate] {grade}  score={score:.0f}  lines={patch_lines}  {exp_str}")
                 t_gate.stop()
 
-                # B2: adversarial reviewer — cognitive governance on top of B1 structural admission
-                t_review = Timer(f"B2 reviewer attempt={attempt}", parent=t_inst)
-                fail_to_pass = instance.get("FAIL_TO_PASS", [])
-                review = review_patch_bedrock(
-                    problem_statement=instance.get("problem_statement", ""),
-                    patch_text=patch,
-                    instance_id=instance_id,
-                    fail_to_pass_tests=fail_to_pass if isinstance(fail_to_pass, list) else [],
-                )
-                t_review.stop()
-                issue_summary = ", ".join(
-                    f"[{i.severity}]{i.dimension}" for i in review.issues
-                ) if review.issues else "none"
-                print(f"    [reviewer] verdict={review.verdict}  issues={len(review.issues)}  "
-                      f"({issue_summary})")
-                if review.verdict == "reject":
-                    # B2 reviewer rejected — log only (B1-only mode: not blocking)
-                    high_issues = [i for i in review.issues if i.severity == "high"]
-                    medium_issues = [i for i in review.issues if i.severity == "medium"]
-                    top_issues = (high_issues + medium_issues)[:2]
-                    reviewer_hint = "; ".join(
-                        f"{i.dimension}: {i.description[:120]}" for i in top_issues
-                    )
-                    print(f"    [reviewer:reasoning] {review.reasoning[:200]}")
-                    print(f"    [reviewer:advisory] reject logged (B1-only mode — not blocking)")
-                    # NOTE: reviewer verdict is advisory only — patch still admitted if gate passed
-
                 candidates.append({
                     "attempt": attempt,
                     "patch": patch,
                     "score": score,
                     "gate_code": gate_result.gate_code,
                     "gate_reason_codes": gate_result.reason_codes,
-                    "reviewer_verdict": review.verdict,
-                    "reviewer_issues": len(review.issues),
                 })
                 last_failure = ""
                 agent_exit = None
@@ -650,9 +622,8 @@ def run_with_jingu(instance_id: str, output_dir: Path, max_attempts: int = 3) ->
 
     best = max(candidates, key=lambda c: c["score"])
     gate_code = best.get("gate_code", "ADMITTED")
-    reviewer_verdict = best.get("reviewer_verdict", "pass")
     print(f"  [result] ACCEPTED  best_attempt={best['attempt']}  score={best['score']:.0f}  "
-          f"gate={gate_code}  reviewer={reviewer_verdict}  elapsed={t_inst.elapsed:.1f}s  "
+          f"gate={gate_code}  elapsed={t_inst.elapsed:.1f}s  "
           f"bedrock_calls={llm_calls}  cost=${inst_usage.get('cost_usd', 0):.4f}")
     return {
         "instance_id": instance_id,
@@ -663,8 +634,6 @@ def run_with_jingu(instance_id: str, output_dir: Path, max_attempts: int = 3) ->
         "score": best["score"],
         "gate_code": gate_code,
         "gate_reason_codes": best.get("gate_reason_codes", []),
-        "reviewer_verdict": reviewer_verdict,
-        "reviewer_issues": best.get("reviewer_issues", 0),
         "elapsed_s": t_inst.elapsed,
         "model_usage": inst_usage,
     }
