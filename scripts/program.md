@@ -142,3 +142,10 @@ auto_loop.py owns the entire eval pipeline:
 - step_limit=100 gives agent more room than the old step_limit=60
 - PARSE_FAILED and PATCH_APPLY_FAILED are dominant gate failure modes
 - Instance 11049 is parse-sensitive (avoid strict output constraints)
+- B1-only experiment (b1_only_run_01): reviewer advisory mode, gate is sole acceptance criterion
+  - All 5 instances ACCEPTED (acceptance_rate=1.0), 4/5 resolved (resolve_rate=0.80)
+  - Result: equal to B0 baseline — removing reviewer blocking does NOT improve resolve_rate
+  - CONCLUSION: Reviewer correctly filtered 11019. No false positives. Reviewer is calibrated.
+  - 11019 root cause (final): best_attempt was LimitsExceeded fallback diff — corrupt patch (trailing whitespace, truncated at line 141). Reviewer correctly rejected it.
+  - Architecture decision: B2 blocking mode is justified. Reviewer adds correct signal, not noise.
+- GATE_RUNNER_CRASH root cause: launch command used 'VAR=val cmd1 && cmd2' — inline env var only passes to cmd1, not cmd2. Fix: use 'export VAR=val' before launch.
