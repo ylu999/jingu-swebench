@@ -685,6 +685,14 @@ def run_with_jingu(instance_id: str, output_dir: Path, max_attempts: int = 3) ->
     for attempt in range(1, max_attempts + 1):
         print(f"  [attempt {attempt}/{max_attempts}] {instance_id}")
 
+        # NBR enforcement: No Blind Retry — attempt N+1 must have concrete failure signal
+        if attempt > 1 and not last_failure.strip():
+            raise RuntimeError(
+                f"[NBR violation] attempt {attempt} has empty last_failure. "
+                "Execution feedback is required before retry. "
+                "Check build_execution_feedback() and ensure tests_ran signal is captured."
+            )
+
         patch, agent_exit, jingu_body = run_agent(instance, output_dir, attempt,
                                                   previous_failure=last_failure, parent_timer=t_inst)
 
@@ -775,6 +783,13 @@ def run_with_jingu(instance_id: str, output_dir: Path, max_attempts: int = 3) ->
                         patch_fp=fp,
                     )
                     print(f"    [exec-feedback] {exec_feedback[:200]}")
+                    # EFR enforcement: Execution Feedback Required
+                    tests_ran = (jingu_body or {}).get("test_results", {}).get("ran_tests", False)
+                    if tests_ran and not exec_feedback.strip():
+                        raise RuntimeError(
+                            "[EFR violation] tests ran but exec_feedback is empty. "
+                            "build_execution_feedback() must extract test output."
+                        )
                     if RETRY_CONTROLLER_ENABLED:
                         # Phase 2B: LLM retry-controller builds on execution feedback
                         t_ctrl = Timer(f"B3 retry-controller attempt={attempt}", parent=t_inst)
