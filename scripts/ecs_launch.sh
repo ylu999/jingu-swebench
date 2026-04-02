@@ -1,5 +1,5 @@
 #!/bin/bash
-# ecs_launch.sh — Launch a jingu-swebench batch run on ECS (EC2 launch type)
+# ecs_launch.sh — Launch a jingu-swebench batch run on ECS (EC2 via capacity provider)
 #
 # Usage:
 #   bash scripts/ecs_launch.sh --run-id ecs_batch_04 --instances "django__django-11001 django__django-11019" [options]
@@ -115,10 +115,12 @@ echo "└───────────────────────�
 echo ""
 
 # ── Run the task ───────────────────────────────────────────────────────────────
+# Use capacity provider (jingu-swebench-ec2-cp) so ECS auto-scales the ASG.
+# Do NOT use --launch-type EC2 when a capacity provider is configured — they conflict.
 RESULT=$(aws ecs run-task \
   --cluster "$CLUSTER" \
   --task-definition "$TASK_DEF_ARG" \
-  --launch-type EC2 \
+  --capacity-provider-strategy "capacityProvider=jingu-swebench-ec2-cp,weight=1" \
   --overrides "$OVERRIDES" \
   --region "$REGION" \
   --output json)
