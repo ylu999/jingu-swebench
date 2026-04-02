@@ -104,20 +104,19 @@ ONLY `scripts/run_with_jingu_gate.py`:
 - `patch_reviewer.py` — B2 adversarial reviewer (infra)
 - Any file outside `scripts/run_with_jingu_gate.py` and `scripts/patch_admission_policy.js`
 
-## CRITICAL: Eval Is Owned by auto_loop, Not the Agent
+## CRITICAL: Eval Runs on ECS, Not Locally
 
-**The agent MUST NOT run any eval.**
+**The agent MUST NOT trigger any eval.**
 
-- Do NOT run `run_with_jingu_gate.py` on cloud
+- Do NOT run `run_with_jingu_gate.py` directly
 - Do NOT run `fast_eval.py`
 - Do NOT start Docker containers
-- Do NOT SSH to cloud to check eval progress
+- Do NOT trigger ECS tasks manually
 
-auto_loop.py owns the entire eval pipeline:
-1. Detects file change → syncs run_with_jingu_gate.py to cloud
-2. Runs run_with_jingu_gate.py on cloud → generates patches
-3. Runs fast_eval.py on cloud → measures resolve_rate
-4. Writes results to journal → feeds next round context
+ECS owns the entire eval pipeline:
+1. Container built from Dockerfile + docker-entrypoint.sh
+2. Runs `run_with_jingu_gate.py` inside ECS task → generates patches
+3. Uploads results to S3 → retrieved locally for analysis
 
 **The agent job is ONLY:**
 1. Analyze round history and metrics already provided in context

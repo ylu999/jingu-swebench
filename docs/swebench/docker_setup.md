@@ -45,7 +45,7 @@ docker run hello-world
 | `env` | ~100GB | First run only | **Default recommendation** |
 | `instance` | ~2TB | Never (after first) | Production speed |
 
-Cloud desktop (1.2TB disk) → use `env` cache level.
+ECS EC2 instance → use `env` cache level (image pull cached by vfs storage driver).
 
 ## Disk Management
 
@@ -61,7 +61,7 @@ docker container ls -a     # List containers
 ```
 workers = min(0.75 * cpu_count(), 24)
 ```
-For cloud desktop (8 CPUs) → 6 workers max.
+For 8 CPUs → 6 workers max.
 
 ## Troubleshooting
 

@@ -31,8 +31,14 @@ console.log(`fail_to_pass: ${FAIL_TO_PASS.length} tests`)
 console.log("(first run may take ~5-10 min to pull image)")
 console.log("")
 
+const SSH_HOST = process.env.SSH_EVAL_HOST ?? ""
+if (!SSH_HOST) {
+  console.error("ERROR: SSH_EVAL_HOST not set (eval now runs on ECS, not via SSH)")
+  process.exit(1)
+}
+
 const result = sshTestGate(INSTANCE_ID, REPO, "1776", PATCH, FAIL_TO_PASS, {
-  sshHost: "cloud",
+  sshHost: SSH_HOST,
   timeoutMs: 900_000,
 })
 

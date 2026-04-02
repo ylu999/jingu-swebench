@@ -10,16 +10,12 @@ Architecture:
 Each round:
   1. Build a rich context document (goals + round history + current code + metrics)
   2. Invoke `claude --print` (Claude Code) with the context as prompt
-     Claude Code can do ANYTHING:
-       - SSH to cloud desktop (ssh cloud ...)
-       - Run Docker containers for SWE-bench evaluation
-       - Read logs, debug failures, root-cause analysis
-       - Modify run_with_jingu_gate.py
-       - Fetch documentation from the web
-       - Run dry-runs, full evals, whatever it deems necessary
   3. Claude Code writes a JSON result to results/loop_round_NNN_result.json
   4. Loop checks if run_with_jingu_gate.py changed → re-eval → commit/rollback
   5. Append to loop_journal.jsonl for next round's context
+
+Eval infrastructure: ECS (EC2 launch type, Docker-in-Docker via vfs storage driver).
+Results are uploaded to S3 after each run.
 
 Usage:
   python scripts/auto_loop.py
@@ -29,37 +25,6 @@ Usage:
 Environment:
   CLAUDE_CLI   — path to claude CLI (default: claude)
   LOOP_TARGET  — stop when acceptance_rate >= this (default: 0.6)
-
-Four-layer architecture:
-  1. Laptop (control plane)  — auto_loop.py + claude --print live here
-  2. Cloud Dev Desktop       — ssh cloud; Docker host; 1.2TB disk, 8 CPUs
-  3. Docker containers       — fast feedback loop: git apply + pytest in ~30s/instance
-  4. sb-cli submit           — ground truth / leaderboard evaluation (DO NOT substitute)
-
-Cloud desktop commands:
-  Refresh creds:  ssh cloud "~/.toolbox/bin/ada credentials update --account=235494812052 --provider=conduit --role=IibsAdminAccess-DO-NOT-DELETE --once"
-  Python:         ssh cloud "~/.local/share/mise/shims/python ..."
-  Docker images:  sweb.eval.x86_64.django__django-NNNNN:latest (built locally via prepare_images)
-  Tag for agent:  docker tag sweb.eval.x86_64.X:latest swebench/sweb.eval.x86_64.X_with_1776:latest
-
-Fast feedback eval (30s/instance, NOT ground truth):
-  ssh cloud "docker run --rm -w /testbed sweb.eval.x86_64.django__django-11039:latest bash -c \
-    'git apply /tmp/patch.diff && python -m pytest tests/... -x -q'"
-
-Official eval (ground truth, use sparingly):
-  ssh cloud "~/.local/share/mise/shims/python -m swebench.harness.run_evaluation \
-    --dataset_name SWE-bench/SWE-bench_Lite \
-    --predictions_path ~/jingu-swebench/results/run/jingu-predictions.jsonl \
-    --instance_ids django__django-11039 --max_workers 4 --run_id test_X"
-
-Generate patches (mini-SWE-agent + Jingu gate, run on cloud desktop):
-  ssh cloud "~/.local/share/mise/shims/python ~/jingu-swebench/scripts/run_with_jingu_gate.py \
-    --instance-ids django__django-11039 django__django-11001 \
-    --max-attempts 3 --workers 4 --output ~/jingu-swebench/results/run_X/"
-
-IMPORTANT:
-  Docker pytest = fast iteration signal, NOT leaderboard ground truth
-  sb-cli = ground truth judge; use only to validate significant improvements
 """
 
 import argparse
@@ -85,11 +50,9 @@ CLAUDE_CLI    = os.environ.get("CLAUDE_CLI", "claude")
 
 # ── Infra config (edit loop_config.py, not here) ───────────────────────────────
 from loop_config import (  # noqa: E402
-    CLOUD_HOST, CLOUD_PYTHON, CLOUD_SCRIPTS, CLOUD_RESULTS,
-    DEFAULT_INSTANCES, STAGE1_LOCAL,
-    STAGE1_PER_INSTANCE_BUDGET_S, STAGE1_HEADROOM_S, STAGE2_TIMEOUT_S,
-    CLAUDE_AGENT_TIMEOUT_S, CLOUD_SYNC_SCRIPTS,
-    JINGU_TRUST_GATE_DIST_LOCAL, CLOUD_TRUST_GATE_DIST,
+    DEFAULT_INSTANCES,
+    STAGE1_PER_INSTANCE_BUDGET_S, STAGE1_HEADROOM_S,
+    CLAUDE_AGENT_TIMEOUT_S,
 )
 
 # ── Journal ────────────────────────────────────────────────────────────────────
@@ -163,26 +126,18 @@ def build_context(round_num: int, past_rounds: list[dict], instances: list[str],
 
     infra_state = f"""## Infrastructure State (auto-generated, always accurate)
 
-These facts are derived from the CURRENT local file and auto_loop config.
-Do NOT re-derive them by reading cloud files or auto_loop.py — trust this block.
+These facts are derived from the CURRENT local file and loop config.
 
 | Item | Value |
 |------|-------|
-| stage1 runs on | CLOUD (ssh → run_with_jingu_gate.py → Docker) — local Docker locked |
-| stage2 runs on | CLOUD (ssh → fast_eval.py → Docker pytest) |
+| eval runs on | ECS (EC2 launch type, Docker-in-Docker via vfs) |
+| results uploaded to | S3 after each ECS task |
 | claude agent timeout | 1800s |
 | eval workers | {workers} |
 | max_attempts | {max_attempts} |
 | step_limit (current) | {step_limit} |
 | normalize_patch present | {has_normalize} |
 | instances | {len(instances)} |
-
-**Rounds 26-33 all show metric=0/5**: This was a bug — `swebench_infra.py` existed
-locally but was never deployed to cloud, causing ModuleNotFoundError on every eval.
-That bug is now FIXED. Round 034+ will get real eval results.
-
-**Do not investigate why past rounds showed 0/5.** It was an infra bug, not a gate bug.
-The baseline signal is from round 028: 3/5 resolved (11001, 11039, 11099) with step_limit=60.
 """
 
     # Last metric for quick reference
@@ -243,41 +198,14 @@ scripts/
                               run_parallel(), _load_instances()
 
   auto_loop.py             ← DO NOT TOUCH (runs on laptop, owns eval pipeline)
-  fast_eval.py             ← DO NOT TOUCH (resolve evaluator, owned by auto_loop)
+  fast_eval.py             ← DO NOT TOUCH (resolve evaluator)
   program.md               ← DO NOT TOUCH (fixed goals)
 ```
 
-### What auto_loop does each round (you do NOT do any of this)
+### Eval pipeline
 
-```
-Step 1 — invoke you (claude --print) with this context
-Step 2 — detect if run_with_jingu_gate.py changed (file hash before vs after)
-Step 3 — if changed:
-    Sync scripts → scp run_with_jingu_gate.py + swebench_infra.py to cloud
-    Stage 1 (CLOUD, ~15-20 min):
-      ssh cloud: python run_with_jingu_gate.py → patches via Bedrock + Docker
-      scp predictions → local
-    Stage 2 (CLOUD,  ~2-3 min):
-      ssh cloud: python fast_eval.py → Docker pytest → resolve_rate
-Step 4 — write results to journal → feed into next round context
-```
-
-**Key points:**
-- Both stages run on CLOUD (local Docker requires enterprise login, is locked).
-- auto_loop syncs scripts to cloud automatically before each eval — no manual scp needed.
-- You do NOT need to scp anything or check cloud script versions.
-- The LOCAL `run_with_jingu_gate.py` is what you modify; auto_loop syncs it to cloud.
-
-### Cloud layout (for read-only investigation of past runs only)
-
-```
-~/jingu-swebench/results/loop_round_NNN_*/   ← old run outputs from before this change
-                                                (when stage1 still ran on cloud)
-```
-
-**Note:** Both stage1 and stage2 run on cloud. auto_loop syncs scripts before each eval.
-
-**Do not SSH to check script versions.** The LOCAL file shown below is what gets executed.
+Eval runs on ECS. Scripts are baked into the container image.
+Results are uploaded to S3 after each ECS task completes.
 
 ---
 
@@ -309,7 +237,7 @@ Step 4 — write results to journal → feed into next round context
 
 ---
 
-## Current run_with_jingu_gate.py (LOCAL — this is what will be synced to cloud)
+## Current run_with_jingu_gate.py (LOCAL — baked into container image at ECS build time)
 
 ```python
 {current_code}
@@ -322,11 +250,9 @@ Step 4 — write results to journal → feed into next round context
 **Step 1 — Analyze**: Read the round history above. What is the dominant failure pattern?
 What changed between rounds? What hypotheses have already been tested?
 
-**Step 2 — Investigate (only if needed)**: SSH to cloud to read logs or traj files.
-- Read logs: `ssh cloud "cat ~/jingu-swebench/results/loop_round_NNN_*/run.log"`
-- Read traj: `ssh cloud "cat ~/jingu-swebench/results/loop_round_NNN_*/attempt_1/INSTANCE/INSTANCE.traj.json"`
-- DO NOT check cloud script versions (irrelevant — auto_loop overwrites before eval)
-- DO NOT run any eval commands on cloud
+**Step 2 — Investigate (only if needed)**: Read S3 results or local result files.
+- Results are downloaded from S3 to local `results/` after each ECS run.
+- Do NOT trigger ECS tasks manually.
 
 **Step 3 — Hypothesize**: Form ONE testable hypothesis about what will improve resolve_rate.
 
@@ -334,7 +260,7 @@ What changed between rounds? What hypotheses have already been tested?
 Only change what your hypothesis requires. No compound changes.
 
 **Step 5 — Record**: Write result JSON to `{REPO_ROOT}/results/loop_round_{round_num:03d}_result.json`
-then EXIT. auto_loop will detect the file change, sync to cloud, run eval, and report in round {round_num + 1}.
+then EXIT. auto_loop will detect the file change and report in round {round_num + 1}.
 
 ```json
 {{
@@ -541,13 +467,19 @@ def git_reset_target() -> None:
     )
     print(f"  [loop] reset {TARGET_SCRIPT.name} to HEAD")
 
-# ── Eval runner (for measuring delta after Claude's change) ───────────────────
+# ── Eval runner ───────────────────────────────────────────────────────────────
+# NOTE: _ssh and run_cloud_eval are legacy helpers from the pre-ECS era.
+# They are kept for compatibility with the first-round baseline logic.
+# Do not add new ssh/cloud references here.
 
 
 def _ssh(cmd: str, timeout: int = 600, prefix: str = "") -> subprocess.CompletedProcess:
-    """Run a command on cloud desktop via SSH, streaming output in real time."""
+    """Run a command via SSH (legacy — ECS is now the eval environment)."""
+    ssh_host = os.environ.get("SSH_EVAL_HOST", "")
+    if not ssh_host:
+        raise RuntimeError("_ssh called but SSH_EVAL_HOST is not set (eval runs on ECS)")
     proc = subprocess.Popen(
-        ["ssh", CLOUD_HOST, cmd],
+        ["ssh", ssh_host, cmd],
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
         text=True,
     )
@@ -578,7 +510,7 @@ def _ssh(cmd: str, timeout: int = 600, prefix: str = "") -> subprocess.Completed
         raise
     stdout = "".join(out_lines)
     return subprocess.CompletedProcess(
-        args=["ssh", CLOUD_HOST, cmd],
+        args=["ssh", ssh_host, cmd],
         returncode=proc.wait(),
         stdout=stdout,
         stderr="",
@@ -587,12 +519,7 @@ def _ssh(cmd: str, timeout: int = 600, prefix: str = "") -> subprocess.Completed
 
 def run_cloud_eval(instances: list[str], output_dir: Path, workers: int,
                    max_attempts: int, stagger: int) -> dict:
-    """Two-stage eval: generate patches on cloud, then fast-eval on cloud (Docker).
-
-    Stage 1 (CLOUD, ~15-20 min): ssh → run_with_jingu_gate.py → patches via Bedrock
-    Stage 2 (CLOUD,  ~2-3 min):  ssh → fast_eval.py → Docker pytest → resolve_rate
-
-    Both stages run on cloud because local Docker requires enterprise login (locked).
+    """Legacy eval runner (pre-ECS). Requires SSH_EVAL_HOST env var.
 
     acceptance_rate = Jingu gate pass rate (structural)
     resolve_rate    = FAIL_TO_PASS test pass rate (semantic, fast signal)
@@ -603,57 +530,27 @@ def run_cloud_eval(instances: list[str], output_dir: Path, workers: int,
     output_dir.mkdir(parents=True, exist_ok=True)
     log_path = output_dir / "run.log"
 
-    # ── Sync scripts to cloud before running ─────────────────────────────────
-    print(f"  [eval:sync] syncing scripts to cloud...")
-    for name in CLOUD_SYNC_SCRIPTS:
-        src = SCRIPT_DIR / name
-        if src.exists():
-            r = subprocess.run(
-                ["scp", str(src), f"{CLOUD_HOST}:{CLOUD_SCRIPTS}/{name}"],
-                capture_output=True, text=True, timeout=30,
-            )
-            if r.returncode != 0:
-                print(f"  [eval:sync] WARNING scp {name} failed: {r.stderr[:100]}")
-            else:
-                print(f"  [eval:sync] {name} → cloud OK")
+    # Legacy: this function used SSH to run eval on a remote host.
+    # Now eval runs on ECS. This path requires SSH_EVAL_HOST to be set.
+    ssh_host    = os.environ.get("SSH_EVAL_HOST", "")
+    ssh_python  = os.environ.get("SSH_EVAL_PYTHON", "python3")
+    ssh_scripts = os.environ.get("SSH_EVAL_SCRIPTS", "~/jingu-swebench/scripts")
+    ssh_results = os.environ.get("SSH_EVAL_RESULTS", "~/jingu-swebench/results")
+    if not ssh_host:
+        raise RuntimeError("run_cloud_eval called but SSH_EVAL_HOST is not set (eval runs on ECS)")
 
-    # ── Sync jingu-trust-gate dist to cloud (B1 gate dependency, ~456K) ──────
-    import pathlib as _pl
-    gate_dist_local = _pl.Path(JINGU_TRUST_GATE_DIST_LOCAL)
-    if gate_dist_local.exists():
-        print(f"  [eval:sync] syncing jingu-trust-gate dist to cloud...")
-        # Create remote dir first
-        subprocess.run(
-            ["ssh", CLOUD_HOST, f"mkdir -p {CLOUD_TRUST_GATE_DIST}"],
-            capture_output=True, timeout=10,
-        )
-        r = subprocess.run(
-            ["rsync", "-a", "--delete",
-             f"{gate_dist_local}/",
-             f"{CLOUD_HOST}:{CLOUD_TRUST_GATE_DIST}/"],
-            capture_output=True, text=True, timeout=60,
-        )
-        if r.returncode != 0:
-            print(f"  [eval:sync] WARNING rsync trust-gate dist failed: {r.stderr[:200]}")
-        else:
-            print(f"  [eval:sync] jingu-trust-gate dist → cloud OK")
-    else:
-        print(f"  [eval:sync] WARNING: trust-gate dist not found at {gate_dist_local}")
-
-    # ── Stage 1: Generate patches on CLOUD (Docker available there) ───────────
-    cloud_out = f"{CLOUD_RESULTS}/{run_name}"
+    # ── Stage 1: Generate patches ──────────────────────────────────────────────
+    remote_out = f"{ssh_results}/{run_name}"
     gate_cmd = (
-        f"mkdir -p {cloud_out} && "
-        f"JINGU_TRUST_GATE_DIST={CLOUD_TRUST_GATE_DIST} "
-        f"JINGU_SWEBENCH_SCRIPTS={CLOUD_SCRIPTS} "
-        f"{CLOUD_PYTHON} {CLOUD_SCRIPTS}/run_with_jingu_gate.py "
+        f"mkdir -p {remote_out} && "
+        f"{ssh_python} {ssh_scripts}/run_with_jingu_gate.py "
         f"--instance-ids {' '.join(instances)} "
-        f"--output {cloud_out} "
+        f"--output {remote_out} "
         f"--workers {workers} "
         f"--max-attempts {max_attempts} "
         f"--stagger {stagger}"
     )
-    print(f"  [eval:stage1] patch generation on CLOUD ({len(instances)} instances, "
+    print(f"  [eval:stage1] patch generation ({len(instances)} instances, "
           f"workers={workers}, max_attempts={max_attempts})...")
     t0 = time.time()
     timeout_stage1 = max_attempts * len(instances) * STAGE1_PER_INSTANCE_BUDGET_S + STAGE1_HEADROOM_S
@@ -672,10 +569,10 @@ def run_cloud_eval(instances: list[str], output_dir: Path, workers: int,
     print(f"  [eval:stage1] done in {stage1_time:.0f}s  (rc={r1.returncode})")
 
     # ── Copy predictions from cloud to local ─────────────────────────────────
-    preds_remote = f"{cloud_out}/jingu-predictions.jsonl"
+    preds_remote = f"{remote_out}/jingu-predictions.jsonl"
     preds_local  = output_dir / "jingu-predictions.jsonl"
     scp_down = subprocess.run(
-        ["scp", f"{CLOUD_HOST}:{preds_remote}", str(preds_local)],
+        ["scp", f"{ssh_host}:{preds_remote}", str(preds_local)],
         capture_output=True, text=True, timeout=60,
     )
     if scp_down.returncode == 0 and preds_local.exists():
@@ -715,7 +612,7 @@ def run_cloud_eval(instances: list[str], output_dir: Path, workers: int,
 
     # ── Stage 2: Fast resolve eval on cloud (Docker) ──────────────────────────
     # predictions are already on cloud from stage1; also available locally via scp_down above
-    preds_remote = f"{cloud_out}/jingu-predictions.jsonl"
+    preds_remote = f"{remote_out}/jingu-predictions.jsonl"
 
     resolve_rate = 0.0
     resolved_ids: list[str] = []
@@ -724,13 +621,13 @@ def run_cloud_eval(instances: list[str], output_dir: Path, workers: int,
 
     if preds_local.exists() and preds_local.stat().st_size > 0:
         fast_cmd = (
-            f"{CLOUD_PYTHON} {CLOUD_SCRIPTS}/fast_eval.py "
+            f"{ssh_python} {ssh_scripts}/fast_eval.py "
             f"--predictions {preds_remote} "
             f"--instance-ids {' '.join(instances)} "
             f"--workers {min(workers, len(instances))} "
             f"--remote ''"
         )
-        print(f"  [eval:stage2] fast resolve eval on cloud (Docker)...")
+        print(f"  [eval:stage2] fast resolve eval...")
         t1 = time.time()
         r2 = _ssh(fast_cmd, timeout=STAGE2_TIMEOUT_S, prefix="stage2")
         stage2_time = time.time() - t1
@@ -752,8 +649,8 @@ def run_cloud_eval(instances: list[str], output_dir: Path, workers: int,
     # ── Final summary ─────────────────────────────────────────────────────────
     total_time = time.time() - t_total
     print(f"\n  ┌─ Eval Summary ──────────────────────────────────────")
-    print(f"  │  stage1 (patch gen, cloud) : {stage1_time:.0f}s")
-    print(f"  │  stage2 (docker eval, cloud): {stage2_time:.0f}s")
+    print(f"  │  stage1 (patch gen)  : {stage1_time:.0f}s")
+    print(f"  │  stage2 (docker eval): {stage2_time:.0f}s")
     print(f"  │  total                      : {total_time:.0f}s")
     print(f"  │  resolve_rate               : {resolve_rate:.1%}  ({len(resolved_ids)}/{len(instances)})")
     print(f"  │  resolved                   : {resolved_ids}")
@@ -824,7 +721,7 @@ def main():
     parser.add_argument("--max-rounds", type=int, default=20)
     parser.add_argument("--instances", nargs="+", default=DEFAULT_INSTANCES)
     parser.add_argument("--workers", type=int, default=2,
-                        help="Workers for local eval (default 2; cloud desktop runs the real evals)")
+                        help="Workers for eval (default 2)")
     parser.add_argument("--max-attempts", type=int, default=3)
     parser.add_argument("--stagger", type=int, default=20)
     parser.add_argument("--target", type=float,
@@ -841,7 +738,7 @@ def main():
 ╔══════════════════════════════════════════════════════════╗
 ║  jingu-swebench AutoResearch Loop                        ║
 ║  agent: Claude Code (claude --print)                     ║
-║  eval:  cloud desktop Docker + AWS Bedrock               ║
+║  eval:  ECS (EC2, Docker-in-Docker) + AWS Bedrock        ║
 ║  target: {args.target:.0%}  max_rounds={args.max_rounds}                  ║
 ╚══════════════════════════════════════════════════════════╝
 """)
@@ -861,8 +758,7 @@ def main():
         print(f"{'='*62}")
 
         # ── Step 1: Baseline metric ────────────────────────────────────────────
-        # Claude Code will run the real eval on cloud desktop.
-        # Here we track the last known metric for context.
+        # Track last known metric for context.
         last_metric = {}
         if past_rounds:
             last_entry = past_rounds[-1]
@@ -937,7 +833,7 @@ def main():
         rate_old   = last_metric.get("acceptance_rate", 0.0)
 
         if file_changed:
-            _phase("PHASE 2/3 — patch generation (local Bedrock)")
+            _phase("PHASE 2/3 — patch generation")
             out_dir_new = REPO_ROOT / "results" / f"loop_round_{round_num:03d}_new"
             metric_new  = run_cloud_eval(
                 args.instances, out_dir_new, args.workers, args.max_attempts, args.stagger
