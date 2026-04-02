@@ -13,11 +13,12 @@ Output schema:
     "run_date": "<ISO>",
     "total": N,
     "categories": {
-      "missing_declaration":         N,  # no FIX_TYPE line found
-      "pass_consistent":             N,  # declaration present, no contradiction
+      "missing_declaration":         N,  # no FIX_TYPE line found at all
+      "unusable_declaration":        N,  # FIX_TYPE present but not in controlled vocabulary
+      "pass_consistent":             N,  # declaration present and valid, no contradiction
       "signal_contradiction":        N,  # type vs patch signal mismatch
       "principal_contradiction":     N,  # self-contradicting principals
-      "weak_declaration":            N,  # FIX_TYPE present but principals empty
+      "weak_declaration":            N,  # FIX_TYPE valid but principals empty
       "no_patch":                    N   # traj has no submission patch
     },
     "instances": [
@@ -47,13 +48,32 @@ from declaration_extractor import extract_declaration, extract_last_agent_messag
 from patch_signals import extract_patch_signals
 from cognition_check import check_cognition
 
+# Controlled vocabulary — must match TYPE_PRINCIPAL_POLICY keys in jingu-policy-core
+VALID_FIX_TYPES = {
+    "root_cause_fix", "workaround_fix", "exploration",
+    "test_validation", "environment_fix",
+}
+
 
 def classify(decl: dict, signals: list[str], violations: list[dict], has_patch: bool) -> str:
-    """Map gate inputs/outputs to a single taxonomy category."""
+    """
+    Map gate inputs/outputs to a single taxonomy category.
+
+    Priority order (first match wins):
+      no_patch               → traj has no submission
+      missing_declaration    → no FIX_TYPE line found
+      unusable_declaration   → FIX_TYPE present but not in controlled vocabulary
+      weak_declaration       → valid type but principals list empty
+      signal_contradiction   → type contradicts patch signals
+      principal_contradiction → self-contradicting principals
+      pass_consistent        → declaration valid, no contradiction found
+    """
     if not has_patch:
         return "no_patch"
     if not decl or not decl.get("type"):
         return "missing_declaration"
+    if decl["type"] not in VALID_FIX_TYPES:
+        return "unusable_declaration"
     if not decl.get("principals"):
         return "weak_declaration"
     if any(v["kind"] == "signal_contradiction" for v in violations):
@@ -114,13 +134,14 @@ def run_taxonomy(results_dir: Path, output_path: Path) -> None:
 
     # Count categories
     category_counts: dict[str, int] = {
-        "missing_declaration":    0,
-        "pass_consistent":        0,
-        "signal_contradiction":   0,
+        "missing_declaration":     0,
+        "unusable_declaration":    0,
+        "pass_consistent":         0,
+        "signal_contradiction":    0,
         "principal_contradiction": 0,
-        "weak_declaration":       0,
-        "no_patch":               0,
-        "error":                  0,
+        "weak_declaration":        0,
+        "no_patch":                0,
+        "error":                   0,
     }
     for inst in instances:
         cat = inst.get("category", "error")
@@ -154,15 +175,23 @@ def run_taxonomy(results_dir: Path, output_path: Path) -> None:
 
     # Gate judgment
     print("\n  GATE JUDGMENT:")
-    signal_rate = category_counts.get("signal_contradiction", 0) / total if total else 0
-    missing_rate = category_counts.get("missing_declaration", 0) / total if total else 0
+    signal_rate    = category_counts.get("signal_contradiction", 0) / total if total else 0
+    missing_rate   = category_counts.get("missing_declaration", 0) / total if total else 0
+    unusable_rate  = category_counts.get("unusable_declaration", 0) / total if total else 0
+    declared_rate  = 1.0 - missing_rate  # any FIX_TYPE found
 
     if missing_rate > 0.80:
-        print("  → TUNE PROMPT: >80% missing declaration — agent rarely declares, gate mostly skipped")
-    elif signal_rate >= 0.05:
-        print("  → PROMISING: ≥5% signal_contradiction — gate doing real work, proceed to case sampling")
+        print("  → TUNE PROMPT: >80% missing declaration — agent not following declaration protocol")
+    elif unusable_rate > 0.20:
+        print(f"  → FORMAT ISSUE: {unusable_rate:.0%} unusable_declaration — agent declares but uses wrong vocabulary")
+    elif declared_rate >= 0.80 and signal_rate >= 0.05:
+        print("  → PROMISING: declaration protocol working (≥80% declare) + ≥5% signal_contradiction")
+        print("     Proceed to Step 2 (before/after case sampling)")
+    elif declared_rate >= 0.80:
+        print(f"  → DECLARING OK, LOW CONTRADICTION: {declared_rate:.0%} declare but only {signal_rate:.0%} signal_contradiction")
+        print("     Gate may need expanded contradiction rules, or patches are genuinely consistent")
     else:
-        print("  → WEAK SIGNAL: <5% contradiction rate — may need expanded rules or more training")
+        print(f"  → PARTIAL: {declared_rate:.0%} declare — prompt injection partially working, keep monitoring")
 
 
 if __name__ == "__main__":

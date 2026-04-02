@@ -594,6 +594,29 @@ def run_agent(
     config = recursive_merge(config, BASE_CONFIG)
     # Build instance_template_extra: tests that must pass + optional retry hint
     extra_parts = []
+
+    # B4: declaration protocol — agent must declare fix type and principals
+    # before submitting. Extraction runs in cognition gate post-submission.
+    # Format is a hard protocol: two lines, controlled vocabulary, no prose.
+    extra_parts.append(
+        "DECLARATION PROTOCOL (required before every submission):\n"
+        "Before calling submit, output these two lines exactly:\n\n"
+        "  FIX_TYPE: <one of: root_cause_fix | workaround_fix | exploration | test_validation | environment_fix>\n"
+        "  PRINCIPALS: <space-separated subset of: fix_cause_not_symptom workaround_only probe_until_signal verify_before_submit fix_environment_first>\n\n"
+        "Rules:\n"
+        "  - FIX_TYPE must be exactly one value from the list above\n"
+        "  - PRINCIPALS must be one or more values from the list above\n"
+        "  - Choose the values that best describe YOUR fix strategy for this specific problem\n"
+        "  - root_cause_fix = you found and fixed the actual cause of the bug\n"
+        "  - workaround_fix = you bypassed the problem without fixing its root cause\n"
+        "  - test_validation = your fix is primarily about making tests pass correctly\n"
+        "  - environment_fix = the fix is about configuration or environment setup\n"
+        "  - exploration = you are still investigating, not yet submitting a fix\n"
+        "Example:\n"
+        "  FIX_TYPE: root_cause_fix\n"
+        "  PRINCIPALS: fix_cause_not_symptom verify_before_submit"
+    )
+
     fail_to_pass = instance.get("FAIL_TO_PASS", [])
     if fail_to_pass:
         tests_str = "\n".join(f"  - {t}" for t in fail_to_pass[:10])
