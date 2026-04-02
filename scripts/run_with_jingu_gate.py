@@ -535,6 +535,7 @@ BASE_CONFIG = {
     "environment": {
         "environment_class": "docker",
         "container_timeout": "30m",
+        "pull_timeout": 600,  # 10 min — first pull of swebench eval images is slow
     },
     "agent": {
         "mode": "yolo",
