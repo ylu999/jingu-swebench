@@ -21,7 +21,6 @@ if ! docker info >/dev/null 2>&1; then
     done
     if ! docker info >/dev/null 2>&1; then
         echo "[entrypoint] ERROR: dockerd failed to start after 60s"
-        docker info 2>&1 || true
         exit 1
     fi
 fi
@@ -45,12 +44,24 @@ cd /app
 python scripts/run_with_jingu_gate.py "$@"
 EXIT_CODE=$?
 
-# Upload results to S3 if bucket is configured
+# Upload results to S3 using Python boto3
 if [ -n "$S3_RESULTS_BUCKET" ] && [ -d "$OUTPUT_DIR" ]; then
     RUN_NAME=$(basename "$OUTPUT_DIR")
     echo "[entrypoint] uploading results to s3://${S3_RESULTS_BUCKET}/${RUN_NAME}/"
-    aws s3 sync "$OUTPUT_DIR" "s3://${S3_RESULTS_BUCKET}/${RUN_NAME}/" --region "${AWS_DEFAULT_REGION:-us-west-2}"
-    echo "[entrypoint] upload complete"
+    python3 - <<PYEOF
+import boto3, os, pathlib
+bucket = os.environ["S3_RESULTS_BUCKET"]
+run_name = "${RUN_NAME}"
+output_dir = pathlib.Path("${OUTPUT_DIR}")
+region = os.environ.get("AWS_DEFAULT_REGION", "us-west-2")
+s3 = boto3.client("s3", region_name=region)
+for f in output_dir.rglob("*"):
+    if f.is_file():
+        key = f"{run_name}/{f.relative_to(output_dir)}"
+        s3.upload_file(str(f), bucket, key)
+        print(f"  uploaded: {key}")
+print("[entrypoint] upload complete")
+PYEOF
 fi
 
 exit $EXIT_CODE
