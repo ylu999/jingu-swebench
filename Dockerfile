@@ -45,6 +45,10 @@ COPY scripts/run_with_jingu_gate.py \
      scripts/patch_admission_policy.js \
      /app/scripts/
 
+# gate_runner.js uses top-level await — must run as ESM.
+# Node.js looks for package.json with "type":"module" up the directory tree.
+RUN echo '{"type":"module"}' > /app/scripts/package.json
+
 # Results volume mount point
 RUN mkdir -p /app/results
 
