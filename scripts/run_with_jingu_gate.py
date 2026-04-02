@@ -42,6 +42,41 @@ GATE_MODE = "trust_gate"
 REVIEWER_ENABLED = False  # B2 reviewer — set True to re-enable
 RETRY_CONTROLLER_ENABLED = True  # B3 retry-controller — diagnoses attempt 1, guides attempt 2
 
+# ── Traj watcher: real-time per-step log ───────────────────────────────────────
+
+def _install_step_logger(instance_id: str, attempt: int) -> None:
+    """
+    Monkey-patch ProgressTrackingAgent.step() to emit a real-time log line
+    for every agent step. This gives per-step visibility without changing
+    mini-swe-agent internals.
+
+    Log format:
+      [step N] ${cost:.2f}  <first 80 chars of assistant text>
+    """
+    from minisweagent.run.benchmarks.swebench import ProgressTrackingAgent
+    _orig_step = ProgressTrackingAgent.step
+
+    def _logged_step(self):
+        result = _orig_step(self)
+        # Extract last assistant message snippet
+        snippet = ""
+        for msg in reversed(self.messages):
+            if msg.get("role") == "assistant":
+                content = msg.get("content", "")
+                if isinstance(content, list):
+                    for c in content:
+                        if isinstance(c, dict) and c.get("type") == "text":
+                            content = c["text"]
+                            break
+                if isinstance(content, str):
+                    snippet = content.replace("\n", " ")[:80]
+                break
+        print(f"    [step {self.n_calls}] ${self.cost:.2f}  {snippet}", flush=True)
+        return result
+
+    ProgressTrackingAgent.step = _logged_step
+
+
 # ── Telemetry helpers ──────────────────────────────────────────────────────────
 
 def classify_admission(gate_result, patch: str, agent_exit: str | None) -> str:
@@ -580,6 +615,9 @@ def run_agent(
     preds_path = attempt_dir / "preds.json"
     progress = RunBatchProgressManager(num_instances=1)
 
+    # Install per-step logger for real-time visibility
+    _install_step_logger(instance_id, attempt)
+
     t_llm = Timer("LLM agent loop (Bedrock)", parent=t_agent)
     try:
         process_instance(instance, attempt_dir, config, progress)
@@ -817,6 +855,8 @@ def run_with_jingu(instance_id: str, output_dir: Path, max_attempts: int = 3) ->
             else:
                 codes = ", ".join(gate_result.reason_codes)
                 print(f"    [gate] REJECTED  codes={codes}  {exp_str}")
+                if gate_result.error:
+                    print(f"    [gate-error] {gate_result.error[:300]}")
                 print(f"    [telemetry] admission={admission}  files={fp['files']}  "
                       f"hunks={fp['hunks']}  +{fp['lines_added']}/-{fp['lines_removed']}")
                 # Use gate's retry feedback as next attempt hint
