@@ -24,14 +24,8 @@ RetryPlan fields:
 
 from __future__ import annotations
 
-import json
-import re
 from dataclasses import dataclass, field
 from typing import Optional
-
-RETRY_MODEL = "bedrock/global.anthropic.claude-sonnet-4-6"
-RETRY_TEMPERATURE = 0.2
-RETRY_MAX_TOKENS = 512
 
 # ── Failure taxonomy (mirrors FAILURE_TAXONOMY.md in jingu-policy-core) ──────
 
@@ -167,31 +161,6 @@ _INTERVENTIONS: dict[str, dict] = {
 }
 
 
-RETRY_SYSTEM_PROMPT = """You are a debugging assistant for a software patch pipeline.
-
-You will be given:
-1. A problem statement (what needs to be fixed)
-2. The tests that must pass
-3. A patch that was attempted but did not fully solve the problem
-4. Observable signals: which files were changed, whether tests ran, exit status
-
-Your job: diagnose what went wrong and produce a targeted retry plan.
-
-Be specific and concrete. Reference actual file names and test names from the input.
-Do not invent information not present in the input.
-
-Output ONLY valid JSON:
-{
-  "root_causes": ["<1-2 specific reasons why attempt 1 likely failed>"],
-  "must_do": ["<concrete action 1>", "<concrete action 2>"],
-  "must_not_do": ["<thing to avoid based on attempt 1>"],
-  "validation_requirement": "<how the agent knows the fix is correct>",
-  "next_attempt_prompt": "<2-4 sentence prompt to inject before attempt 2, referencing specific files/tests>"
-}
-
-Keep next_attempt_prompt under 300 characters. Be direct, not generic."""
-
-
 @dataclass
 class RetryPlan:
     root_causes: list[str]
@@ -200,37 +169,6 @@ class RetryPlan:
     validation_requirement: str
     next_attempt_prompt: str
     raw_response: str = ""
-
-
-def _parse_retry_plan(raw: str) -> RetryPlan:
-    """Parse RetryPlan from LLM JSON output. Returns fallback on parse error."""
-    json_match = re.search(r'\{.*\}', raw, re.DOTALL)
-    if not json_match:
-        return RetryPlan(
-            root_causes=["[PARSE_ERROR] Could not parse retry plan"],
-            must_do=[], must_not_do=[],
-            validation_requirement="Run the required tests",
-            next_attempt_prompt="Previous attempt failed. Review the failing tests carefully and fix the root cause.",
-            raw_response=raw,
-        )
-    try:
-        data = json.loads(json_match.group(0))
-    except json.JSONDecodeError:
-        return RetryPlan(
-            root_causes=["[PARSE_ERROR] Invalid JSON"],
-            must_do=[], must_not_do=[],
-            validation_requirement="Run the required tests",
-            next_attempt_prompt="Previous attempt failed. Review the failing tests carefully and fix the root cause.",
-            raw_response=raw,
-        )
-    return RetryPlan(
-        root_causes=data.get("root_causes", []),
-        must_do=data.get("must_do", []),
-        must_not_do=data.get("must_not_do", []),
-        validation_requirement=data.get("validation_requirement", ""),
-        next_attempt_prompt=data.get("next_attempt_prompt", ""),
-        raw_response=raw,
-    )
 
 
 def build_retry_plan(
@@ -246,135 +184,22 @@ def build_retry_plan(
     exec_feedback: str = "",
 ) -> RetryPlan:
     """
-    Phase 2A (deterministic): classify failure type → apply intervention mapping.
-    Phase 2B (LLM): refine with instance-specific context.
+    Deterministic failure classification → intervention mapping → RetryPlan.
 
-    Args:
-        problem_statement:  the bug report
-        patch_text:         the patch from attempt 1
-        jingu_body:         structured telemetry (exit_status, files_written, test_results)
-        fail_to_pass_tests: tests that must pass
-        gate_admitted:      whether gate admitted the patch
-        gate_reason_codes:  gate reason codes (for rejected patches)
-        instance_id:        for logging
-        patch_fp:           current attempt fingerprint (files, hunks, lines)
-        prev_patch_fp:      previous attempt fingerprint (for wrong_direction detection)
-        exec_feedback:      structured execution feedback string (Phase 2A output)
+    No LLM involved. hint = deterministic prefix + exec_feedback excerpt.
     """
-    # Phase 2A: deterministic failure classification + intervention mapping
     fp = patch_fp or {}
     failure_type = classify_failure(jingu_body, fp, prev_patch_fp, exec_feedback)
     intervention = _INTERVENTIONS.get(failure_type, _INTERVENTIONS["unknown"])
-    try:
-        import litellm
-    except ImportError:
-        # litellm unavailable: return deterministic intervention only
-        prompt_hint = intervention["hint_prefix"] + exec_feedback[:300]
-        return RetryPlan(
-            root_causes=[f"[SKIP] litellm unavailable — failure_type={failure_type}"],
-            must_do=intervention["must_do"],
-            must_not_do=intervention["must_not_do"],
-            validation_requirement="Run the required FAIL_TO_PASS tests",
-            next_attempt_prompt=prompt_hint[:400],
-        )
 
-    # Build observable signal summary
-    exit_status = jingu_body.get("exit_status", "unknown")
-    files_written = jingu_body.get("files_written", [])
-    test_results = jingu_body.get("test_results", {})
-    tests_ran = test_results.get("ran_tests", False)
-    test_passed = test_results.get("last_passed")
-    patch_summary = jingu_body.get("patch_summary", {})
-
-    gate_status = "ADMITTED (gate passed)" if gate_admitted else f"REJECTED ({', '.join(gate_reason_codes)})"
-
-    tests_str = "\n".join(f"  - {t}" for t in fail_to_pass_tests[:8])
-    files_str = "\n".join(f"  - {f}" for f in files_written) if files_written else "  (none recorded)"
-    test_signal = f"Tests ran: {'YES — FAILED' if tests_ran and not test_passed else 'YES — PASSED' if tests_ran else 'NO'}"
-
-    patch_preview = patch_text[:1200] if patch_text else "(no patch)"
-
-    # Phase 2A classification already done above — include in prompt for LLM context
-    must_not_str = "\n".join(f"  - {x}" for x in intervention["must_not_do"]) or "  (none)"
-    must_do_str  = "\n".join(f"  - {x}" for x in intervention["must_do"])     or "  (none)"
-
-    prompt = f"""## PROBLEM STATEMENT
-{problem_statement[:800]}
-
-## TESTS THAT MUST PASS
-{tests_str}
-
-## FAILURE CLASSIFICATION (deterministic)
-Failure type: {failure_type}
-Intervention must_not_do:
-{must_not_str}
-Intervention must_do:
-{must_do_str}
-
-## EXECUTION FEEDBACK
-{exec_feedback[:600] if exec_feedback else "(none)"}
-
-## ATTEMPT 1 OBSERVABLE SIGNAL
-- Exit status: {exit_status}
-- Gate result: {gate_status}
-- Files changed:
-{files_str}
-- Patch size: {patch_summary.get('hunks', 0)} hunks, +{patch_summary.get('lines_added', 0)}/-{patch_summary.get('lines_removed', 0)} lines
-- {test_signal}
-
-## ATTEMPT 1 PATCH (first 1200 chars)
-```diff
-{patch_preview}
-```
-
-## YOUR TASK
-The failure type and interventions above are deterministic facts. Use them.
-Refine with instance-specific context. Output JSON only."""
-
-    try:
-        response = litellm.completion(
-            model=RETRY_MODEL,
-            messages=[
-                {"role": "system", "content": RETRY_SYSTEM_PROMPT},
-                {"role": "user",   "content": prompt},
-            ],
-            max_tokens=RETRY_MAX_TOKENS,
-            temperature=RETRY_TEMPERATURE,
-            drop_params=True,
-        )
-        raw = response.choices[0].message.content or ""
-    except Exception as e:
-        # LLM failed: fall back to deterministic intervention only
-        prompt_hint = intervention["hint_prefix"] + exec_feedback[:300]
-        return RetryPlan(
-            root_causes=[f"[CONTROLLER_ERROR] {str(e)[:100]} — failure_type={failure_type}"],
-            must_do=intervention["must_do"],
-            must_not_do=intervention["must_not_do"],
-            validation_requirement="Run the required FAIL_TO_PASS tests",
-            next_attempt_prompt=prompt_hint[:400],
-        )
-
-    # Phase 2B: LLM output parsed; merge with deterministic intervention
-    # Deterministic must_not_do/must_do are prepended (higher priority than LLM additions)
-    llm_plan = _parse_retry_plan(raw)
-    merged_must_not = intervention["must_not_do"] + [
-        x for x in llm_plan.must_not_do if x not in intervention["must_not_do"]
-    ]
-    merged_must_do = intervention["must_do"] + [
-        x for x in llm_plan.must_do if x not in intervention["must_do"]
-    ]
-    # next_attempt_prompt: deterministic prefix + LLM refinement
-    hint_prefix = intervention["hint_prefix"]
-    llm_hint = llm_plan.next_attempt_prompt.strip()
-    merged_hint = (hint_prefix + llm_hint)[:500]
+    hint = (intervention["hint_prefix"] + exec_feedback[:300]).strip()
 
     return RetryPlan(
-        root_causes=llm_plan.root_causes,
-        must_do=merged_must_do,
-        must_not_do=merged_must_not,
-        validation_requirement=llm_plan.validation_requirement,
-        next_attempt_prompt=merged_hint,
-        raw_response=llm_plan.raw_response,
+        root_causes=[f"failure_type={failure_type}"],
+        must_do=intervention["must_do"],
+        must_not_do=intervention["must_not_do"],
+        validation_requirement="Run the required FAIL_TO_PASS tests and confirm they pass",
+        next_attempt_prompt=hint[:400],
     )
 
 
@@ -394,7 +219,7 @@ if __name__ == "__main__":
         gate_reason_codes=[],
         instance_id="django__django-11019",
     )
-    print(f"root_causes: {plan.root_causes}")
+    print(f"failure_type: {plan.root_causes[0]}")
     print(f"must_do: {plan.must_do}")
     print(f"must_not_do: {plan.must_not_do}")
     print(f"next_attempt_prompt: {plan.next_attempt_prompt}")
