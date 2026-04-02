@@ -92,7 +92,7 @@ overrides = {
     'containerOverrides': [
         {
             'name': container,
-            'command': ['python', 'scripts/run_with_jingu_gate.py'] + cmd,
+            'command': cmd,
             'environment': [
                 {'name': 'S3_RESULTS_BUCKET', 'value': 'jingu-swebench-results'},
                 {'name': 'RUN_ID', 'value': '$RUN_ID'},
