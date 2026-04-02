@@ -172,17 +172,22 @@ export class PatchAdmissionPolicy {
 
   _checkJinguBody(uws) {
     // R5: if jingu_body is present, validate consistency with patch
+    // NOTE: patch-derived files_written is always authoritative (ground truth).
+    // This rule only fires when patch_files_changed == 0 AND files_written == 0,
+    // meaning the patch truly has no file changes at all.
     const bodyRef = uws.supportRefs.find(s => s.sourceType === "jingu_body");
     if (!bodyRef) return undefined;  // jingu_body is optional — skip if absent
 
     const attrs = bodyRef.attributes ?? {};
+    const patchFiles = attrs.patch_files_changed ?? 0;
+    const filesWritten = Array.isArray(attrs.files_written) ? attrs.files_written.length : 0;
 
-    // If agent wrote no files, the patch is structurally suspicious
-    if (Array.isArray(attrs.files_written) && attrs.files_written.length === 0
-        && attrs.patch_hunks > 0) {
+    // Only downgrade if the patch itself has no file changes (not just no traj write signal)
+    // files_written from patch is ground truth — if patch touched files, agent did write
+    if (patchFiles === 0 && filesWritten === 0 && (attrs.patch_hunks ?? 0) > 0) {
       return downgrade(uws.unit.id, "NO_FILES_WRITTEN", "speculative", {
-        note: "jingu_body reports no files written but patch contains hunks. "
-            + "Agent may not have executed the fix — admitted as speculative.",
+        note: "jingu_body: patch has hunks but reports 0 files changed. "
+            + "Patch structure may be malformed — admitted as speculative.",
         bodyRef: bodyRef.sourceId,
       });
     }

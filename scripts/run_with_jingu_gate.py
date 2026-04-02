@@ -237,30 +237,49 @@ def extract_jingu_body(traj: dict, patch_text: str, problem_statement: str = "")
     last_test_excerpt = ""
     tool_calls_made = 0
 
+    # Write signals: collected from multiple sources
+    # 1. Patch is ground truth — if patch touches a file, agent wrote it
+    for line in (patch_text or "").splitlines():
+        if line.startswith("+++ b/"):
+            fp = line[6:].strip()
+            if fp:
+                files_written.add(fp)
+
     for msg in messages:
         role = msg.get("role", "")
         extra = msg.get("extra", {})
         actions = extra.get("actions", []) if role == "assistant" else []
         for action in actions:
-            action_str = str(action)
             tool_calls_made += 1
-            # Detect file reads
-            if any(kw in action_str for kw in ("open_file", "view_file", "cat ", "read_file")):
-                # Extract path heuristic: word after command
-                parts = action_str.split()
-                for i, p in enumerate(parts):
-                    if p in ("open_file", "view_file", "read_file") and i + 1 < len(parts):
-                        path_candidate = parts[i + 1].strip("'\"")
-                        if "/" in path_candidate or path_candidate.endswith(".py"):
-                            files_read.add(path_candidate)
-            # Detect file writes/edits
-            if any(kw in action_str for kw in ("edit_file", "write_file", "str_replace", "create_file")):
-                parts = action_str.split()
-                for i, p in enumerate(parts):
-                    if p in ("edit_file", "write_file", "create_file", "str_replace") and i + 1 < len(parts):
-                        path_candidate = parts[i + 1].strip("'\"")
-                        if "/" in path_candidate or path_candidate.endswith(".py"):
-                            files_written.add(path_candidate)
+            # Actions may be dicts (structured tool calls) or strings (bash commands)
+            if isinstance(action, dict):
+                tool_name = action.get("tool", action.get("name", ""))
+                tool_input = action.get("input", action.get("arguments", {}))
+                # Structured tool calls: look for path/file fields
+                path_val = ""
+                if isinstance(tool_input, dict):
+                    path_val = (tool_input.get("path") or tool_input.get("file_path")
+                                or tool_input.get("filename") or "")
+                if path_val and ("/" in path_val or path_val.endswith(".py")):
+                    write_tools = {"edit_file", "write_file", "create_file",
+                                   "str_replace_editor", "str_replace", "apply_patch",
+                                   "bash_write", "patch"}
+                    read_tools  = {"open_file", "view_file", "read_file",
+                                   "str_replace_editor_view", "cat"}
+                    if any(t in tool_name.lower() for t in write_tools):
+                        files_written.add(path_val)
+                    elif any(t in tool_name.lower() for t in read_tools):
+                        files_read.add(path_val)
+            else:
+                # String action (bash command) — limited heuristic, patch is authoritative
+                action_str = str(action)
+                if any(kw in action_str for kw in ("open_file", "view_file", "cat ")):
+                    parts = action_str.split()
+                    for i, p in enumerate(parts):
+                        if p in ("open_file", "view_file") and i + 1 < len(parts):
+                            path_candidate = parts[i + 1].strip("'\"")
+                            if "/" in path_candidate or path_candidate.endswith(".py"):
+                                files_read.add(path_candidate)
 
         # Detect test results from tool outputs
         if role == "tool":
