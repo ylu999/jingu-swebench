@@ -36,6 +36,10 @@ from jingu_gate_bridge import evaluate_patch_from_traj, build_support_pool, run_
 from patch_reviewer import review_patch_bedrock, ReviewResult
 # B3: retry controller (failure → diagnosis → next strategy)
 from retry_controller import build_retry_plan
+# B4: cognition gate (declaration-vs-patch consistency check)
+from declaration_extractor import extract_declaration, extract_last_agent_message
+from patch_signals import extract_patch_signals
+from cognition_check import check_cognition, format_cognition_feedback
 
 # B1 gate mode: "trust_gate" (B1) or "structural" (B0 fallback)
 GATE_MODE = "trust_gate"
@@ -825,6 +829,28 @@ def run_with_jingu(instance_id: str, output_dir: Path, max_attempts: int = 3) ->
                             "[EFR violation] tests ran but exec_feedback is empty. "
                             "build_execution_feedback() must extract test output."
                         )
+                    # B4: cognition gate — check declaration consistency with patch
+                    # Additive: enriches exec_feedback when contradiction detected.
+                    # Opt-in: no FIX_TYPE declaration → check skipped silently.
+                    _traj_path = output_dir / f"attempt_{attempt}" / instance_id / f"{instance_id}.traj.json"
+                    if _traj_path.exists():
+                        try:
+                            _traj_msgs = json.loads(_traj_path.read_text()).get("messages", [])
+                            _last_msg = extract_last_agent_message(_traj_msgs)
+                            _decl = extract_declaration(_last_msg)
+                            if _decl:
+                                _signals = extract_patch_signals(patch)
+                                _cog = check_cognition(_decl, _signals)
+                                _cog_fb = format_cognition_feedback(_cog)
+                                if _cog_fb:
+                                    print(f"    [cognition] violation: {_cog_fb[:200]}")
+                                    exec_feedback = exec_feedback + "\n" + _cog_fb if exec_feedback else _cog_fb
+                                else:
+                                    print(f"    [cognition] pass  type={_decl['type']}  signals={_signals}")
+                            else:
+                                print(f"    [cognition] skip  (no FIX_TYPE declaration)")
+                        except (json.JSONDecodeError, OSError):
+                            pass
                     if RETRY_CONTROLLER_ENABLED:
                         # Phase 2B: LLM retry-controller builds on execution feedback
                         # prev_patch_fp: fingerprint of the attempt before this one
