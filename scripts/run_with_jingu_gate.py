@@ -582,6 +582,7 @@ def run_with_jingu(instance_id: str, output_dir: Path, max_attempts: int = 3) ->
                     reviewer_hint = "; ".join(
                         f"{i.dimension}: {i.description[:120]}" for i in top_issues
                     )
+                    print(f"    [reviewer:reasoning] {review.reasoning[:200]}")
                     last_failure = f"Reviewer rejected patch: {reviewer_hint}"[:400]
                     continue
 
