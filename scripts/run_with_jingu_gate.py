@@ -575,7 +575,7 @@ def run_with_jingu(instance_id: str, output_dir: Path, max_attempts: int = 3) ->
                 print(f"    [reviewer] verdict={review.verdict}  issues={len(review.issues)}  "
                       f"({issue_summary})")
                 if review.verdict == "reject":
-                    # B2 rejected — build retry hint from reviewer reasoning
+                    # B2 reviewer rejected — log only (B1-only mode: not blocking)
                     high_issues = [i for i in review.issues if i.severity == "high"]
                     medium_issues = [i for i in review.issues if i.severity == "medium"]
                     top_issues = (high_issues + medium_issues)[:2]
@@ -583,8 +583,8 @@ def run_with_jingu(instance_id: str, output_dir: Path, max_attempts: int = 3) ->
                         f"{i.dimension}: {i.description[:120]}" for i in top_issues
                     )
                     print(f"    [reviewer:reasoning] {review.reasoning[:200]}")
-                    last_failure = f"Reviewer rejected patch: {reviewer_hint}"[:400]
-                    continue
+                    print(f"    [reviewer:advisory] reject logged (B1-only mode — not blocking)")
+                    # NOTE: reviewer verdict is advisory only — patch still admitted if gate passed
 
                 candidates.append({
                     "attempt": attempt,
