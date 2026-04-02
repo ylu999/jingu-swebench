@@ -24,12 +24,40 @@ _SCRIPTS_DIR = Path(
 )
 _GATE_RUNNER = _SCRIPTS_DIR / "gate_runner.js"
 
+# Resolve node executable — prefer mise shim (cloud), fall back to plain 'node' (local)
+def _find_node() -> str:
+    import shutil
+    # Check env override first
+    if node_env := os.environ.get("JINGU_NODE_BIN"):
+        return node_env
+    # Try mise shim (cloud desktop)
+    mise_node = Path.home() / ".local/share/mise/shims/node"
+    if mise_node.exists():
+        return str(mise_node)
+    # Fall back to PATH
+    return shutil.which("node") or "node"
+
+_NODE_BIN = _find_node()
+
+# NODE_PATH: jingu-trust-gate node_modules (needed on cloud where npm install wasn't run)
+# Convention: trust-gate dist lives at $JINGU_TRUST_GATE_DIST, node_modules one level up
+_GATE_DIST = os.environ.get("JINGU_TRUST_GATE_DIST", "")
+_NODE_MODULES_CANDIDATES = []
+if _GATE_DIST:
+    # e.g. ~/jingu-swebench/jingu-trust-gate/dist/src → ~/jingu-swebench/jingu-trust-gate/node_modules
+    candidate = Path(_GATE_DIST).parent.parent / "node_modules"
+    if candidate.exists():
+        _NODE_MODULES_CANDIDATES.append(str(candidate))
+
 # Env vars passed to gate_runner.js subprocess
 _GATE_ENV = {
     **os.environ,
     "JINGU_SWEBENCH_SCRIPTS": str(_SCRIPTS_DIR),
 }
-# JINGU_TRUST_GATE_DIST is forwarded automatically via os.environ inheritance
+if _NODE_MODULES_CANDIDATES:
+    existing = os.environ.get("NODE_PATH", "")
+    extra = ":".join(_NODE_MODULES_CANDIDATES)
+    _GATE_ENV["NODE_PATH"] = f"{extra}:{existing}" if existing else extra
 
 
 # ── Result types ──────────────────────────────────────────────────────────────
@@ -250,7 +278,7 @@ def run_patch_gate(
 
     try:
         proc = subprocess.run(
-            ["node", str(_GATE_RUNNER)],
+            [_NODE_BIN, str(_GATE_RUNNER)],
             input=json.dumps(payload),
             capture_output=True,
             text=True,
@@ -273,7 +301,7 @@ def run_patch_gate(
             explanation=None,
             admitted_units=[], rejected_units=[],
             retry_feedback=None,
-            error="node executable not found — ensure Node.js is installed",
+            error=f"node executable not found at '{_NODE_BIN}' — ensure Node.js is installed",
         )
 
     stdout = proc.stdout.strip()
