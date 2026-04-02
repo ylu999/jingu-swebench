@@ -788,6 +788,8 @@ def run_with_jingu(instance_id: str, output_dir: Path, max_attempts: int = 3) ->
                         )
                     if RETRY_CONTROLLER_ENABLED:
                         # Phase 2B: LLM retry-controller builds on execution feedback
+                        # prev_patch_fp: fingerprint of the attempt before this one
+                        prev_fp = attempts_log[-2]["patch_fp"] if len(attempts_log) >= 2 else None
                         t_ctrl = Timer(f"B3 retry-controller attempt={attempt}", parent=t_inst)
                         retry_plan = build_retry_plan(
                             problem_statement=instance.get("problem_statement", ""),
@@ -797,12 +799,16 @@ def run_with_jingu(instance_id: str, output_dir: Path, max_attempts: int = 3) ->
                             gate_admitted=True,
                             gate_reason_codes=gate_result.reason_codes,
                             instance_id=instance_id,
+                            patch_fp=fp,
+                            prev_patch_fp=prev_fp,
+                            exec_feedback=exec_feedback,
                         )
                         t_ctrl.stop()
                         print(f"    [retry-ctrl] root_causes={retry_plan.root_causes}")
+                        print(f"    [retry-ctrl] must_not_do={retry_plan.must_not_do}")
                         print(f"    [retry-ctrl] hint={retry_plan.next_attempt_prompt[:200]}")
-                        # Combine: exec feedback provides facts, LLM provides strategy
-                        last_failure = (exec_feedback + "\n\n" + retry_plan.next_attempt_prompt)[:600]
+                        # next_attempt_prompt already merges hint_prefix + exec_feedback + LLM
+                        last_failure = retry_plan.next_attempt_prompt[:600]
                     else:
                         last_failure = exec_feedback[:400]
                 else:
