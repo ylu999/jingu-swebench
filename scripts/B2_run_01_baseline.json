@@ -1,0 +1,130 @@
+{
+  "_meta": {
+    "stage": "B2",
+    "run_id": "B2_run_01",
+    "date": "2026-04-01",
+    "description": "First jingu-enabled baseline (B1 trust-gate + B2 adversarial reviewer)",
+    "known_issues": [
+      "files_written=0 false negative: jingu_body extraction used keyword guessing on action strings instead of patch +++ b/ lines as ground truth. All admitted patches were ADMITTED_SPECULATIVE instead of ADMITTED. Fixed in commit 10ed304, re-run as b2_run_02.",
+      "11019 FAILED: B2 reviewer rejected both attempts with 3 high issues (unsupported_conclusion, hidden_risk, insufficient_context). Attempt 1 had quality implementation (merge_lists topological sort, 148 lines). Attempt 2 used LimitsExceeded fallback diff."
+    ],
+    "git_commit": "10ed304",
+    "comparison_baseline": "B0 = 4/5 resolve (80%)"
+  },
+  "pipeline": {
+    "agent": "mini-SWE-agent v2.2.8",
+    "llm": "bedrock/global.anthropic.claude-sonnet-4-5-20250929-v1:0",
+    "gate_mode": "trust_gate",
+    "b1_gate": "PatchAdmissionPolicy (jingu-trust-gate)",
+    "b2_reviewer": "review_patch_bedrock (adversarial 5-dimension)",
+    "max_attempts": 2,
+    "step_limit": 100,
+    "workers": 3
+  },
+  "instances": [
+    "django__django-11039",
+    "django__django-11001",
+    "django__django-11019",
+    "django__django-11049",
+    "django__django-11099"
+  ],
+  "results": {
+    "accepted": 4,
+    "failed": 1,
+    "acceptance_rate": 0.8,
+    "per_instance": {
+      "django__django-11039": {
+        "accepted": true,
+        "best_attempt": 1,
+        "gate_code": "ADMITTED_SPECULATIVE",
+        "reviewer_verdict": "pass",
+        "reviewer_issues": "1 low",
+        "api_calls": 132,
+        "cost_usd": 1.3999,
+        "elapsed_s": 552.1,
+        "note": "files_written=0 bug → gate SPECULATIVE instead of ADMITTED"
+      },
+      "django__django-11001": {
+        "accepted": true,
+        "best_attempt": 1,
+        "gate_code": "ADMITTED_SPECULATIVE",
+        "reviewer_verdict": "pass",
+        "reviewer_issues": "2 (low+medium)",
+        "api_calls": 79,
+        "cost_usd": 0.8562,
+        "elapsed_s": 461.7,
+        "note": "files_written=0 bug → gate SPECULATIVE; attempt 2 reviewer rejected (3 high)"
+      },
+      "django__django-11049": {
+        "accepted": true,
+        "best_attempt": 2,
+        "gate_code": "ADMITTED",
+        "reviewer_verdict": "pass",
+        "reviewer_issues": "0",
+        "api_calls": 114,
+        "cost_usd": 1.1577,
+        "elapsed_s": 486.2,
+        "note": "Attempt 1 reviewer rejected (high:hidden_risk). Attempt 2 gate=ADMITTED (files_written fixed by patch ground truth? or different attempt). best_attempt=2."
+      },
+      "django__django-11099": {
+        "accepted": true,
+        "best_attempt": 1,
+        "gate_code": "ADMITTED_SPECULATIVE",
+        "reviewer_verdict": "pass",
+        "reviewer_issues": "0",
+        "api_calls": 65,
+        "cost_usd": 0.6403,
+        "elapsed_s": 309.8,
+        "note": "files_written=0 bug → SPECULATIVE"
+      },
+      "django__django-11019": {
+        "accepted": false,
+        "failure_mode": "B2_REVIEWER_REJECT",
+        "attempts": [
+          {
+            "attempt": 1,
+            "exit_status": "Submitted",
+            "patch_lines": 148,
+            "gate_code": "ADMITTED_SPECULATIVE",
+            "reviewer_verdict": "reject",
+            "reviewer_issues": "3 high (unsupported_conclusion, hidden_risk, insufficient_context)"
+          },
+          {
+            "attempt": 2,
+            "exit_status": "LimitsExceeded",
+            "patch_lines": 149,
+            "patch_source": "fallback: extracted git diff from traj",
+            "gate_code": "ADMITTED_SPECULATIVE",
+            "reviewer_verdict": "reject",
+            "reviewer_issues": "3 high (unsupported_conclusion, hidden_risk, insufficient_context) + 1 medium + 1 low"
+          }
+        ],
+        "api_calls": 180,
+        "cost_usd": 2.8381,
+        "elapsed_s": 989.0,
+        "diagnosis": {
+          "root_cause": "B2 reviewer gave 3 high issues on both attempts. Attempt 1 patch (merge_lists topological sort) was technically sound but reviewer flagged: missing explicit test evidence, hidden CSS/JS ordering risks, insufficient context about Django widget media merging semantics.",
+          "attempt2_issue": "Agent hit step limit (100 steps) — spent steps on running full Django test suite instead of submitting. Fallback diff quality inferior to attempt 1.",
+          "failure_type": "proposer_quality + reviewer_calibration",
+          "hypothesis": "Reviewer may be over-rejecting valid implementations. The merge_lists patch correctly implements topological sort per the problem statement. Need to re-evaluate whether reviewer 3-high verdict on attempt 1 was accurate."
+        }
+      }
+    }
+  },
+  "model_usage": {
+    "total_api_calls": 570,
+    "total_input_tokens": 12018786,
+    "total_output_tokens": 146078,
+    "total_cost_usd": 6.8923,
+    "avg_calls_per_instance": 114.0,
+    "avg_cost_per_instance": 1.3785
+  },
+  "eval_pending": true,
+  "eval_note": "Fast eval (fast_eval.py) not yet run on b2_run_01. resolve_rate unknown. B2_run_02 running with files_written fix.",
+  "b0_baseline": {
+    "resolve_rate": 0.8,
+    "resolved": 4,
+    "total": 5,
+    "unresolved": ["django__django-11019"]
+  }
+}

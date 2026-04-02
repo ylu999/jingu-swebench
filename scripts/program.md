@@ -129,7 +129,16 @@ auto_loop.py owns the entire eval pipeline:
 ## Known Findings
 
 - B0 baseline: 4/5 resolve. 11019 is the only unresolved instance at baseline.
-- 11019 failure: agent runs out of steps (LimitsExceeded) — complex topological sort fix
+- 11019 failure (B2_run_01): B2 reviewer rejected both attempts with 3 high issues
+  - Attempt 1: agent submitted (exit=Submitted), patch is correct merge_lists() topological sort (148 lines)
+    reviewer rejected: unsupported_conclusion, hidden_risk, insufficient_context
+  - Attempt 2: agent hit step limit (100 steps) — spent steps running full Django test suite
+    fallback diff extracted; reviewer rejected: same 3 high + 1 medium
+  - Diagnosis: reviewer_calibration problem — valid patch rejected by over-conservative reviewer
+  - NOT a proposer failure: attempt 1 patch correctly implements the required topological sort
+- 11019 jingu_body fix: files_written was 0 in run_01 (keyword guessing bug); fixed in run_02 using patch +++ b/ as ground truth
+- files_written=0 bug: all run_01 patches were ADMITTED_SPECULATIVE; fixed in run_02 (commit 10ed304)
+- run_02 verification: 11039 files_written=1, gate=ADMITTED ✓; 11001 files_written=1, gate=ADMITTED ✓
 - step_limit=100 gives agent more room than the old step_limit=60
 - PARSE_FAILED and PATCH_APPLY_FAILED are dominant gate failure modes
 - Instance 11049 is parse-sensitive (avoid strict output constraints)
