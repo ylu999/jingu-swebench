@@ -210,7 +210,7 @@ Problem statement: {problem_statement[:1500]}
 ## PATCH (proposer output)
 
 ```diff
-{patch_text[:3000]}
+{patch_text[:8000]}
 ```
 
 ## YOUR TASK
@@ -278,7 +278,7 @@ Problem statement: {problem_statement[:1500]}
 ## PATCH (proposer output)
 
 ```diff
-{patch_text[:3000]}
+{patch_text[:8000]}
 ```
 
 ## YOUR TASK
