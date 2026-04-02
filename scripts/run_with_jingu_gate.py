@@ -504,7 +504,10 @@ BASE_CONFIG = {
     "agent": {
         "mode": "yolo",
         "confirm_exit": False,  # critical: don't wait for user input
-        "step_limit": 100,      # 60 caused LimitsExceeded on 11019 (complex topological sort needs ~80-100 steps)
+        # step_limit is set per-attempt in run_agent() below:
+        #   attempt 1 → 40  (fast first pass: find file, minimal fix, submit)
+        #   attempt 2 → 60  (guided retry: has exec-feedback + retry hint)
+        # 100 was too slow — 15 min blind runs with no intermediate feedback.
     },
 }
 
@@ -550,6 +553,9 @@ def run_agent(
     t_cfg = Timer("config load", parent=t_agent)
     config = get_config_from_spec("swebench.yaml")
     config = recursive_merge(config, BASE_CONFIG)
+    # Per-attempt step budget: attempt 1 = fast first pass, attempt 2 = guided retry
+    step_limit = 40 if attempt == 1 else 60
+    config = recursive_merge(config, {"agent": {"step_limit": step_limit}})
     # Build instance_template_extra: tests that must pass + optional retry hint
     extra_parts = []
     fail_to_pass = instance.get("FAIL_TO_PASS", [])
@@ -748,6 +754,15 @@ def run_with_jingu(instance_id: str, output_dir: Path, max_attempts: int = 3) ->
                     "gate_code": gate_result.gate_code,
                     "gate_reason_codes": gate_result.reason_codes,
                 })
+                # Patch bloat detection: warn if attempt 2 is much larger than attempt 1
+                if attempt >= 2 and len(attempts_log) >= 2:
+                    prev = attempts_log[-2].get("patch_fp", {})
+                    prev_size = prev.get("lines_added", 0) + prev.get("lines_removed", 0)
+                    curr_size = fp["lines_added"] + fp["lines_removed"]
+                    if prev_size > 0 and curr_size > prev_size * 1.5:
+                        print(f"    [bloat-warn] attempt {attempt} patch is {curr_size} lines "
+                              f"(+{curr_size - prev_size} vs attempt {attempt-1} {prev_size}). "
+                              f"Possible wrong direction.")
                 # B3: retry-controller — diagnose attempt N, guide attempt N+1
                 if attempt < max_attempts:
                     fail_to_pass = instance.get("FAIL_TO_PASS", [])
@@ -967,7 +982,7 @@ def main():
     report = {
         "instances":        len(args.instance_ids),
         "workers":          args.workers,
-        "step_limit":       BASE_CONFIG["agent"].get("step_limit", None),
+        "step_limit":       "40/60 (attempt1/attempt2)",
         "wall_time_s":      round(total, 1),
         "status":           "completed",
         "patches_generated": sum(1 for r in results if r and r["accepted"]),
