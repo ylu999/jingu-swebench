@@ -3,7 +3,7 @@
 **Date:** 2026-04-02  
 **Dataset:** SWE-bench Lite (django subset, 5 instances)  
 **Instances:** django__django-10914, 10924, 11001, 11019, 11039  
-**Pipeline:** mini-swe-agent + Jingu (B1 Gate + B2 Reviewer + B3 Retry Controller)  
+**Pipeline:** mini-swe-agent + Jingu (B1 Gate + B3 Retry Controller; B2 Reviewer disabled)  
 **Infrastructure:** ECS EC2 launch type, 4 parallel workers, Docker-in-Docker (vfs)
 
 ---
@@ -45,7 +45,7 @@ Current gate function: structural admission check (non-empty diff, target file p
 "do not change" guidance ("Submit immediately without changes").  
 1 of 5 times (django-11001), controller issued substantive corrective guidance (see below).
 
-**B2 Reviewer** was not in the decisive path this batch — all attempt 1 patches were ADMITTED,  
+**B2 Reviewer** is currently disabled (`REVIEWER_ENABLED = False` in `run_with_jingu_gate.py`). Not active this batch.
 so best_attempt=1 for all instances regardless of reviewer verdict.
 
 ---
@@ -99,7 +99,7 @@ The correct interpretation is:
 | Component | Current Role | Limitation |
 |-----------|-------------|------------|
 | **B1 Gate** | Structural admission check — catches empty/malformed patches | Not a semantic correctness gate; cannot detect "wrong fix" |
-| **B2 Reviewer** | Semantic quality verdict (APPROVED / DOWNGRADED / REJECTED) | Only enters decisive path when gate produces REJECTED; not triggered this batch |
+| **B2 Reviewer** | Semantic quality verdict (APPROVED / DOWNGRADED / REJECTED) | Currently disabled (REVIEWER_ENABLED = False) |
 | **B3 Retry Controller** | Failure classification (FT1–FT5) + directed retry hint | Requires a real failure signal to be useful; wasted on already-passing attempts |
 
 ---
