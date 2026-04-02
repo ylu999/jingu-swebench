@@ -34,10 +34,13 @@ from pathlib import Path
 from jingu_gate_bridge import evaluate_patch_from_traj, build_support_pool, run_patch_gate
 # B2: adversarial reviewer (cognitive governance)
 from patch_reviewer import review_patch_bedrock, ReviewResult
+# B3: retry controller (failure → diagnosis → next strategy)
+from retry_controller import build_retry_plan
 
 # B1 gate mode: "trust_gate" (B1) or "structural" (B0 fallback)
 GATE_MODE = "trust_gate"
 REVIEWER_ENABLED = False  # B2 reviewer — set True to re-enable
+RETRY_CONTROLLER_ENABLED = True  # B3 retry-controller — diagnoses attempt 1, guides attempt 2
 
 # ── Telemetry helpers ──────────────────────────────────────────────────────────
 
@@ -661,7 +664,26 @@ def run_with_jingu(instance_id: str, output_dir: Path, max_attempts: int = 3) ->
                     "gate_code": gate_result.gate_code,
                     "gate_reason_codes": gate_result.reason_codes,
                 })
-                last_failure = ""
+                # B3: retry-controller — diagnose attempt N, guide attempt N+1
+                if RETRY_CONTROLLER_ENABLED and attempt < max_attempts:
+                    t_ctrl = Timer(f"B3 retry-controller attempt={attempt}", parent=t_inst)
+                    fail_to_pass = instance.get("FAIL_TO_PASS", [])
+                    retry_plan = build_retry_plan(
+                        problem_statement=instance.get("problem_statement", ""),
+                        patch_text=patch,
+                        jingu_body=jingu_body or {},
+                        fail_to_pass_tests=fail_to_pass if isinstance(fail_to_pass, list) else [],
+                        gate_admitted=True,
+                        gate_reason_codes=gate_result.reason_codes,
+                        instance_id=instance_id,
+                    )
+                    t_ctrl.stop()
+                    print(f"    [retry-ctrl] root_causes={retry_plan.root_causes}")
+                    print(f"    [retry-ctrl] must_do={retry_plan.must_do}")
+                    print(f"    [retry-ctrl] hint={retry_plan.next_attempt_prompt[:200]}")
+                    last_failure = retry_plan.next_attempt_prompt[:400]
+                else:
+                    last_failure = ""
                 agent_exit = None
             else:
                 codes = ", ".join(gate_result.reason_codes)
