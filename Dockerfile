@@ -42,9 +42,20 @@ COPY scripts/run_with_jingu_gate.py \
      scripts/jingu_gate_bridge.py \
      scripts/retry_controller.py \
      scripts/patch_reviewer.py \
+     scripts/patch_signals.py \
+     scripts/declaration_extractor.py \
+     scripts/cognition_check.py \
      scripts/gate_runner.js \
      scripts/patch_admission_policy.js \
      /app/scripts/
+
+# Bake provenance into image (RT6: artifacts carry their own identity)
+ARG GIT_COMMIT=unknown
+ARG BUILD_TIMESTAMP=unknown
+RUN echo "$GIT_COMMIT" > /app/.image_commit && \
+    echo "$BUILD_TIMESTAMP" > /app/.build_timestamp
+ENV GIT_COMMIT=$GIT_COMMIT
+ENV BUILD_TIMESTAMP=$BUILD_TIMESTAMP
 
 # gate_runner.js uses top-level await — must run as ESM.
 # Node.js looks for package.json with "type":"module" up the directory tree.

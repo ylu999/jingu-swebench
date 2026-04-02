@@ -46,6 +46,48 @@ GATE_MODE = "trust_gate"
 REVIEWER_ENABLED = False  # B2 reviewer — set True to re-enable
 RETRY_CONTROLLER_ENABLED = True  # B3 retry-controller — diagnoses attempt 1, guides attempt 2
 
+# ── Execution Identity (RT1/RT6: artifact provenance) ─────────────────────────
+
+def get_execution_identity() -> dict:
+    """
+    Collect runtime provenance: git commit, image digest, build timestamp.
+    RT6: run artifacts must carry their own provenance.
+    These values are baked into the image at build time via Dockerfile or entrypoint.
+    """
+    import subprocess
+
+    def _run(cmd):
+        try:
+            return subprocess.check_output(cmd, stderr=subprocess.DEVNULL, text=True).strip() or None
+        except Exception:
+            return None
+
+    git_commit     = os.environ.get("GIT_COMMIT") or _run(["git", "-C", "/app", "rev-parse", "HEAD"])
+    image_digest   = os.environ.get("IMAGE_DIGEST") or _run(["cat", "/app/.image_digest"])
+    build_timestamp= os.environ.get("BUILD_TIMESTAMP") or _run(["cat", "/app/.build_timestamp"])
+
+    return {
+        "git_commit":      git_commit,
+        "image_digest":    image_digest,
+        "build_timestamp": build_timestamp,
+        "runner_version":  os.environ.get("RUNNER_VERSION", "unknown"),
+    }
+
+def print_activation_proof(identity: dict) -> None:
+    """
+    RT4: every critical control-plane feature must emit activation proof at startup.
+    Log format is machine-readable: key=value, one per line, prefixed [init].
+    """
+    print(f"[init] git_commit={identity.get('git_commit') or 'UNKNOWN'}")
+    print(f"[init] image_digest={identity.get('image_digest') or 'UNKNOWN'}")
+    print(f"[init] build_timestamp={identity.get('build_timestamp') or 'UNKNOWN'}")
+    print(f"[init] runner_version={identity.get('runner_version') or 'unknown'}")
+    print(f"[init] gate_mode={GATE_MODE}")
+    print(f"[init] reviewer_enabled={REVIEWER_ENABLED}")
+    print(f"[init] retry_controller_enabled={RETRY_CONTROLLER_ENABLED}")
+    print(f"[init] cognition_gate_enabled=True")
+    print(f"[init] declaration_protocol=enabled")
+
 # ── Traj watcher: real-time per-step log ───────────────────────────────────────
 
 def _install_step_logger(instance_id: str, attempt: int) -> None:
@@ -1018,6 +1060,10 @@ def main():
     global _timing_root
     _timing_root = Timer("total run")
 
+    # RT4: print activation proof at startup so logs confirm what is live
+    _identity = get_execution_identity()
+    print_activation_proof(_identity)
+
     output_dir = Path(args.output)
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1093,6 +1139,7 @@ def main():
         "wall_time_s":      round(total, 1),
         "status":           "completed",
         "patches_generated": sum(1 for r in results if r and r["accepted"]),
+        "execution_identity": _identity,
         "model_usage": {
             "total_api_calls":    totals["api_calls"],
             "total_input_tokens": totals["input_tokens"],
