@@ -94,6 +94,87 @@ def patch_fingerprint(patch: str) -> dict:
             "lines_added": added, "lines_removed": removed}
 
 
+def build_execution_feedback(
+    jingu_body: dict,
+    fail_to_pass_tests: list[str],
+    patch_fp: dict,
+) -> str:
+    """
+    Build a structured retry hint from execution signal — deterministic, no LLM.
+
+    Converts: test_results + patch fingerprint → actionable hint for attempt 2.
+    Three layers: summary → failing tests → example failure excerpt.
+    """
+    test_results = jingu_body.get("test_results", {})
+    tests_ran = test_results.get("ran_tests", False)
+    test_passed = test_results.get("last_passed")
+    excerpt = test_results.get("excerpt", "")
+
+    if not tests_ran:
+        return (
+            "Previous attempt submitted without running tests. "
+            "Run the required tests FIRST, verify they pass, then submit."
+        )
+
+    if test_passed:
+        # Agent's own tests passed but fast_eval may still fail — give benefit of doubt
+        # Remind agent to verify against the specific FAIL_TO_PASS tests
+        tests_str = ", ".join(fail_to_pass_tests[:4])
+        return (
+            f"Previous attempt's tests passed locally. "
+            f"Ensure these specific tests pass: {tests_str}. "
+            f"If they already pass, submit immediately."
+        )
+
+    # Tests failed — build structured feedback
+    parts = ["Previous attempt failed tests.\n"]
+
+    # Layer 1: extract failure/error counts from excerpt
+    failures = 0
+    errors = 0
+    if excerpt:
+        fm = re.search(r'(\d+) failure', excerpt)
+        em = re.search(r'(\d+) error', excerpt)
+        if fm:
+            failures = int(fm.group(1))
+        if em:
+            errors = int(em.group(1))
+    if failures or errors:
+        parts.append(f"Test results: {failures} failure(s), {errors} error(s)\n")
+
+    # Layer 2: failing test names from FAIL_TO_PASS (most relevant signal)
+    if fail_to_pass_tests:
+        tests_str = "\n".join(f"  - {t.split('.')[-1]}" for t in fail_to_pass_tests[:6])
+        parts.append(f"Tests that must pass:\n{tests_str}\n")
+
+    # Layer 3: compress excerpt to most useful part
+    # pytest output: errors/failures section is most useful, summary line is at end
+    if excerpt:
+        # Try to extract the failure section (between === FAILURES === and === short test summary ===)
+        fail_section = re.search(
+            r'(={3,} FAILURES ={3,}.*?)(?:={3,}|$)', excerpt, re.DOTALL
+        )
+        if fail_section:
+            parts.append(f"Failure detail:\n{fail_section.group(1)[:600]}\n")
+        else:
+            # Fallback: last 400 chars of excerpt (usually has summary)
+            useful = excerpt[-400:].strip()
+            if useful:
+                parts.append(f"Test output tail:\n{useful}\n")
+
+    # Files changed (to surface if agent went to wrong files)
+    files = patch_fp.get("files", []) if patch_fp else []
+    if files:
+        parts.append(f"Files you changed: {files}\n")
+
+    parts.append(
+        "You must: fix the underlying logic (not just suppress warnings or add code). "
+        "Run the failing tests and verify they pass before submitting."
+    )
+
+    return "\n".join(parts)
+
+
 def compute_attempt_delta(attempts_log: list[dict]) -> dict | None:
     """
     Compare attempt 1 and attempt 2 fingerprints.
@@ -369,7 +450,10 @@ def extract_jingu_body(traj: dict, patch_text: str, problem_statement: str = "")
                     last_test_passed = False
                 else:
                     last_test_passed = True
-                last_test_excerpt = content[:200]
+                # Extract from <output> tag if present; take last 1500 chars (summary is at end)
+                out_match = re.search(r'<output>(.*?)</output>', content, re.DOTALL)
+                raw_out = out_match.group(1) if out_match else content
+                last_test_excerpt = raw_out[-1500:]
 
     # Patch summary from patch structure
     patch_lines = patch_text.splitlines() if patch_text else []
@@ -665,23 +749,36 @@ def run_with_jingu(instance_id: str, output_dir: Path, max_attempts: int = 3) ->
                     "gate_reason_codes": gate_result.reason_codes,
                 })
                 # B3: retry-controller — diagnose attempt N, guide attempt N+1
-                if RETRY_CONTROLLER_ENABLED and attempt < max_attempts:
-                    t_ctrl = Timer(f"B3 retry-controller attempt={attempt}", parent=t_inst)
+                if attempt < max_attempts:
                     fail_to_pass = instance.get("FAIL_TO_PASS", [])
-                    retry_plan = build_retry_plan(
-                        problem_statement=instance.get("problem_statement", ""),
-                        patch_text=patch,
+                    if not isinstance(fail_to_pass, list):
+                        fail_to_pass = []
+                    # Phase 2A: deterministic execution feedback (always runs)
+                    exec_feedback = build_execution_feedback(
                         jingu_body=jingu_body or {},
-                        fail_to_pass_tests=fail_to_pass if isinstance(fail_to_pass, list) else [],
-                        gate_admitted=True,
-                        gate_reason_codes=gate_result.reason_codes,
-                        instance_id=instance_id,
+                        fail_to_pass_tests=fail_to_pass,
+                        patch_fp=fp,
                     )
-                    t_ctrl.stop()
-                    print(f"    [retry-ctrl] root_causes={retry_plan.root_causes}")
-                    print(f"    [retry-ctrl] must_do={retry_plan.must_do}")
-                    print(f"    [retry-ctrl] hint={retry_plan.next_attempt_prompt[:200]}")
-                    last_failure = retry_plan.next_attempt_prompt[:400]
+                    print(f"    [exec-feedback] {exec_feedback[:200]}")
+                    if RETRY_CONTROLLER_ENABLED:
+                        # Phase 2B: LLM retry-controller builds on execution feedback
+                        t_ctrl = Timer(f"B3 retry-controller attempt={attempt}", parent=t_inst)
+                        retry_plan = build_retry_plan(
+                            problem_statement=instance.get("problem_statement", ""),
+                            patch_text=patch,
+                            jingu_body=jingu_body or {},
+                            fail_to_pass_tests=fail_to_pass,
+                            gate_admitted=True,
+                            gate_reason_codes=gate_result.reason_codes,
+                            instance_id=instance_id,
+                        )
+                        t_ctrl.stop()
+                        print(f"    [retry-ctrl] root_causes={retry_plan.root_causes}")
+                        print(f"    [retry-ctrl] hint={retry_plan.next_attempt_prompt[:200]}")
+                        # Combine: exec feedback provides facts, LLM provides strategy
+                        last_failure = (exec_feedback + "\n\n" + retry_plan.next_attempt_prompt)[:600]
+                    else:
+                        last_failure = exec_feedback[:400]
                 else:
                     last_failure = ""
                 agent_exit = None
