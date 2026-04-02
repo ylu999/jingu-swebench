@@ -39,6 +39,81 @@ from patch_reviewer import review_patch_bedrock, ReviewResult
 GATE_MODE = "trust_gate"
 REVIEWER_ENABLED = False  # B2 reviewer — set True to re-enable
 
+# ── Telemetry helpers ──────────────────────────────────────────────────────────
+
+def classify_admission(gate_result, patch: str, agent_exit: str | None) -> str:
+    """
+    Map gate outcome → structured admission reason category.
+
+    Categories:
+      admitted                  — gate approved all hunks, no downgrade
+      admitted_speculative      — gate admitted but downgraded (LimitsExceeded / no_files / no_traj)
+      gate_reject_parse_failed  — patch has no valid diff markers
+      gate_reject_apply_failed  — git apply reported failure
+      gate_reject_empty_patch   — patch is empty
+      gate_reject_too_many_files — patch touches too many files
+      gate_reject_other         — any other rejection
+      gate_error                — gate runner crashed / timeout
+      no_patch                  — agent produced no patch at all
+    """
+    if patch is None or patch.strip() == "":
+        return "no_patch"
+    if not gate_result.ok:
+        return "gate_error"
+    if gate_result.admitted:
+        exp = gate_result.explanation
+        if exp and exp.downgraded > 0:
+            return "admitted_speculative"
+        return "admitted"
+    # Rejected — classify by reason code
+    codes = set(gate_result.reason_codes)
+    if "PARSE_FAILED" in codes or "EMPTY_PATCH" in codes:
+        return "gate_reject_parse_failed"
+    if "APPLY_FAILED" in codes:
+        return "gate_reject_apply_failed"
+    if "TOO_MANY_FILES" in codes:
+        return "gate_reject_too_many_files"
+    if "GATE_RUNNER_CRASH" in codes or "GATE_TIMEOUT" in codes:
+        return "gate_error"
+    return "gate_reject_other"
+
+
+def patch_fingerprint(patch: str) -> dict:
+    """Lightweight structural summary of a patch for attempt_delta comparison."""
+    if not patch:
+        return {"files": [], "hunks": 0, "lines_added": 0, "lines_removed": 0}
+    lines = patch.splitlines()
+    files = [l[6:].strip() for l in lines if l.startswith("+++ b/")]
+    hunks = sum(1 for l in lines if l.startswith("@@"))
+    added = sum(1 for l in lines if l.startswith("+") and not l.startswith("+++"))
+    removed = sum(1 for l in lines if l.startswith("-") and not l.startswith("---"))
+    return {"files": sorted(set(files)), "hunks": hunks,
+            "lines_added": added, "lines_removed": removed}
+
+
+def compute_attempt_delta(attempts_log: list[dict]) -> dict | None:
+    """
+    Compare attempt 1 and attempt 2 fingerprints.
+    Returns None if fewer than 2 attempts with patches.
+    """
+    with_patch = [a for a in attempts_log if a.get("patch_fp")]
+    if len(with_patch) < 2:
+        return None
+    a1, a2 = with_patch[0], with_patch[1]
+    fp1, fp2 = a1["patch_fp"], a2["patch_fp"]
+    files_changed = set(fp1["files"]) != set(fp2["files"])
+    size_delta = (fp2["lines_added"] + fp2["lines_removed"]) - (fp1["lines_added"] + fp1["lines_removed"])
+    same_admission = a1["admission_reason"] == a2["admission_reason"]
+    return {
+        "files_changed": files_changed,
+        "size_delta_lines": size_delta,
+        "same_admission_reason": same_admission,
+        "a1_admission": a1["admission_reason"],
+        "a2_admission": a2["admission_reason"],
+        "a1_hunks": fp1["hunks"],
+        "a2_hunks": fp2["hunks"],
+    }
+
 # ── Timing ────────────────────────────────────────────────────────────────────
 
 _t0_global = time.monotonic()
@@ -510,6 +585,7 @@ def run_with_jingu(instance_id: str, output_dir: Path, max_attempts: int = 3) ->
     t_load.stop()
 
     candidates = []
+    attempts_log: list[dict] = []   # telemetry: one entry per attempt
     last_failure = ""
     total_llm_calls = 0
 
@@ -524,6 +600,13 @@ def run_with_jingu(instance_id: str, output_dir: Path, max_attempts: int = 3) ->
         t_gate = Timer(f"jingu gate attempt={attempt}", parent=t_inst)
         if not patch:
             print(f"    [gate] EMPTY — no submission (exit={agent_exit})")
+            attempts_log.append({
+                "attempt": attempt,
+                "admission_reason": "no_patch",
+                "patch_fp": None,
+                "gate_reason_codes": [],
+                "exit_status": agent_exit,
+            })
             if agent_exit and "LimitsExceeded" in agent_exit:
                 last_failure = (
                     "You ran out of steps before submitting. "
@@ -553,11 +636,22 @@ def run_with_jingu(instance_id: str, output_dir: Path, max_attempts: int = 3) ->
             exp_str = (f"units={exp.total_units} approved={exp.approved} "
                        f"downgraded={exp.downgraded} rejected={exp.rejected}"
                        if exp else "no explanation")
+            admission = classify_admission(gate_result, patch, agent_exit)
+            fp = patch_fingerprint(patch)
+            attempts_log.append({
+                "attempt": attempt,
+                "admission_reason": admission,
+                "patch_fp": fp,
+                "gate_reason_codes": gate_result.reason_codes,
+                "exit_status": agent_exit,
+            })
             if gate_result.admitted:
                 score = score_patch(patch)
                 patch_lines = len(patch.splitlines())
                 grade = gate_result.gate_code  # ADMITTED or ADMITTED_SPECULATIVE
                 print(f"    [gate] {grade}  score={score:.0f}  lines={patch_lines}  {exp_str}")
+                print(f"    [telemetry] admission={admission}  files={fp['files']}  "
+                      f"hunks={fp['hunks']}  +{fp['lines_added']}/-{fp['lines_removed']}")
                 t_gate.stop()
 
                 candidates.append({
@@ -572,10 +666,11 @@ def run_with_jingu(instance_id: str, output_dir: Path, max_attempts: int = 3) ->
             else:
                 codes = ", ".join(gate_result.reason_codes)
                 print(f"    [gate] REJECTED  codes={codes}  {exp_str}")
+                print(f"    [telemetry] admission={admission}  files={fp['files']}  "
+                      f"hunks={fp['hunks']}  +{fp['lines_added']}/-{fp['lines_removed']}")
                 # Use gate's retry feedback as next attempt hint
                 hint = gate_result.retry_hint
                 if not hint:
-                    # Fallback hints for known codes
                     if "APPLY_FAILED" in gate_result.reason_codes:
                         hint = ("Previous patch failed to apply. Check for merge conflicts "
                                 "or incorrect line numbers. Generate a clean diff.")
@@ -610,6 +705,13 @@ def run_with_jingu(instance_id: str, output_dir: Path, max_attempts: int = 3) ->
     llm_calls = inst_usage.get("api_calls", 0)
     t_inst.llm_calls = llm_calls
 
+    delta = compute_attempt_delta(attempts_log)
+    if delta:
+        print(f"  [attempt_delta] files_changed={delta['files_changed']}  "
+              f"size_delta={delta['size_delta_lines']:+d}  "
+              f"same_reason={delta['same_admission_reason']}  "
+              f"{delta['a1_admission']} → {delta['a2_admission']}")
+
     if not candidates:
         return {
             "instance_id": instance_id,
@@ -618,12 +720,18 @@ def run_with_jingu(instance_id: str, output_dir: Path, max_attempts: int = 3) ->
             "attempts": max_attempts,
             "elapsed_s": t_inst.elapsed,
             "model_usage": inst_usage,
+            "attempts_log": attempts_log,
+            "attempt_delta": delta,
         }
 
     best = max(candidates, key=lambda c: c["score"])
     gate_code = best.get("gate_code", "ADMITTED")
+    best_admission = next(
+        (a["admission_reason"] for a in attempts_log if a["attempt"] == best["attempt"]),
+        gate_code.lower(),
+    )
     print(f"  [result] ACCEPTED  best_attempt={best['attempt']}  score={best['score']:.0f}  "
-          f"gate={gate_code}  elapsed={t_inst.elapsed:.1f}s  "
+          f"gate={gate_code}  admission={best_admission}  elapsed={t_inst.elapsed:.1f}s  "
           f"bedrock_calls={llm_calls}  cost=${inst_usage.get('cost_usd', 0):.4f}")
     return {
         "instance_id": instance_id,
@@ -634,8 +742,11 @@ def run_with_jingu(instance_id: str, output_dir: Path, max_attempts: int = 3) ->
         "score": best["score"],
         "gate_code": gate_code,
         "gate_reason_codes": best.get("gate_reason_codes", []),
+        "admission_reason": best_admission,
         "elapsed_s": t_inst.elapsed,
         "model_usage": inst_usage,
+        "attempts_log": attempts_log,
+        "attempt_delta": delta,
     }
 
 def write_predictions(results: list, output_path: Path):
