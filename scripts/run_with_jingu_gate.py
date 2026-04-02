@@ -504,10 +504,9 @@ BASE_CONFIG = {
     "agent": {
         "mode": "yolo",
         "confirm_exit": False,  # critical: don't wait for user input
-        # step_limit is set per-attempt in run_agent() below:
-        #   attempt 1 → 40  (fast first pass: find file, minimal fix, submit)
-        #   attempt 2 → 60  (guided retry: has exec-feedback + retry hint)
-        # 100 was too slow — 15 min blind runs with no intermediate feedback.
+        "step_limit": 100,      # DBO: do not tune this without failure classification.
+                                # Current classified failures use wrong_direction type —
+                                # which requires must_not_do hints, not fewer steps.
     },
 }
 
@@ -553,9 +552,6 @@ def run_agent(
     t_cfg = Timer("config load", parent=t_agent)
     config = get_config_from_spec("swebench.yaml")
     config = recursive_merge(config, BASE_CONFIG)
-    # Per-attempt step budget: attempt 1 = fast first pass, attempt 2 = guided retry
-    step_limit = 40 if attempt == 1 else 60
-    config = recursive_merge(config, {"agent": {"step_limit": step_limit}})
     # Build instance_template_extra: tests that must pass + optional retry hint
     extra_parts = []
     fail_to_pass = instance.get("FAIL_TO_PASS", [])
@@ -997,7 +993,7 @@ def main():
     report = {
         "instances":        len(args.instance_ids),
         "workers":          args.workers,
-        "step_limit":       "40/60 (attempt1/attempt2)",
+        "step_limit":       BASE_CONFIG["agent"].get("step_limit", None),
         "wall_time_s":      round(total, 1),
         "status":           "completed",
         "patches_generated": sum(1 for r in results if r and r["accepted"]),
