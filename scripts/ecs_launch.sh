@@ -68,21 +68,22 @@ else
 fi
 
 # ── Build run_with_jingu_gate.py args ─────────────────────────────────────────
-# Passed as container command override
-CMD_ARGS=(
-  "--instance-ids" $INSTANCES
-  "--output" "/app/results/${RUN_ID}"
-  "--max-attempts" "$MAX_ATTEMPTS"
-  "--workers" "$WORKERS"
-  "--stagger" "$STAGGER"
-)
-
-# Build JSON array for command override
+# Build JSON array directly in Python so INSTANCES is split correctly
 CMD_JSON=$(python3 -c "
 import json, sys
-args = sys.argv[1:]
+instances = sys.argv[1].split()
+run_id = sys.argv[2]
+max_attempts = sys.argv[3]
+workers = sys.argv[4]
+stagger = sys.argv[5]
+args = ['--instance-ids'] + instances + [
+    '--output', f'/app/results/{run_id}',
+    '--max-attempts', max_attempts,
+    '--workers', workers,
+    '--stagger', stagger,
+]
 print(json.dumps(args))
-" -- "${CMD_ARGS[@]}")
+" "$INSTANCES" "$RUN_ID" "$MAX_ATTEMPTS" "$WORKERS" "$STAGGER")
 
 OVERRIDES=$(python3 -c "
 import json
