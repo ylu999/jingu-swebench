@@ -620,15 +620,11 @@ def run_controlled_verify(
                 "error": f"git apply failed: {apply_result.stdout[:200]}",
             }
 
-        # Step 3: run FAIL_TO_PASS tests
-        # SWE-bench tests use Django test runner or pytest; build command dynamically
-        # Detect: if test IDs contain '.' → use Django manage.py test; else pytest
-        test_ids = fail_to_pass[:8]  # cap at 8 to bound runtime
-        test_cmd = _build_test_command(test_ids)
+        # Step 3: run FAIL_TO_PASS tests using official harness command
+        test_cmd = _build_test_command(instance)
 
         test_result = _sp.run(
-            ["docker", "exec", "-w", "/testbed", container_id,
-             "bash", "-c", f"cd /testbed && {test_cmd} 2>&1"],
+            ["docker", "exec", container_id, "bash", "-c", test_cmd],
             capture_output=True, text=True, timeout=timeout_s,
         )
         output = (test_result.stdout or "") + (test_result.stderr or "")
@@ -672,49 +668,32 @@ def run_controlled_verify(
         }
 
 
-def _build_test_command(test_ids: list[str]) -> str:
+def _build_test_command(instance: dict) -> str:
     """
-    Build the test command for the given FAIL_TO_PASS test IDs.
+    Build the exact test command used by the SWE-bench official harness.
 
-    SWE-bench containers use a conda testbed env.
-    The bare `python` in PATH is /opt/miniconda3/bin/python (base, no packages).
-    Must use testbed python directly: /opt/miniconda3/envs/testbed/bin/python
+    Uses MAP_REPO_VERSION_TO_SPECS[repo][version]["test_cmd"] + get_test_directives(instance),
+    wrapped in conda activate testbed — exactly what the official eval script does.
 
-    SWE-bench FAIL_TO_PASS ID formats:
-    - pytest format:  "tests/path/test_foo.py::ClassName::test_method"  (contains '::')
-    - unittest format: "test_method (module.path.ClassName)"            (contains '(')
-    - dot format:      "module.path.ClassName.test_method"
+    Returns a bash string suitable for: docker exec ... bash -c "<this>"
     """
-    import re as _re
-    TESTBED_PYTHON = "/opt/miniconda3/envs/testbed/bin/python"
-    if not test_ids:
-        return "echo 'no tests'"
+    from swebench.harness.constants import MAP_REPO_VERSION_TO_SPECS
+    from swebench.harness.test_spec.python import get_test_directives
 
-    # pytest format (contains '::')
-    if any('::' in t for t in test_ids):
-        ids_str = " ".join(f'"{t}"' for t in test_ids)
-        return f"{TESTBED_PYTHON} -m pytest {ids_str} -x --no-header -q 2>&1"
+    repo = instance["repo"]
+    version = instance["version"]
+    specs = MAP_REPO_VERSION_TO_SPECS[repo][version]
+    test_cmd = specs["test_cmd"]
+    directives = get_test_directives(instance)
+    directives_str = " ".join(directives)
 
-    # Parse module paths from test IDs.
-    # unittest format: "test_name (module.path.ClassName)" → extract "module.path.ClassName"
-    # dot format: "module.path.ClassName.test_name" → use as-is
-    modules = set()
-    for t in test_ids:
-        m = _re.match(r'.+\((.+)\)\s*$', t)
-        if m:
-            # unittest format — extract class path, strip class name to get module
-            class_path = m.group(1)  # e.g. "forms_tests.tests.test_media.FormsMediaTestCase"
-            # Drop the last component (class name) to get the module
-            parts = class_path.rsplit('.', 1)
-            modules.add(parts[0] if len(parts) > 1 else class_path)
-        else:
-            # dot format — drop last component (method name) to get class path
-            parts = t.rsplit('.', 1)
-            modules.add(parts[0] if len(parts) > 1 else t)
-
-    # Deduplicate and build runtests.py command
-    modules_str = " ".join(sorted(modules))
-    return f"cd /testbed/tests && {TESTBED_PYTHON} runtests.py --verbosity=0 {modules_str} 2>&1"
+    # Official harness wraps in: source activate + conda activate testbed + cd /testbed
+    return (
+        "source /opt/miniconda3/bin/activate && "
+        "conda activate testbed && "
+        f"cd /testbed && "
+        f"{test_cmd} {directives_str} 2>&1"
+    )
 
 
 def _parse_test_output_counts(output: str) -> tuple[int, int]:
