@@ -197,6 +197,20 @@ def _install_step_monitor(
                 break
         print(f"    [step {self.n_calls}] ${self.cost:.2f}  {snippet}", flush=True)
 
+        # ── 1b. Detect env mutation (ENVIRONMENT_NOT_AGENT_WORK) ─────────────
+        for msg in reversed(self.messages):
+            if msg.get("role") == "assistant":
+                has_mut, trigger = _msg_has_env_mutation(msg)
+                if has_mut:
+                    print(
+                        f"    [env-mutation] ENVIRONMENT_MUTATION_IN_AGENT_LOOP "
+                        f"step={self.n_calls} trigger={trigger!r} — "
+                        f"agent is doing env work (pip/conda/setup.py). "
+                        f"This belongs to infrastructure, not agent reasoning.",
+                        flush=True
+                    )
+                break
+
         # ── 2. Check for patch write signal ──────────────────────────────────
         # Look at the most recent assistant message for write signals
         for msg in reversed(self.messages):
@@ -334,6 +348,64 @@ _SIGNAL_BASH_PATTERNS: tuple[str, ...] = (
     "str_replace",     # bash str_replace call
     "apply_patch",     # bash apply_patch call
 )
+
+
+
+# Bash command fragments that indicate environment mutation inside agent loop.
+# ENVIRONMENT_NOT_AGENT_WORK: agent must not install packages or modify env during reasoning.
+_ENV_MUTATION_PATTERNS: tuple[str, ...] = (
+    "pip install",
+    "pip3 install",
+    "uv pip install",
+    "uv add ",
+    "python setup.py install",
+    "python setup.py develop",
+    "poetry install",
+    "conda install",
+    "apt install",
+    "apt-get install",
+    "dnf install",
+    "yum install",
+    "brew install",
+)
+
+
+def _msg_has_env_mutation(msg: dict) -> tuple[bool, str]:
+    """
+    Return (True, trigger) if an assistant message attempts environment mutation.
+
+    Detects pip install, setup.py install, conda install, etc. inside agent steps.
+    These belong to infrastructure/harness, not agent reasoning.
+    Violation: ENVIRONMENT_MUTATION_IN_AGENT_LOOP
+    """
+    def _check_cmd(cmd: str) -> str | None:
+        cmd_lower = cmd.lower()
+        for pat in _ENV_MUTATION_PATTERNS:
+            if pat in cmd_lower:
+                return pat
+        return None
+
+    # Source 1: structured tool_calls bash commands
+    for tc in msg.get("tool_calls", []):
+        if tc.get("function", {}).get("name", "").lower() == "bash":
+            try:
+                import json as _json
+                args = tc.get("function", {}).get("arguments", "")
+                cmd = (_json.loads(args) if isinstance(args, str) else args).get("command", "")
+            except Exception:
+                cmd = ""
+            trigger = _check_cmd(cmd)
+            if trigger:
+                return True, trigger
+
+    # Source 2: extra.actions
+    for action in msg.get("extra", {}).get("actions", []):
+        cmd = action.get("command", "") if isinstance(action, dict) else ""
+        trigger = _check_cmd(cmd)
+        if trigger:
+            return True, trigger
+
+    return False, ""
 
 
 def _msg_has_signal(msg: dict) -> bool:
