@@ -41,12 +41,15 @@ class TestStrategyLoggerRoundTrip:
             steps_since_last_signal=0,
             enforced_violation_codes=[],
             hint_used="Trace the failing test",
-            outcome="solved",
+            next_attempt_admitted=True,
+            instance_final_admitted=True,
         )
         assert isinstance(e, StrategyLogEntry)
         assert e.instance_id == "django__django-11019"
         assert e.failure_class == "no_effect_patch"
-        assert e.outcome == "solved"
+        assert e.next_attempt_admitted is True
+        assert e.instance_final_admitted is True
+        assert e.outcome == "solved"  # derived from instance_final_admitted
 
     def test_log_and_load(self, tmp_path):
         log_path = tmp_path / "strategy_log.jsonl"
@@ -58,7 +61,9 @@ class TestStrategyLoggerRoundTrip:
             steps_since_last_signal=2,
             enforced_violation_codes=[],
             hint_used="Trace the failing test to exact line",
-            outcome="solved",
+            next_attempt_admitted=True,
+            next_attempt_has_patch=True,
+            instance_final_admitted=True,
             tests_delta=3,
         )
         log_strategy_entry(e, log_path)
@@ -67,7 +72,9 @@ class TestStrategyLoggerRoundTrip:
         loaded = entries[0]
         assert loaded.instance_id == e.instance_id
         assert loaded.failure_class == e.failure_class
-        assert loaded.outcome == e.outcome
+        assert loaded.next_attempt_admitted is True
+        assert loaded.next_attempt_has_patch is True
+        assert loaded.instance_final_admitted is True
         assert loaded.tests_delta == 3
 
     def test_multiple_entries_appended(self, tmp_path):
@@ -81,7 +88,8 @@ class TestStrategyLoggerRoundTrip:
                 steps_since_last_signal=0,
                 enforced_violation_codes=[],
                 hint_used=f"hint {i}",
-                outcome="unsolved",
+                next_attempt_admitted=False,
+                instance_final_admitted=False,
             )
             log_strategy_entry(e, log_path)
         entries = load_strategy_log(log_path)
@@ -100,7 +108,6 @@ class TestStrategyLoggerRoundTrip:
             steps_since_last_signal=0,
             enforced_violation_codes=[],
             hint_used="X" * 400,
-            outcome="unsolved",
         )
         assert len(e.hint_used) == 300
 
@@ -144,16 +151,20 @@ class TestAggregate:
         return mod.aggregate(log_path, out_path)
 
     def test_win_rate_computed(self, tmp_path):
+        """p178.1: win_rate based on next_attempt_admitted (retry-level reward)."""
         log_path = self._write_entries(tmp_path, [
             dict(instance_id="a", attempt_id=1, failure_class="no_effect_patch",
                  control_action="ADJUST", steps_since_last_signal=0, enforced_violation_codes=[],
-                 hint_used="Trace the failing test", outcome="solved"),
+                 hint_used="Trace the failing test",
+                 next_attempt_admitted=True, instance_final_admitted=True),
             dict(instance_id="b", attempt_id=1, failure_class="no_effect_patch",
                  control_action="ADJUST", steps_since_last_signal=0, enforced_violation_codes=[],
-                 hint_used="Trace the failing test", outcome="solved"),
+                 hint_used="Trace the failing test",
+                 next_attempt_admitted=True, instance_final_admitted=True),
             dict(instance_id="c", attempt_id=1, failure_class="no_effect_patch",
                  control_action="ADJUST", steps_since_last_signal=0, enforced_violation_codes=[],
-                 hint_used="Trace the failing test", outcome="unsolved"),
+                 hint_used="Trace the failing test",
+                 next_attempt_admitted=False, instance_final_admitted=False),
         ])
         table = self._aggregate(log_path, tmp_path / "table.json")
         key = "no_effect_patch"
@@ -169,7 +180,8 @@ class TestAggregate:
         entries = [
             dict(instance_id=f"i{i}", attempt_id=1, failure_class="exploration_loop",
                  control_action="ADJUST", steps_since_last_signal=0, enforced_violation_codes=[],
-                 hint_used="Go directly to fix", outcome="solved")
+                 hint_used="Go directly to fix",
+                 next_attempt_admitted=True, instance_final_admitted=True)
             for i in range(3)
         ]
         log_path = self._write_entries(tmp_path, entries)
@@ -183,7 +195,8 @@ class TestAggregate:
         entries = [
             dict(instance_id=f"i{i}", attempt_id=1, failure_class="exploration_loop",
                  control_action="ADJUST", steps_since_last_signal=0, enforced_violation_codes=[],
-                 hint_used="Go directly to fix", outcome="solved")
+                 hint_used="Go directly to fix",
+                 next_attempt_admitted=True, instance_final_admitted=True)
             for i in range(2)
         ]
         log_path = self._write_entries(tmp_path, entries)
@@ -192,25 +205,26 @@ class TestAggregate:
         assert hint_data["trusted"] is False
 
     def test_multiple_hints_different_win_rates(self, tmp_path):
+        """hint_A: all next_attempt_admitted=True → win=1.0; hint_B: all False → win=0.0."""
         entries = [
             dict(instance_id="a1", attempt_id=1, failure_class="no_effect_patch",
                  control_action="ADJUST", steps_since_last_signal=0, enforced_violation_codes=[],
-                 hint_used="hint_A", outcome="solved"),
+                 hint_used="hint_A", next_attempt_admitted=True, instance_final_admitted=True),
             dict(instance_id="a2", attempt_id=1, failure_class="no_effect_patch",
                  control_action="ADJUST", steps_since_last_signal=0, enforced_violation_codes=[],
-                 hint_used="hint_A", outcome="solved"),
+                 hint_used="hint_A", next_attempt_admitted=True, instance_final_admitted=True),
             dict(instance_id="a3", attempt_id=1, failure_class="no_effect_patch",
                  control_action="ADJUST", steps_since_last_signal=0, enforced_violation_codes=[],
-                 hint_used="hint_A", outcome="solved"),
+                 hint_used="hint_A", next_attempt_admitted=True, instance_final_admitted=True),
             dict(instance_id="b1", attempt_id=1, failure_class="no_effect_patch",
                  control_action="ADJUST", steps_since_last_signal=0, enforced_violation_codes=[],
-                 hint_used="hint_B", outcome="unsolved"),
+                 hint_used="hint_B", next_attempt_admitted=False, instance_final_admitted=False),
             dict(instance_id="b2", attempt_id=1, failure_class="no_effect_patch",
                  control_action="ADJUST", steps_since_last_signal=0, enforced_violation_codes=[],
-                 hint_used="hint_B", outcome="unsolved"),
+                 hint_used="hint_B", next_attempt_admitted=False, instance_final_admitted=False),
             dict(instance_id="b3", attempt_id=1, failure_class="no_effect_patch",
                  control_action="ADJUST", steps_since_last_signal=0, enforced_violation_codes=[],
-                 hint_used="hint_B", outcome="unsolved"),
+                 hint_used="hint_B", next_attempt_admitted=False, instance_final_admitted=False),
         ]
         log_path = self._write_entries(tmp_path, entries)
         table = self._aggregate(log_path, tmp_path / "table.json")

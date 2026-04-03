@@ -37,7 +37,8 @@ from strategy_logger import load_strategy_log, make_bucket_key
 # Minimum samples before we trust the win rate for exploitation
 MIN_SAMPLES = 3
 
-# Outcomes that count as "solved" (hint worked)
+# p178.1: primary reward = next_attempt_admitted (retry-level effectiveness)
+# Falls back to legacy outcome field for entries written before p178.1
 SOLVED_OUTCOMES = {"solved"}
 
 
@@ -57,7 +58,9 @@ def aggregate(log_path: str | Path, out_path: str | Path) -> dict:
         if not hint:
             hint = "(no hint)"
         counts[key][hint]["total"] += 1
-        if entry.outcome in SOLVED_OUTCOMES:
+        # p178.1: primary reward = next_attempt_admitted (retry-level effectiveness)
+        # next_attempt_admitted=True means the hint helped attempt N+1 get admitted
+        if entry.next_attempt_admitted:
             counts[key][hint]["solved"] += 1
 
     # Build output table with win_rate + sample_count

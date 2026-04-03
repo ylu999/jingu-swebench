@@ -33,13 +33,19 @@ from typing import Optional
 class StrategyLogEntry:
     timestamp: str
     instance_id: str
-    attempt_id: int
+    attempt_id: int                 # attempt that generated the hint (1-based)
     failure_class: str              # from retry_controller.classify_failure()
     control_action: str             # CONTINUE | ADJUST | STOP_NO_SIGNAL | STOP_FAIL
     steps_since_last_signal: int    # p164 runner layer
     enforced_violation_codes: list[str]   # only ENV_LEAKAGE_HARDCODE_PATH / PLAN_NO_FEEDBACK_LOOP
     hint_used: str                  # next_attempt_prompt[:300] — the actual hint applied
-    outcome: str                    # solved | unsolved | gate_reject | no_patch
+    # ── p178.1: retry-level reward (primary learning signal) ─────────────────
+    next_attempt_admitted: bool     # did attempt N+1 get admitted by the gate?
+    next_attempt_has_patch: bool    # did attempt N+1 produce any patch at all?
+    # ── instance-level outcome (auxiliary, not used as primary reward) ────────
+    instance_final_admitted: bool   # did any attempt get admitted for this instance?
+    # legacy: kept for backward compat with existing code, not used in bucketing
+    outcome: str                    # solved | unsolved (derived from instance_final_admitted)
     tests_delta: int                # tests_passed_after - tests_passed_before (0 if unknown)
     # Logged for observability only — NOT used in bucket key
     principals_declared: list[str] = field(default_factory=list)
@@ -98,11 +104,19 @@ def make_entry(
     steps_since_last_signal: int,
     enforced_violation_codes: list[str],
     hint_used: str,
-    outcome: str,
+    # p178.1: retry-level reward fields (primary)
+    next_attempt_admitted: bool = False,
+    next_attempt_has_patch: bool = False,
+    instance_final_admitted: bool = False,
+    # legacy outcome field (derived from instance_final_admitted)
+    outcome: str = "unsolved",
     tests_delta: int = 0,
     principals_declared: Optional[list[str]] = None,
 ) -> StrategyLogEntry:
     """Construct a StrategyLogEntry with a UTC timestamp."""
+    # derive legacy outcome from instance_final_admitted if not explicitly set
+    if outcome == "unsolved" and instance_final_admitted:
+        outcome = "solved"
     return StrategyLogEntry(
         timestamp=datetime.now(timezone.utc).isoformat(),
         instance_id=instance_id,
@@ -112,6 +126,9 @@ def make_entry(
         steps_since_last_signal=steps_since_last_signal,
         enforced_violation_codes=list(enforced_violation_codes),
         hint_used=hint_used[:300],
+        next_attempt_admitted=next_attempt_admitted,
+        next_attempt_has_patch=next_attempt_has_patch,
+        instance_final_admitted=instance_final_admitted,
         outcome=outcome,
         tests_delta=tests_delta,
         principals_declared=list(principals_declared or []),

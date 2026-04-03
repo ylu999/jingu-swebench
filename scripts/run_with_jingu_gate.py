@@ -1186,10 +1186,26 @@ def run_with_jingu(instance_id: str, output_dir: Path, max_attempts: int = 3) ->
               f"same_reason={delta['same_admission_reason']}  "
               f"{delta['a1_admission']} → {delta['a2_admission']}")
 
-    # ── p178: flush strategy log entries (outcome now known) ─────────────────
+    # ── p178.1: flush strategy log entries with retry-level reward ──────────
+    # Primary reward: next_attempt_admitted (did hint help attempt N+1 get admitted?)
+    # Auxiliary: instance_final_admitted (did any attempt succeed?)
     if STRATEGY_LOG_PATH and _strategy_entries:
-        _solved = bool(candidates)  # at least one admitted attempt = solved for this instance
+        _inst_final_admitted = bool(candidates)
+        # Build a lookup: attempt number → admission result from attempts_log
+        _admit_by_attempt = {
+            a["attempt"]: a["admission_reason"] not in ("no_patch", "gate_reject_parse_failed",
+                "gate_reject_apply_failed", "gate_reject_empty_patch",
+                "gate_reject_too_many_files", "gate_reject_other", "gate_error")
+            for a in attempts_log
+        }
+        _has_patch_by_attempt = {
+            a["attempt"]: a["admission_reason"] != "no_patch"
+            for a in attempts_log
+        }
         for _se in _strategy_entries:
+            _next_att = _se["attempt"] + 1
+            _next_admitted = _admit_by_attempt.get(_next_att, False)
+            _next_has_patch = _has_patch_by_attempt.get(_next_att, False)
             try:
                 log_strategy_entry(
                     make_strategy_entry(
@@ -1200,7 +1216,10 @@ def run_with_jingu(instance_id: str, output_dir: Path, max_attempts: int = 3) ->
                         steps_since_last_signal=_se["steps_since_signal"],
                         enforced_violation_codes=_se["enforced_violations"],
                         hint_used=_se["hint_used"],
-                        outcome="solved" if _solved else "unsolved",
+                        next_attempt_admitted=_next_admitted,
+                        next_attempt_has_patch=_next_has_patch,
+                        instance_final_admitted=_inst_final_admitted,
+                        outcome="solved" if _inst_final_admitted else "unsolved",
                     ),
                     STRATEGY_LOG_PATH,
                 )
