@@ -41,6 +41,9 @@ COPY jingu-trust-gate/node_modules /app/jingu-trust-gate/node_modules
 COPY scripts/run_with_jingu_gate.py \
      scripts/jingu_gate_bridge.py \
      scripts/retry_controller.py \
+     scripts/strategy_logger.py \
+     scripts/aggregate_strategies.py \
+     scripts/preflight.py \
      scripts/patch_reviewer.py \
      scripts/patch_signals.py \
      scripts/declaration_extractor.py \
