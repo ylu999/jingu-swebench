@@ -411,22 +411,71 @@ def extract_test_counts(jingu_body: dict) -> int:
     """
     Extract number of passing tests from jingu_body.test_results.excerpt.
 
-    Parses pytest output patterns like "3 passed", "5 failed", "1 error".
-    Returns total passed count, or -1 if not determinable from excerpt.
+    Supports multiple test output formats observed in mini-swe-agent runs:
+    - pytest: "3 passed", "3 passed, 2 failed in 0.12s"
+    - unittest: "Ran N tests ... OK" -> N passed; "FAILED (failures=K)" -> N-K
+    - unittest minimal: trailing "\nOK"
+    - custom scripts: "ALL TESTS PASSED", "PASS:", "Test passed!"
+    - exit_code fallback when excerpt is non-test content (code diff, source)
 
+    Returns total passed count, or -1 if excerpt is non-test content.
     p179: primary reward channel — tests_delta = count(N) - count(N-1).
     """
-    excerpt = (jingu_body or {}).get("test_results", {}).get("excerpt", "")
+    tr = (jingu_body or {}).get("test_results", {})
+    excerpt = tr.get("excerpt", "")
+    exit_code = tr.get("exit_code")
+
     if not excerpt:
+        if exit_code == 0:
+            return 1
+        if exit_code not in (None, ""):
+            return 0
         return -1
-    # pytest summary line: "3 passed, 2 failed in 0.12s" or "5 passed in 0.05s"
+
+    # 1. pytest summary: "3 passed" (may have ", 2 failed" after)
     m = re.search(r'(\d+) passed', excerpt)
     if m:
         return int(m.group(1))
-    # If only failures/errors visible (no passed count), passed = 0
-    # Matches: "2 failed", "failures=2", "3 error", "ERROR", "FAILED"
-    if re.search(r'\d+ failed|\d+ error|failures=\d+|errors=\d+|FAILED|ERROR', excerpt):
+
+    # 2. unittest "Ran N tests in X.XXs" + OK or FAILED
+    ran_m = re.search(r'Ran (\d+) tests? in', excerpt)
+    if ran_m:
+        total = int(ran_m.group(1))
+        fail_m = re.search(r'FAILED \((?:failures=(\d+))?(?:,\s*)?(?:errors=(\d+))?\)', excerpt)
+        if fail_m:
+            failures = int(fail_m.group(1) or 0)
+            errors = int(fail_m.group(2) or 0)
+            return max(0, total - failures - errors)
+        return total  # No FAILED marker -> all passed
+
+    # 3. unittest minimal: ends with "\nOK"
+    if re.search(r'\nOK\s*$', excerpt) or excerpt.rstrip() == 'OK':
+        ok_count = len(re.findall(r'\.\.\. ok', excerpt))
+        return max(1, ok_count)
+
+    # 4. Explicit failure markers (no pass count)
+    if re.search(r'FAILED \((?:failures|errors)=\d+\)|\d+ failed|\d+ error', excerpt):
         return 0
+    if re.search(r'\nFAILED\s*$', excerpt) or excerpt.rstrip() == 'FAILED':
+        return 0
+
+    # 5. Custom script: "ALL TESTS PASSED", unicode checkmark summary
+    if re.search(r'ALL TESTS PASSED|all tests passed', excerpt):
+        checkmarks = len(re.findall(r'[✓✔]', excerpt))
+        return max(1, checkmarks)
+
+    # 6. Custom script: "PASS:" / "FAIL:" line-by-line markers
+    pass_lines = len(re.findall(r'\bPASS\b|Test passed!|PASS:', excerpt))
+    fail_lines = len(re.findall(r'\bFAIL\b|Test failed!|FAIL:', excerpt))
+    if pass_lines > 0 or fail_lines > 0:
+        return max(0, pass_lines - fail_lines)
+
+    # 7. exit_code fallback (excerpt is non-test content: code diff, source code)
+    if exit_code == 0:
+        return 1
+    if exit_code not in (None, ""):
+        return 0
+
     return -1
 
 
