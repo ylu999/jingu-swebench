@@ -36,6 +36,7 @@ from jingu_gate_bridge import evaluate_patch_from_traj, build_support_pool, run_
 from patch_reviewer import review_patch_bedrock, ReviewResult
 # B3: retry controller (failure → diagnosis → next strategy)
 from retry_controller import build_retry_plan
+from strategy_logger import log_strategy_entry, make_entry as make_strategy_entry
 # B4: cognition gate (declaration-vs-patch consistency check)
 from declaration_extractor import extract_declaration, extract_last_agent_message
 from patch_signals import extract_patch_signals
@@ -49,6 +50,9 @@ run_preflight()
 GATE_MODE = "trust_gate"
 REVIEWER_ENABLED = False  # B2 reviewer — set True to re-enable
 RETRY_CONTROLLER_ENABLED = True  # B3 retry-controller — diagnoses attempt 1, guides attempt 2
+# p178: strategy learning — set paths to enable log + table
+STRATEGY_LOG_PATH = os.environ.get("STRATEGY_LOG_PATH")   # e.g. /root/results/strategy_log.jsonl
+STRATEGY_TABLE_PATH = os.environ.get("STRATEGY_TABLE_PATH")  # e.g. /root/results/strategy_table.json
 
 # ── Execution Identity (RT1/RT6: artifact provenance) ─────────────────────────
 
@@ -91,6 +95,8 @@ def print_activation_proof(identity: dict) -> None:
     print(f"[init] retry_controller_enabled={RETRY_CONTROLLER_ENABLED}")
     print(f"[init] cognition_gate_enabled=True")
     print(f"[init] declaration_protocol=enabled")
+    print(f"[init] strategy_log_path={STRATEGY_LOG_PATH or 'disabled'}")
+    print(f"[init] strategy_table_path={STRATEGY_TABLE_PATH or 'disabled'}")
 
 # ── Traj watcher: real-time per-step log ───────────────────────────────────────
 
@@ -940,6 +946,8 @@ def run_with_jingu(instance_id: str, output_dir: Path, max_attempts: int = 3) ->
     attempts_log: list[dict] = []   # telemetry: one entry per attempt
     last_failure = ""
     total_llm_calls = 0
+    # p178: per-attempt strategy metadata (populated when retry_controller runs)
+    _strategy_entries: list[dict] = []
 
     for attempt in range(1, max_attempts + 1):
         print(f"  [attempt {attempt}/{max_attempts}] {instance_id}")
@@ -1100,12 +1108,26 @@ def run_with_jingu(instance_id: str, output_dir: Path, max_attempts: int = 3) ->
                             attempt=attempt,
                             steps_since_last_signal=_steps_since_signal,
                             principal_violation_codes=_principal_viol_codes,
+                            strategy_table_path=STRATEGY_TABLE_PATH,
                         )
                         t_ctrl.stop()
                         print(f"    [retry-ctrl] action={retry_plan.control_action}  "
                               f"root_causes={retry_plan.root_causes}")
                         print(f"    [retry-ctrl] must_not_do={retry_plan.must_not_do}")
                         print(f"    [retry-ctrl] hint={retry_plan.next_attempt_prompt[:200]}")
+                        # Store strategy metadata for p178 logging
+                        _strategy_failure_class = next(
+                            (rc.split("=", 1)[1] for rc in retry_plan.root_causes if rc.startswith("failure_type=")),
+                            "unknown",
+                        )
+                        _strategy_entries.append({
+                            "attempt": attempt,
+                            "failure_class": _strategy_failure_class,
+                            "control_action": retry_plan.control_action,
+                            "steps_since_signal": _steps_since_signal,
+                            "enforced_violations": retry_plan.principal_violations,
+                            "hint_used": retry_plan.next_attempt_prompt[:300],
+                        })
                         # next_attempt_prompt already merges hint_prefix + exec_feedback
                         last_failure = retry_plan.next_attempt_prompt[:600]
                     else:
@@ -1163,6 +1185,27 @@ def run_with_jingu(instance_id: str, output_dir: Path, max_attempts: int = 3) ->
               f"size_delta={delta['size_delta_lines']:+d}  "
               f"same_reason={delta['same_admission_reason']}  "
               f"{delta['a1_admission']} → {delta['a2_admission']}")
+
+    # ── p178: flush strategy log entries (outcome now known) ─────────────────
+    if STRATEGY_LOG_PATH and _strategy_entries:
+        _solved = bool(candidates)  # at least one admitted attempt = solved for this instance
+        for _se in _strategy_entries:
+            try:
+                log_strategy_entry(
+                    make_strategy_entry(
+                        instance_id=instance_id,
+                        attempt_id=_se["attempt"],
+                        failure_class=_se["failure_class"],
+                        control_action=_se["control_action"],
+                        steps_since_last_signal=_se["steps_since_signal"],
+                        enforced_violation_codes=_se["enforced_violations"],
+                        hint_used=_se["hint_used"],
+                        outcome="solved" if _solved else "unsolved",
+                    ),
+                    STRATEGY_LOG_PATH,
+                )
+            except Exception as _log_err:
+                print(f"    [strategy-log] WARNING: failed to write entry: {_log_err}")
 
     if not candidates:
         return {

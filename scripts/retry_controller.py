@@ -24,11 +24,53 @@ Decision priority:
 
 from __future__ import annotations
 
+import json
+import random
+import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Literal, Optional
+
+from strategy_logger import make_bucket_key
 
 # P7 no-signal threshold (p164 runner layer)
 NO_SIGNAL_THRESHOLD = 15  # consecutive steps without write/submit → STOP_NO_SIGNAL
+
+# p178 ε-greedy exploration rate
+EPSILON = 0.15  # 15% random exploration, 85% exploit best known hint
+
+# Strategy table cache: (path, mtime, loaded_at, table)
+_strategy_table_cache: tuple[str, float, float, dict] | None = None
+_CACHE_TTL_SECONDS = 300  # reload table at most once every 5 minutes
+
+
+def _load_strategy_table(table_path: str | Path | None) -> dict:
+    """
+    Load strategy_table.json with a 5-minute TTL cache.
+    Returns {} if table_path is None or file does not exist.
+    """
+    global _strategy_table_cache
+    if table_path is None:
+        return {}
+    table_path = str(table_path)
+    try:
+        mtime = Path(table_path).stat().st_mtime
+    except OSError:
+        return {}
+    now = time.time()
+    if (
+        _strategy_table_cache is not None
+        and _strategy_table_cache[0] == table_path
+        and _strategy_table_cache[1] == mtime
+        and now - _strategy_table_cache[3] < _CACHE_TTL_SECONDS  # type: ignore[index]
+    ):
+        return _strategy_table_cache[2]  # type: ignore[index]
+    try:
+        table = json.loads(Path(table_path).read_text())
+        _strategy_table_cache = (table_path, mtime, table, now)  # type: ignore[assignment]
+        return table
+    except (OSError, json.JSONDecodeError):
+        return {}
 
 # Enforced-principal violation codes from jingu-policy-core (p175/p176)
 # Only these drive hard ADJUST — declared-only principals are hint-only
@@ -215,6 +257,7 @@ def build_retry_plan(
     attempt: int = 1,
     steps_since_last_signal: int = 0,
     principal_violation_codes: Optional[list[str]] = None,
+    strategy_table_path: Optional[str | Path] = None,
 ) -> RetryPlan:
     """
     Deterministic failure classification → intervention mapping → RetryPlan.
@@ -253,11 +296,24 @@ def build_retry_plan(
     viol_codes = [c for c in (principal_violation_codes or []) if c in ENFORCED_VIOLATION_CODES]
     principal_hints = [_PRINCIPAL_VIOLATION_HINTS[c] for c in viol_codes if c in _PRINCIPAL_VIOLATION_HINTS]
 
+    # ── p178: ε-greedy hint selection from strategy table ─────────────────────
+    bucket_key = make_bucket_key(failure_type, viol_codes)
+    table = _load_strategy_table(strategy_table_path)
+    bucket_data = table.get(bucket_key, {})
+    trusted_hints = {h: s for h, s in bucket_data.items() if s.get("trusted", False)}
+
+    if trusted_hints and random.random() >= EPSILON:
+        # Exploit: use best known hint for this bucket
+        selected_hint = max(trusted_hints, key=lambda h: trusted_hints[h]["win_rate"])
+    else:
+        # Explore (or cold-start): use deterministic intervention hint
+        selected_hint = intervention["hint_prefix"]
+
     # ── Build hint ────────────────────────────────────────────────────────────
     hint_parts = []
     if principal_hints:
         hint_parts.extend(principal_hints)
-    hint_parts.append(intervention["hint_prefix"])
+    hint_parts.append(selected_hint)
     if exec_feedback:
         hint_parts.append(exec_feedback[:300])
     hint = " ".join(hint_parts).strip()
