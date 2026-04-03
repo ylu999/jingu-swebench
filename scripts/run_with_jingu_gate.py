@@ -407,21 +407,220 @@ def build_execution_feedback(
     return "\n".join(parts)
 
 
+def run_controlled_verify(
+    patch_text: str,
+    instance: dict,
+    container_id: str,
+    timeout_s: int = 60,
+) -> dict:
+    """
+    Orchestrator-controlled verification: apply patch + run FAIL_TO_PASS tests.
+
+    Uses the already-running swebench container (same image agent used, no re-pull needed).
+    Runs specified tests directly via docker exec, returns structured results.
+
+    Returns a dict with:
+      verification_kind: "controlled_fail_to_pass" | "controlled_no_tests" | "controlled_error"
+      tests_passed: int (-1 if unknown)
+      tests_failed: int (-1 if unknown)
+      exit_code: int
+      elapsed_ms: float
+      output_tail: str  (last 500 chars of test output for debugging)
+      error: str (if verification_kind == "controlled_error")
+
+    This is the PRIMARY signal source for tests_passed_after.
+    extract_test_counts() is the fallback for when controlled verify is unavailable.
+    """
+    import subprocess as _sp
+    import tempfile as _tf
+
+    t0 = time.monotonic()
+
+    fail_to_pass = instance.get("FAIL_TO_PASS", [])
+    if not fail_to_pass:
+        return {
+            "verification_kind": "controlled_no_tests",
+            "tests_passed": -1, "tests_failed": -1,
+            "exit_code": -1, "elapsed_ms": 0.0, "output_tail": "",
+        }
+
+    if not patch_text or not patch_text.strip():
+        return {
+            "verification_kind": "controlled_error",
+            "tests_passed": 0, "tests_failed": len(fail_to_pass),
+            "exit_code": 1, "elapsed_ms": 0.0, "output_tail": "",
+            "error": "no patch to apply",
+        }
+
+    try:
+        # Step 1: write patch to a temp file inside container
+        with _tf.NamedTemporaryFile(suffix=".patch", delete=False, mode="w") as f:
+            f.write(patch_text)
+            host_patch_path = f.name
+
+        # Copy patch into container
+        cp_result = _sp.run(
+            ["docker", "cp", host_patch_path, f"{container_id}:/tmp/jingu_verify.patch"],
+            capture_output=True, text=True, timeout=10,
+        )
+        os.unlink(host_patch_path)
+        if cp_result.returncode != 0:
+            return {
+                "verification_kind": "controlled_error",
+                "tests_passed": -1, "tests_failed": -1,
+                "exit_code": -1, "elapsed_ms": round((time.monotonic() - t0) * 1000, 1),
+                "output_tail": "", "error": f"docker cp failed: {cp_result.stderr[:200]}",
+            }
+
+        # Step 2: apply patch (git apply in testbed)
+        apply_result = _sp.run(
+            ["docker", "exec", "-w", "/testbed", container_id,
+             "bash", "-c", "git apply /tmp/jingu_verify.patch 2>&1"],
+            capture_output=True, text=True, timeout=30,
+        )
+        if apply_result.returncode != 0:
+            return {
+                "verification_kind": "controlled_error",
+                "tests_passed": 0, "tests_failed": len(fail_to_pass),
+                "exit_code": apply_result.returncode,
+                "elapsed_ms": round((time.monotonic() - t0) * 1000, 1),
+                "output_tail": apply_result.stdout[-300:],
+                "error": f"git apply failed: {apply_result.stdout[:200]}",
+            }
+
+        # Step 3: run FAIL_TO_PASS tests
+        # SWE-bench tests use Django test runner or pytest; build command dynamically
+        # Detect: if test IDs contain '.' → use Django manage.py test; else pytest
+        test_ids = fail_to_pass[:8]  # cap at 8 to bound runtime
+        test_cmd = _build_test_command(test_ids)
+
+        test_result = _sp.run(
+            ["docker", "exec", "-w", "/testbed", container_id,
+             "bash", "-c", f"cd /testbed && {test_cmd} 2>&1"],
+            capture_output=True, text=True, timeout=timeout_s,
+        )
+        output = (test_result.stdout or "") + (test_result.stderr or "")
+        output_tail = output[-500:]
+
+        # Step 4: parse results from output
+        passed, failed = _parse_test_output_counts(output)
+        elapsed_ms = round((time.monotonic() - t0) * 1000, 1)
+
+        # Rollback patch so container is clean for next attempt (if any)
+        _sp.run(
+            ["docker", "exec", "-w", "/testbed", container_id,
+             "bash", "-c", "git apply -R /tmp/jingu_verify.patch 2>/dev/null || git checkout . 2>/dev/null"],
+            capture_output=True, text=True, timeout=15,
+        )
+
+        return {
+            "verification_kind": "controlled_fail_to_pass",
+            "tests_passed": passed,
+            "tests_failed": failed,
+            "exit_code": test_result.returncode,
+            "elapsed_ms": elapsed_ms,
+            "output_tail": output_tail,
+        }
+
+    except _sp.TimeoutExpired:
+        return {
+            "verification_kind": "controlled_error",
+            "tests_passed": -1, "tests_failed": -1,
+            "exit_code": -1,
+            "elapsed_ms": round((time.monotonic() - t0) * 1000, 1),
+            "output_tail": "", "error": "controlled verify timed out",
+        }
+    except Exception as e:
+        return {
+            "verification_kind": "controlled_error",
+            "tests_passed": -1, "tests_failed": -1,
+            "exit_code": -1,
+            "elapsed_ms": round((time.monotonic() - t0) * 1000, 1),
+            "output_tail": "", "error": str(e)[:200],
+        }
+
+
+def _build_test_command(test_ids: list[str]) -> str:
+    """
+    Build the test command for the given FAIL_TO_PASS test IDs.
+
+    SWE-bench test IDs can be:
+    - Django test runner format: "urlpatterns.tests.SimplifiedURLTests.test_foo"
+    - pytest format: "tests/urlpatterns/test_basic.py::TestClass::test_foo"
+
+    Detection: pytest IDs contain '::' or path-like patterns; Django IDs use dots.
+    """
+    if not test_ids:
+        return "echo 'no tests'"
+    # If any test ID contains '::' → pytest format
+    if any('::' in t for t in test_ids):
+        ids_str = " ".join(f'"{t}"' for t in test_ids)
+        return f"python -m pytest {ids_str} -x --no-header -q 2>&1"
+    # Django format: use manage.py test or direct python -m pytest
+    # SWE-bench django images have manage.py at /testbed/tests/runtests.py
+    # The test IDs are module.TestClass.test_method format
+    ids_str = " ".join(test_ids)
+    # Try runtests.py first (SWE-bench convention), fallback to pytest
+    return (
+        f"python -m pytest {ids_str} -x --no-header -q 2>&1 || "
+        f"python tests/runtests.py {ids_str} --verbosity=2 2>&1"
+    )
+
+
+def _parse_test_output_counts(output: str) -> tuple[int, int]:
+    """
+    Parse passed/failed counts from test output.
+    Returns (passed, failed). Both -1 if unparseable.
+    """
+    # pytest: "3 passed, 2 failed"
+    m_pass = re.search(r'(\d+) passed', output)
+    m_fail = re.search(r'(\d+) failed', output)
+    if m_pass or m_fail:
+        passed = int(m_pass.group(1)) if m_pass else 0
+        failed = int(m_fail.group(1)) if m_fail else 0
+        return passed, failed
+    # unittest: "Ran N tests ... OK" or "FAILED (failures=K)"
+    ran_m = re.search(r'Ran (\d+) tests? in', output)
+    if ran_m:
+        total = int(ran_m.group(1))
+        fail_m = re.search(r'FAILED \((?:failures=(\d+))?(?:,\s*)?(?:errors=(\d+))?\)', output)
+        if fail_m:
+            f = int(fail_m.group(1) or 0)
+            e = int(fail_m.group(2) or 0)
+            return max(0, total - f - e), f + e
+        return total, 0  # OK
+    # Error exit with no parseable output
+    return -1, -1
+
+
 def extract_test_counts(jingu_body: dict) -> int:
     """
-    Extract number of passing tests from jingu_body.test_results.excerpt.
+    Extract number of passing tests.
 
-    Supports multiple test output formats observed in mini-swe-agent runs:
-    - pytest: "3 passed", "3 passed, 2 failed in 0.12s"
-    - unittest: "Ran N tests ... OK" -> N passed; "FAILED (failures=K)" -> N-K
-    - unittest minimal: trailing "\nOK"
-    - custom scripts: "ALL TESTS PASSED", "PASS:", "Test passed!"
-    - exit_code fallback when excerpt is non-test content (code diff, source)
+    Priority (highest to lowest):
+    1. controlled_verify result (orchestrator-controlled, structured, reliable)
+    2. test_results.controlled_passed (promoted from controlled_verify into test_results)
+    3. excerpt parsing (fallback for legacy / non-controlled runs)
 
-    Returns total passed count, or -1 if excerpt is non-test content.
+    Returns total passed count, or -1 if unknown.
     p179: primary reward channel — tests_delta = count(N) - count(N-1).
     """
-    tr = (jingu_body or {}).get("test_results", {})
+    jb = jingu_body or {}
+
+    # Priority 1: controlled_verify (orchestrator-controlled)
+    cv = jb.get("controlled_verify", {})
+    if cv.get("verification_kind") == "controlled_fail_to_pass":
+        passed = cv.get("tests_passed", -1)
+        if passed >= 0:
+            return passed
+
+    # Priority 2: controlled_passed promoted into test_results
+    tr_cv_passed = jb.get("test_results", {}).get("controlled_passed")
+    if tr_cv_passed is not None and tr_cv_passed >= 0:
+        return tr_cv_passed
+
+    # Priority 3: excerpt parsing (fallback)
+    tr = jb.get("test_results", {})
     excerpt = tr.get("excerpt", "")
     exit_code = tr.get("exit_code")
 
@@ -955,12 +1154,61 @@ def run_agent(
     # Install per-step logger for real-time visibility
     _install_step_logger(instance_id, attempt)
 
+    # Controlled verify result storage (populated inside _verifying_run hook)
+    _controlled_verify_result: list[dict] = []  # mutable single-element container
+
+    # We hook DefaultAgent.run() to run controlled verify BEFORE env cleanup.
+    # Timeline inside process_instance:
+    #   env = get_sb_environment(...)     <- container starts
+    #   agent = ProgressTrackingAgent(...)
+    #   info = agent.run(task)            <- our hook intercepts here
+    #   finally: agent.save(...)
+    #            env.__del__ -> cleanup() -> docker stop   <- too late
+    #
+    # By hooking agent.run(), we can exec into the container after agent finishes
+    # but before the finally block stops it.
+    from minisweagent.agents.default import DefaultAgent as _DA
+    _orig_run = _DA.run
+    _verify_instance = instance   # close over current instance
+    _verify_patch_holder: list[str] = []  # will be filled after traj parsing
+
+    def _verifying_run(self_agent, *args, **kwargs):
+        result = _orig_run(self_agent, *args, **kwargs)
+        # Container is alive here; env.__del__ hasn't run yet
+        cid = getattr(getattr(self_agent, 'env', None), 'container_id', None)
+        if not cid or _controlled_verify_result:
+            return result
+        # Extract patch from submission (what agent just produced)
+        submitted = result.get("submission", "") if isinstance(result, dict) else ""
+        if not submitted:
+            _controlled_verify_result.append({
+                "verification_kind": "controlled_error",
+                "tests_passed": -1, "tests_failed": -1,
+                "exit_code": -1, "elapsed_ms": 0.0,
+                "output_tail": "", "error": "no submission to verify",
+            })
+            return result
+        print(f"    [controlled-verify] running on container {cid[:12]}...")
+        t_cv0 = time.monotonic()
+        cv_result = run_controlled_verify(submitted, _verify_instance, cid, timeout_s=60)
+        elapsed = round((time.monotonic() - t_cv0) * 1000, 1)
+        cv_result["elapsed_ms"] = elapsed
+        _controlled_verify_result.append(cv_result)
+        print(f"    [controlled-verify] kind={cv_result['verification_kind']}  "
+              f"passed={cv_result['tests_passed']}  failed={cv_result['tests_failed']}  "
+              f"exit={cv_result['exit_code']}  elapsed={elapsed:.0f}ms")
+        return result
+
+    _DA.run = _verifying_run
+
     t_llm = Timer("LLM agent loop (Bedrock)", parent=t_agent)
     try:
         process_instance(instance, attempt_dir, config, progress)
     except Exception as e:
         print(f"    [agent] ERROR: {e}")
         traceback.print_exc()
+    finally:
+        _DA.run = _orig_run  # always restore — even if process_instance errors
     t_llm.stop()
 
     # Parse traj for usage + submission
@@ -1001,13 +1249,31 @@ def run_agent(
             patch_for_body = sub_from_traj or sub_from_traj_diff or ""
             problem_stmt = instance.get("problem_statement", "")
             jingu_body = extract_jingu_body(traj, patch_for_body, problem_stmt)
+            # Merge controlled verify result (primary signal) into jingu_body.
+            # controlled_verify supersedes the post-hoc excerpt parse.
+            if _controlled_verify_result:
+                cv = _controlled_verify_result[0]
+                jingu_body["controlled_verify"] = cv
+                # Promote controlled_verify.tests_passed into test_results
+                # so extract_test_counts() and classify_failure_v2() see the clean signal.
+                if cv["verification_kind"] == "controlled_fail_to_pass":
+                    jingu_body["test_results"]["ran_tests"] = True
+                    jingu_body["test_results"]["controlled_passed"] = cv["tests_passed"]
+                    jingu_body["test_results"]["controlled_failed"] = cv["tests_failed"]
+                    jingu_body["test_results"]["controlled_exit_code"] = cv["exit_code"]
             # Write jingu_body back into traj.json so gate_runner.js can read it
             traj["jingu_body"] = jingu_body
             traj_path.write_text(json.dumps(traj, indent=2))
+            cv_summary = ""
+            if _controlled_verify_result:
+                cv = _controlled_verify_result[0]
+                cv_summary = (f" cv_kind={cv['verification_kind']}"
+                              f" cv_passed={cv['tests_passed']} cv_failed={cv['tests_failed']}")
             print(f"    [jingu_body] extracted: exit={jingu_body['exit_status']} "
                   f"files_written={len(jingu_body['files_written'])} "
                   f"tests_ran={jingu_body['test_results']['ran_tests']} "
-                  f"patch_hunks={jingu_body['patch_summary']['hunks']}")
+                  f"patch_hunks={jingu_body['patch_summary']['hunks']}"
+                  f"{cv_summary}")
         except (json.JSONDecodeError, OSError):
             pass
 

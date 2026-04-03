@@ -103,3 +103,52 @@ def run():
 
 if __name__ == "__main__":
     sys.exit(0 if run() else 1)
+
+
+def test_controlled_verify_priority():
+    """extract_test_counts should use controlled_verify result when available."""
+    from run_with_jingu_gate import extract_test_counts
+
+    # controlled_verify takes priority over excerpt
+    jb_with_cv = {
+        "test_results": {
+            "excerpt": "FAILED (failures=5)",  # would parse as 0
+            "exit_code": 1,
+            "ran_tests": True,
+            "controlled_passed": 3,  # promoted from controlled_verify
+        },
+        "controlled_verify": {
+            "verification_kind": "controlled_fail_to_pass",
+            "tests_passed": 3,
+            "tests_failed": 2,
+            "exit_code": 1,
+        },
+    }
+    got = extract_test_counts(jb_with_cv)
+    assert got == 3, f"expected 3 (controlled_verify), got {got}"
+    print("  PASS  controlled_verify takes priority over excerpt (3 vs would-be 0)")
+
+    # controlled_error falls through to excerpt parsing
+    jb_cv_error = {
+        "test_results": {
+            "excerpt": "3 passed in 0.1s",
+            "exit_code": 0,
+            "ran_tests": True,
+        },
+        "controlled_verify": {
+            "verification_kind": "controlled_error",
+            "tests_passed": -1,
+            "tests_failed": -1,
+        },
+    }
+    got2 = extract_test_counts(jb_cv_error)
+    assert got2 == 3, f"expected 3 (excerpt fallback), got {got2}"
+    print("  PASS  controlled_error falls through to excerpt parsing (got 3)")
+
+    print("\n==================================================")
+    print("  controlled_verify priority tests: 2/2 passed")
+
+
+if __name__ == "__main__" and "test_controlled_verify_priority" not in __import__("sys").argv:
+    pass
+
