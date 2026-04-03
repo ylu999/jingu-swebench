@@ -33,8 +33,10 @@
  */
 
 // Resolve jingu-trust-gate dist — use env var for portability (local dev vs cloud)
+import { homedir } from "os";
+const _HOME = process.env.HOME || homedir();
 const _GATE_DIST = process.env.JINGU_TRUST_GATE_DIST
-  ?? "/Users/ysl/jingu/repo/jingu-trust-gate/dist/src";
+  ?? `${_HOME}/jingu-swebench/jingu-trust-gate/dist/src`;
 const { approve, reject, downgrade, firstFailing } =
   await import(`${_GATE_DIST}/helpers/index.js`);
 
