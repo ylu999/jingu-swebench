@@ -676,27 +676,45 @@ def _build_test_command(test_ids: list[str]) -> str:
     """
     Build the test command for the given FAIL_TO_PASS test IDs.
 
-    SWE-bench test IDs can be:
-    - Django test runner format: "urlpatterns.tests.SimplifiedURLTests.test_foo"
-    - pytest format: "tests/urlpatterns/test_basic.py::TestClass::test_foo"
+    SWE-bench containers use a conda testbed env.
+    The bare `python` in PATH is /opt/miniconda3/bin/python (base, no packages).
+    Must use testbed python directly: /opt/miniconda3/envs/testbed/bin/python
 
-    Detection: pytest IDs contain '::' or path-like patterns; Django IDs use dots.
+    SWE-bench FAIL_TO_PASS ID formats:
+    - pytest format:  "tests/path/test_foo.py::ClassName::test_method"  (contains '::')
+    - unittest format: "test_method (module.path.ClassName)"            (contains '(')
+    - dot format:      "module.path.ClassName.test_method"
     """
+    import re as _re
+    TESTBED_PYTHON = "/opt/miniconda3/envs/testbed/bin/python"
     if not test_ids:
         return "echo 'no tests'"
-    # If any test ID contains '::' → pytest format
+
+    # pytest format (contains '::')
     if any('::' in t for t in test_ids):
         ids_str = " ".join(f'"{t}"' for t in test_ids)
-        return f"python -m pytest {ids_str} -x --no-header -q 2>&1"
-    # Django format: use manage.py test or direct python -m pytest
-    # SWE-bench django images have manage.py at /testbed/tests/runtests.py
-    # The test IDs are module.TestClass.test_method format
-    ids_str = " ".join(test_ids)
-    # Try runtests.py first (SWE-bench convention), fallback to pytest
-    return (
-        f"python -m pytest {ids_str} -x --no-header -q 2>&1 || "
-        f"python tests/runtests.py {ids_str} --verbosity=2 2>&1"
-    )
+        return f"{TESTBED_PYTHON} -m pytest {ids_str} -x --no-header -q 2>&1"
+
+    # Parse module paths from test IDs.
+    # unittest format: "test_name (module.path.ClassName)" → extract "module.path.ClassName"
+    # dot format: "module.path.ClassName.test_name" → use as-is
+    modules = set()
+    for t in test_ids:
+        m = _re.match(r'.+\((.+)\)\s*$', t)
+        if m:
+            # unittest format — extract class path, strip class name to get module
+            class_path = m.group(1)  # e.g. "forms_tests.tests.test_media.FormsMediaTestCase"
+            # Drop the last component (class name) to get the module
+            parts = class_path.rsplit('.', 1)
+            modules.add(parts[0] if len(parts) > 1 else class_path)
+        else:
+            # dot format — drop last component (method name) to get class path
+            parts = t.rsplit('.', 1)
+            modules.add(parts[0] if len(parts) > 1 else t)
+
+    # Deduplicate and build runtests.py command
+    modules_str = " ".join(sorted(modules))
+    return f"cd /testbed/tests && {TESTBED_PYTHON} runtests.py --verbosity=0 {modules_str} 2>&1"
 
 
 def _parse_test_output_counts(output: str) -> tuple[int, int]:
