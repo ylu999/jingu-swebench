@@ -1,31 +1,41 @@
 """
-retry_controller.py — B3 retry controller for SWE-bench pipeline.
+retry_controller.py — B3 retry controller for SWE-bench pipeline (p177).
 
 Given attempt 1's patch + telemetry, produces a structured RetryPlan
 that gives the agent specific diagnostic guidance for attempt 2.
 
-This is the minimal "cognition" layer:
-  failure → diagnosis → next strategy
+p177 extensions:
+  - ControlDecision: CONTINUE / ADJUST / STOP_NO_SIGNAL / STOP_FAIL
+  - no-signal detection (p164 runner layer): absorbs steps_since_last_signal → STOP_NO_SIGNAL
+  - enforced-principal hints: ENV_LEAKAGE_HARDCODE_PATH + PLAN_NO_FEEDBACK_LOOP
+    violation signals from cognition gate → injected into next_attempt_prompt
+  - declared-only planning principals (P_PLAN_BOTTLENECK_FIRST etc.) → hint only, no hard policy
 
-NOT a judge of patch correctness (that is the benchmark's job).
-Produces targeted prompts based on observable signal:
-  - Which files were changed
-  - Whether tests ran and what they produced
-  - Whether the patch was admitted or rejected by gate
-  - The problem statement and required tests
-
-RetryPlan fields:
-  root_causes:           what likely went wrong in attempt 1
-  must_do:               concrete actions for attempt 2
-  must_not_do:           things to avoid (based on attempt 1 failure pattern)
-  validation_requirement: how to know the fix is correct
-  next_attempt_prompt:   ready-to-inject hint string for the agent
+Decision priority:
+  1. tests passed → STOP_OK (caller should check this before calling)
+  2. steps_since_last_signal >= NO_SIGNAL_THRESHOLD → STOP_NO_SIGNAL (P7)
+  3. exec_feedback empty at attempt > 1 → STOP_FAIL (NBR)
+  4. max_attempts reached → STOP_FAIL
+  5. enforced-principal violations present → ADJUST (add violation hint)
+  6. failure_class × same pattern twice → ADJUST (separation_of_concerns)
+  7. failure_class == exploration_loop → ADJUST (bottleneck_first hint)
+  8. otherwise → CONTINUE / ADJUST with standard hint
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Literal, Optional
+
+# P7 no-signal threshold (p164 runner layer)
+NO_SIGNAL_THRESHOLD = 15  # consecutive steps without write/submit → STOP_NO_SIGNAL
+
+# Enforced-principal violation codes from jingu-policy-core (p175/p176)
+# Only these drive hard ADJUST — declared-only principals are hint-only
+ENFORCED_VIOLATION_CODES = frozenset({
+    "ENV_LEAKAGE_HARDCODE_PATH",   # P_DEBUG_ENV_INDEPENDENCE (p175)
+    "PLAN_NO_FEEDBACK_LOOP",       # P_PLAN_CLOSE_THE_LOOP (p176)
+})
 
 # ── Failure taxonomy (mirrors FAILURE_TAXONOMY.md in jingu-policy-core) ──────
 
@@ -169,6 +179,26 @@ class RetryPlan:
     validation_requirement: str
     next_attempt_prompt: str
     raw_response: str = ""
+    # p177 extensions
+    control_action: Literal["CONTINUE", "ADJUST", "STOP_NO_SIGNAL", "STOP_FAIL"] = "CONTINUE"
+    principal_violations: list[str] = field(default_factory=list)
+
+
+# ── Enforced-principal hint templates (p175/p176) ────────────────────────────
+
+_PRINCIPAL_VIOLATION_HINTS: dict[str, str] = {
+    "ENV_LEAKAGE_HARDCODE_PATH": (
+        "ENVIRONMENT ASSUMPTION VIOLATION: Your diagnosis or fix assumes a local path or "
+        "environment variable (e.g. HOME, PATH, /root/, /Users/) that may not exist in the "
+        "execution environment. Verify your fix works without machine-local assumptions. "
+        "Use relative paths or explicitly detect the environment before relying on it. "
+    ),
+    "PLAN_NO_FEEDBACK_LOOP": (
+        "PLANNING VIOLATION: Your plan has no verifiable feedback loop. "
+        "Before submitting a plan or multi-step fix, state how you will confirm each step "
+        "succeeded (e.g. 'run test X to verify', 'check output Y'). "
+    ),
+}
 
 
 def build_retry_plan(
@@ -182,24 +212,68 @@ def build_retry_plan(
     patch_fp: Optional[dict] = None,
     prev_patch_fp: Optional[dict] = None,
     exec_feedback: str = "",
+    attempt: int = 1,
+    steps_since_last_signal: int = 0,
+    principal_violation_codes: Optional[list[str]] = None,
 ) -> RetryPlan:
     """
     Deterministic failure classification → intervention mapping → RetryPlan.
 
-    No LLM involved. hint = deterministic prefix + exec_feedback excerpt.
+    p177 extension: also computes control_action based on:
+    - steps_since_last_signal (P7 no-signal detector, p164 runner layer)
+    - principal_violation_codes (enforced principals only: ENV_LEAKAGE + PLAN_LOOP)
+
+    No LLM involved.
     """
     fp = patch_fp or {}
     failure_type = classify_failure(jingu_body, fp, prev_patch_fp, exec_feedback)
     intervention = _INTERVENTIONS.get(failure_type, _INTERVENTIONS["unknown"])
 
-    hint = (intervention["hint_prefix"] + exec_feedback[:300]).strip()
+    # ── Compute control_action (decision priority order) ─────────────────────
+
+    # P2: no-signal stop (P7 principle, p164 runner layer)
+    if steps_since_last_signal >= NO_SIGNAL_THRESHOLD:
+        control_action = "STOP_NO_SIGNAL"
+        hint = (
+            f"STOP: agent ran {steps_since_last_signal} consecutive steps without producing "
+            f"any new signal (no file write, no submit). This is a no-signal exploration loop. "
+            f"Terminating attempt — retry with explicit file target. "
+        )
+        return RetryPlan(
+            root_causes=[f"no_signal_streak={steps_since_last_signal}"],
+            must_do=["Immediately identify target file from failing test", "Make minimal change", "Submit"],
+            must_not_do=["Do not continue reading without committing to a specific change"],
+            validation_requirement="Run the required FAIL_TO_PASS tests and confirm they pass",
+            next_attempt_prompt=hint[:400],
+            control_action="STOP_NO_SIGNAL",
+        )
+
+    # P3: NBR — no blind retry (handled in run_with_jingu_gate.py as RuntimeError)
+    # P8: enforced-principal violations → ADJUST with targeted hint
+    viol_codes = [c for c in (principal_violation_codes or []) if c in ENFORCED_VIOLATION_CODES]
+    principal_hints = [_PRINCIPAL_VIOLATION_HINTS[c] for c in viol_codes if c in _PRINCIPAL_VIOLATION_HINTS]
+
+    # ── Build hint ────────────────────────────────────────────────────────────
+    hint_parts = []
+    if principal_hints:
+        hint_parts.extend(principal_hints)
+    hint_parts.append(intervention["hint_prefix"])
+    if exec_feedback:
+        hint_parts.append(exec_feedback[:300])
+    hint = " ".join(hint_parts).strip()
+
+    control_action: Literal["CONTINUE", "ADJUST", "STOP_NO_SIGNAL", "STOP_FAIL"] = "CONTINUE"
+    if viol_codes or failure_type != "unknown":
+        control_action = "ADJUST"
 
     return RetryPlan(
-        root_causes=[f"failure_type={failure_type}"],
+        root_causes=[f"failure_type={failure_type}"] + [f"violation={c}" for c in viol_codes],
         must_do=intervention["must_do"],
         must_not_do=intervention["must_not_do"],
         validation_requirement="Run the required FAIL_TO_PASS tests and confirm they pass",
-        next_attempt_prompt=hint[:400],
+        next_attempt_prompt=hint[:600],
+        control_action=control_action,
+        principal_violations=viol_codes,
     )
 
 

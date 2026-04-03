@@ -179,6 +179,96 @@ def patch_fingerprint(patch: str) -> dict:
             "lines_added": added, "lines_removed": removed}
 
 
+# Tool names that produce a meaningful signal (write or submit)
+_SIGNAL_TOOL_NAMES: frozenset[str] = frozenset({
+    "edit_file", "write_file", "create_file",
+    "str_replace_editor", "str_replace", "apply_patch",
+    "bash_write", "patch", "submit",
+})
+
+
+def compute_steps_since_last_signal(traj_msgs: list[dict]) -> int:
+    """
+    Count consecutive trailing steps with no write/submit tool call.
+
+    p164 runner layer: feeds steps_since_last_signal into build_retry_plan()
+    for P7 no-signal detection (STOP_NO_SIGNAL when >= NO_SIGNAL_THRESHOLD).
+
+    A "step" is one assistant turn. A "signal" is any write or submit tool call.
+    Counts from the end of the conversation backward to the most recent signal.
+    """
+    steps_without_signal = 0
+    for msg in reversed(traj_msgs):
+        if msg.get("role") != "assistant":
+            continue
+        actions = msg.get("extra", {}).get("actions", [])
+        has_signal = False
+        for action in actions:
+            if isinstance(action, dict):
+                tool_name = action.get("tool", action.get("name", "")).lower()
+            else:
+                tool_name = str(action).lower()
+            if any(sig in tool_name for sig in _SIGNAL_TOOL_NAMES):
+                has_signal = True
+                break
+        if has_signal:
+            break
+        steps_without_signal += 1
+    return steps_without_signal
+
+
+# Enforced violation codes detectable from a cognition declaration (Python-side check)
+# Mirrors ENFORCED_VIOLATION_CODES in retry_controller.py — keep in sync.
+_LOCAL_PATH_PATTERNS = ("/root/", "/home/", "/Users/", "~/.claude", "/tmp/jingu")
+_ENV_CHECK_KEYWORDS = (
+    "env check", "smoke test", "activation proof", "preflight",
+    "node_modules", "npm install", "pip install",
+)
+_FEEDBACK_KEYWORDS = (
+    "verify", "check", "test", "observe", "measure", "confirm",
+    "run", "result", "output", "pass", "fail",
+)
+
+
+def extract_principal_violation_codes(decl: dict | None) -> list[str]:
+    """
+    Lightweight Python-side detection of enforced-principal violations.
+
+    Returns violation codes from ENFORCED_VIOLATION_CODES that are detectable
+    from the cognition declaration alone — feeds into build_retry_plan() as
+    principal_violation_codes for targeted hint injection.
+
+    Checks:
+      ENV_LEAKAGE_HARDCODE_PATH — P_DEBUG_ENV_INDEPENDENCE declared but no env
+        validation evidence, OR evidence contains local path patterns
+      PLAN_NO_FEEDBACK_LOOP — P_PLAN_CLOSE_THE_LOOP declared but no feedback
+        evidence keywords
+    """
+    if not decl:
+        return []
+    codes: list[str] = []
+    principals = decl.get("principals_used", decl.get("principals", []))
+    evidence_items = decl.get("evidence", [])
+    evidence_texts = [
+        (e.get("content", "") if isinstance(e, dict) else str(e)).lower()
+        for e in evidence_items
+    ]
+    combined_evidence = " ".join(evidence_texts)
+
+    if "P_DEBUG_ENV_INDEPENDENCE" in principals:
+        has_local_path = any(p.lower() in combined_evidence for p in _LOCAL_PATH_PATTERNS)
+        has_env_check = any(kw in combined_evidence for kw in _ENV_CHECK_KEYWORDS)
+        if has_local_path or not has_env_check:
+            codes.append("ENV_LEAKAGE_HARDCODE_PATH")
+
+    if "P_PLAN_CLOSE_THE_LOOP" in principals:
+        has_feedback = any(kw in combined_evidence for kw in _FEEDBACK_KEYWORDS)
+        if not has_feedback:
+            codes.append("PLAN_NO_FEEDBACK_LOOP")
+
+    return codes
+
+
 def build_execution_feedback(
     jingu_body: dict,
     fail_to_pass_tests: list[str],
@@ -912,10 +1002,12 @@ def run_with_jingu(instance_id: str, output_dir: Path, max_attempts: int = 3) ->
                     # Additive: enriches exec_feedback when contradiction detected.
                     # Opt-in: no FIX_TYPE declaration → check skipped silently.
                     _traj_path = output_dir / f"attempt_{attempt}" / instance_id / f"{instance_id}.traj.json"
+                    _decl = None
+                    _traj_msgs_for_signal: list[dict] = []
                     if _traj_path.exists():
                         try:
-                            _traj_msgs = json.loads(_traj_path.read_text()).get("messages", [])
-                            _last_msg = extract_last_agent_message(_traj_msgs)
+                            _traj_msgs_for_signal = json.loads(_traj_path.read_text()).get("messages", [])
+                            _last_msg = extract_last_agent_message(_traj_msgs_for_signal)
                             _decl = extract_declaration(_last_msg)
                             if _decl:
                                 _signals = extract_patch_signals(patch)
@@ -930,8 +1022,16 @@ def run_with_jingu(instance_id: str, output_dir: Path, max_attempts: int = 3) ->
                                 print(f"    [cognition] skip  (no FIX_TYPE declaration)")
                         except (json.JSONDecodeError, OSError):
                             pass
+                    # p164 runner layer: no-signal streak detection
+                    _steps_since_signal = compute_steps_since_last_signal(_traj_msgs_for_signal)
+                    if _steps_since_signal > 0:
+                        print(f"    [no-signal] steps_since_last_signal={_steps_since_signal}")
+                    # p175/p176: enforced-principal violation codes (Python-side)
+                    _principal_viol_codes = extract_principal_violation_codes(_decl)
+                    if _principal_viol_codes:
+                        print(f"    [principal-viol] {_principal_viol_codes}")
                     if RETRY_CONTROLLER_ENABLED:
-                        # Phase 2B: LLM retry-controller builds on execution feedback
+                        # Phase 2B: retry-controller builds on execution feedback + p177 extensions
                         # prev_patch_fp: fingerprint of the attempt before this one
                         prev_fp = attempts_log[-2]["patch_fp"] if len(attempts_log) >= 2 else None
                         t_ctrl = Timer(f"B3 retry-controller attempt={attempt}", parent=t_inst)
@@ -946,12 +1046,16 @@ def run_with_jingu(instance_id: str, output_dir: Path, max_attempts: int = 3) ->
                             patch_fp=fp,
                             prev_patch_fp=prev_fp,
                             exec_feedback=exec_feedback,
+                            attempt=attempt,
+                            steps_since_last_signal=_steps_since_signal,
+                            principal_violation_codes=_principal_viol_codes,
                         )
                         t_ctrl.stop()
-                        print(f"    [retry-ctrl] root_causes={retry_plan.root_causes}")
+                        print(f"    [retry-ctrl] action={retry_plan.control_action}  "
+                              f"root_causes={retry_plan.root_causes}")
                         print(f"    [retry-ctrl] must_not_do={retry_plan.must_not_do}")
                         print(f"    [retry-ctrl] hint={retry_plan.next_attempt_prompt[:200]}")
-                        # next_attempt_prompt already merges hint_prefix + exec_feedback + LLM
+                        # next_attempt_prompt already merges hint_prefix + exec_feedback
                         last_failure = retry_plan.next_attempt_prompt[:600]
                     else:
                         last_failure = exec_feedback[:400]
