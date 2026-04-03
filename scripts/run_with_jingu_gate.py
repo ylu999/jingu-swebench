@@ -1341,18 +1341,6 @@ BASE_CONFIG = {
         "step_limit": 100,      # DBO: do not tune this without failure classification.
                                 # Current classified failures use wrong_direction type —
                                 # which requires must_not_do hints, not fewer steps.
-        # Override system_template: redefine agent role as patch-generator, not shell operator.
-        # SWE-bench official design: agent produces a unified diff patch only.
-        # The evaluation harness handles env setup, git apply, and test execution.
-        # Agent must NOT install packages, run tests to verify, or manage environment.
-        "system_template": (
-            "You are a software patch generator for SWE-bench. "
-            "Your ONLY job is to produce a unified diff patch that fixes the described issue. "
-            "The evaluation environment is already fully configured — you must NOT install any packages, "
-            "modify the environment, or run tests to verify your fix. "
-            "Read the relevant source code, understand the issue, edit the source files to fix it, "
-            "then submit your patch. Nothing else."
-        ),
     },
 }
 
@@ -1394,46 +1382,12 @@ def run_agent(
 
     t_agent = Timer(f"agent attempt={attempt}", parent=parent_timer)
 
-    # Start from swebench.yaml defaults (provides system_template, instance_template, etc.)
+    # Start from jingu-swebench.yaml (fork of swebench.yaml with FORBIDDEN ACTIONS block,
+    # patched system_template, and Recommended Workflow steps 2/4/5 removed).
+    # Config lives in mini-swe-agent/src/minisweagent/config/benchmarks/jingu-swebench.yaml.
     t_cfg = Timer("config load", parent=t_agent)
-    config = get_config_from_spec("swebench.yaml")
+    config = get_config_from_spec("jingu-swebench.yaml")
     config = recursive_merge(config, BASE_CONFIG)
-
-    # ── PATCH_ONLY_ENFORCEMENT ─────────────────────────────────────────────────
-    # SWE-bench official design: agent generates a unified diff patch ONLY.
-    # The evaluation harness (Docker) handles env setup, git apply, and test execution.
-    # Prepend FORBIDDEN ACTIONS to instance_template so it appears before task description.
-    #
-    # Root cause of violations (swebench.yaml lines that were misleading agents):
-    #   - "If a tool isn't available, you can also install it" → pip/conda install
-    #   - Recommended Workflow step 2: "Create a script to reproduce the issue" → test runs
-    #   - Recommended Workflow step 4: "Verify your fix works by running your script again" → test runs
-    #
-    # These are overridden by the explicit FORBIDDEN ACTIONS block below.
-    _patch_only_header = (
-        "## CRITICAL CONSTRAINTS — READ BEFORE ANYTHING ELSE\n\n"
-        "You are operating inside a SWE-bench evaluation container. "
-        "The environment is ALREADY fully configured. Your ONLY task is to produce a correct patch.\n\n"
-        "### FORBIDDEN ACTIONS (will be detected and flagged):\n"
-        "- `pip install`, `pip3 install`, `uv pip install`, `uv add` — FORBIDDEN\n"
-        "- `conda install`, `conda update` — FORBIDDEN\n"
-        "- `python setup.py install`, `python setup.py develop` — FORBIDDEN\n"
-        "- `apt install`, `apt-get install`, `brew install`, `npm install` — FORBIDDEN\n"
-        "- Creating test scripts or reproduction scripts to verify your fix — FORBIDDEN\n"
-        "- Running the full test suite to check your patch — FORBIDDEN\n\n"
-        "### WHY: The evaluation harness will apply your patch via `git apply` and run the "
-        "official test suite in a clean environment. You do not need to verify — just fix.\n\n"
-        "### ALLOWED:\n"
-        "- Read source files to understand the issue\n"
-        "- Edit source files (the actual code, not tests) to fix the issue\n"
-        "- Run `git diff` to inspect your changes before submitting\n"
-        "- Run the specific failing tests (from FAIL_TO_PASS list) to check understanding — "
-        "but only if the test environment is already working without pip/conda\n\n"
-        "---\n\n"
-    )
-    config["agent"]["instance_template"] = (
-        _patch_only_header + config["agent"]["instance_template"]
-    )
 
     # Build instance_template_extra: tests that must pass + optional retry hint
     extra_parts = []
