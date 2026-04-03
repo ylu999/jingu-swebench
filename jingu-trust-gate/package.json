@@ -1,0 +1,59 @@
+{
+  "name": "jingu-trust-gate",
+  "version": "0.1.20",
+  "description": "A deterministic trust gate for LLM systems",
+  "type": "module",
+  "main": "dist/src/index.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "build:cjs": "tsc -p tsconfig.cjs.json && echo '{\"type\":\"commonjs\"}' > dist-cjs/package.json",
+    "build:all": "npm run build && npm run build:cjs",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "npm run build:all && node --test 'dist/tests/**/*.test.js'",
+    "demo": "npm run build && node dist/demo/demo.js",
+    "demo:aha": "npm run build && node dist/demo/aha-moment-demo.js",
+    "demo:rpp": "npm run build && node dist/demo/rpp-three-layer-demo.js",
+    "smoke": "node hooks/smoke-test.cjs"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ylu999/jingu-trust-gate.git"
+  },
+  "files": [
+    "dist/src",
+    "dist-cjs",
+    "hooks",
+    "README.md",
+    "LICENSE"
+  ],
+  "exports": {
+    ".": {
+      "import": "./dist/src/index.js",
+      "require": "./dist-cjs/rpp/rpp-gate.js",
+      "types": "./dist/src/index.d.ts"
+    }
+  },
+  "keywords": [
+    "llm",
+    "trust-gate",
+    "admission-control",
+    "hallucination",
+    "rag",
+    "grounding",
+    "policy",
+    "audit"
+  ],
+  "author": "ylu999",
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/ylu999/jingu-trust-gate/issues"
+  },
+  "homepage": "https://github.com/ylu999/jingu-trust-gate#readme",
+  "devDependencies": {
+    "@types/node": "^25.5.0",
+    "typescript": "^6.0.2"
+  },
+  "dependencies": {
+    "jingu-protocol": "^0.1.7"
+  }
+}
