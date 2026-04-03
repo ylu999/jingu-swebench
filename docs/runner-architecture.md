@@ -2,183 +2,109 @@
 
 ## AWS Account
 
-**Account**: `235494812052` (jingu 专用账号)
+**Account**: `235494812052` (jingu dedicated)
 **Region**: `us-west-2`
 
-**不使用 `cloud` SSH alias** — 那台机器是 Amazon 内部 dev desktop（账号 `123367104812`），
-不在 jingu 账号里，credentials 12h 过期，永远需要手动推。
+---
+
+## Execution Model
+
+All runs execute inside a Docker container launched on EC2 via SSM.
+
+```
+Local machine (boto3)
+  -> SSM send_command -> EC2 instance
+    -> docker run --privileged jingu-swebench:latest
+      -> docker-entrypoint.sh (starts dockerd)
+        -> run_with_jingu_gate.py
+          -> mini-swe-agent (per instance, parallel workers)
+            -> SWE-bench eval container (Docker-in-Docker)
+```
+
+**Why --privileged**: The container needs to start SWE-bench eval containers (Docker-in-Docker).
+**Why EC2, not ECS**: ECS does not support privileged DinD at the required level.
 
 ---
 
-## 两种运行模式
+## Infrastructure
 
-### Mode A — ECS (生产批量跑，不推荐用于 p169 实验)
+| Resource | ID / Name | Notes |
+|----------|-----------|-------|
+| ECR | `235494812052.dkr.ecr.us-west-2.amazonaws.com/jingu-swebench:latest` | Runner image |
+| ASG | `jingu-swebench-ecs-asg` | Build and run instances |
+| Launch Template | `lt-024c610e94921a069` v2 | c5.9xlarge, builder AMI |
+| Builder AMI | `ami-068cfa06f1b8dd28c` | Pre-installed: git, nodejs 18, npm, docker, aws cli, ssm agent |
+| IAM Profile | `ecsInstanceRole` | Bedrock + ECR push + SSM permissions |
 
-ECS task 跑在 Docker container 里，但：
-- container 内部需要 Docker daemon（testbed 是 Docker 容器）
-- ECS 不支持 Docker-in-Docker
-- **结论：ECS 不能跑 run_with_jingu_gate.py**
+**ecsInstanceRole permissions:**
+- `jingu-swebench-bedrock` (inline): bedrock:InvokeModel + InvokeModelWithResponseStream
+- `jingu-swebench-ecr-push` (inline): ECR push/pull
+- `AmazonSSMManagedInstanceCore` (managed): SSM
+- `AmazonEC2ContainerServiceforEC2Role` (managed): ECS agent
 
-ASG `jingu-swebench-ecs-asg` + LT `jingu-swebench-ecs-lt` 仅用于 ECS worker，不用于 runner。
-
-### Mode B — Runner EC2 (实验跑，当前推荐方案)
-
-直接在 EC2 host 上跑 Python 脚本，EC2 有 Docker daemon，可以起 testbed container。
-
-**需要的环境**：
-- Python 3.12 + pip (mise 管理)
-- Node.js 18 (gate_runner.js 需要)
-- Docker (testbed container)
-- jingu-swebench repo (`~/jingu-swebench/`)
-- jingu-trust-gate (`~/jingu-swebench/jingu-trust-gate/`)
-- boto3 + litellm + 其他依赖
-
-**当前问题**：`ami-068cfa06f1b8dd28c` (jingu-swebench-builder-20260402) 上没有：
-- mise / Python 3.12
-- boto3
-- node
-
-需要基于现有 ECS 实例重建 AMI。
+Credentials are provided by EC2 instance metadata (IMDSv2), auto-rotated hourly. No manual config needed.
 
 ---
 
-## Infrastructure 现状
+## Scripts Baked Into Image
 
-| 资源 | ID / 名称 | 说明 |
-|------|-----------|------|
-| AMI (runner) | `ami-093e263e1bc987212` | jingu-swebench-runner-20260403 — Python 3.12/node 18/boto3/litellm/minisweagent/jingu-swebench |
-| AMI (ECS) | `ami-060921e471f88bf4c` | ECS worker AMI，有 Python 3.9/Docker，**无 mise/boto3/node** |
-| ASG | `jingu-swebench-ecs-asg` | ECS worker 用，LT=jingu-swebench-ecs-lt |
-| LT (ECS) | `lt-024c610e94921a069` jingu-swebench-ecs-lt | c5.9xlarge, ECS AMI |
-| LT (runner) | `lt-03cd70e0699fbcc90` jingu-swebench-runner-lt | c5.4xlarge, runner AMI v2 (default) |
-| IAM Profile | `ecsInstanceRole` | 两个 LT 都用，有 Bedrock + ECR + SSM 权限 |
-| SG | `sg-098d7e41bdb28cd46` | 两个 LT 都用 |
+Scripts are COPYed into the Docker image at build time. They are NOT loaded from git at runtime.
+**After any script change: git push -> rebuild image -> push to ECR.**
+
+Image path: `/app/scripts/`
+
+Dockerfile COPY list:
+- `run_with_jingu_gate.py`, `jingu_gate_bridge.py`, `retry_controller.py`
+- `strategy_logger.py`, `aggregate_strategies.py`, `preflight.py`
+- `patch_reviewer.py`, `patch_signals.py`, `declaration_extractor.py`, `cognition_check.py`
+- `gate_runner.js`, `patch_admission_policy.js`
+
+**Adding a new script: must also add to Dockerfile COPY list, then rebuild.**
 
 ---
 
-## 正确的 Runner EC2 启动流程
+## Model
 
-### Step 1 — 准备好的 Runner AMI（一次性）
+**claude-sonnet-4-5** via Amazon Bedrock cross-region inference.
 
-当前 `ami-068cfa06f1b8dd28c` 缺 Python 3.12 + boto3 + node。
-需要起一台，手动装好，再 bake 成新 AMI，更新 runner LT。
+Default workers: 10 (conservative; Bedrock quota: 10k RPM / 5M TPM).
+
+---
+
+## Results Layout
+
+```
+/root/results/            (EC2 host, mounted as /app/results in container)
+  <batch-name>.log        (nohup log)
+  <batch-name>/
+    jingu-predictions.jsonl   (or baseline-predictions.jsonl)
+    run_report.json
+    strategy_log.jsonl
+    <instance_id>/
+      traj.json
+      patch.diff
+      gate_log.json
+```
+
+---
+
+## Monitoring
 
 ```bash
-# 起临时实例
-INSTANCE_ID=$(aws ec2 run-instances \
-  --region us-west-2 \
-  --launch-template LaunchTemplateId=lt-03cd70e0699fbcc90 \
-  --count 1 \
-  --query 'Instances[0].InstanceId' --output text)
-
-# 等 SSM ready
-aws ec2 wait instance-running --region us-west-2 --instance-ids $INSTANCE_ID
-
-# SSM 进去装环境（用 start-session 交互式，或 send-command 批量）
-aws ssm start-session --region us-west-2 --target $INSTANCE_ID
-
-# 在实例里：
-# curl -fsSL https://mise.run | sh
-# mise use --global python@3.12 node@18
-# pip install boto3 litellm minisweagent
-# git clone https://github.com/ylu999/jingu-swebench ~/jingu-swebench
-# cd ~/jingu-swebench && npm install  # 安装 jingu-trust-gate
-
-# bake AMI
-NEW_AMI=$(aws ec2 create-image \
-  --instance-id $INSTANCE_ID \
-  --name "jingu-swebench-runner-$(date +%Y%m%d)" \
-  --no-reboot \
-  --region us-west-2 \
-  --query 'ImageId' --output text)
-
-# 更新 runner LT 到新 AMI
-aws ec2 create-launch-template-version \
-  --region us-west-2 \
-  --launch-template-id lt-03cd70e0699fbcc90 \
-  --source-version '$Latest' \
-  --launch-template-data "{\"ImageId\":\"$NEW_AMI\"}"
-
-# terminate 临时实例
-aws ec2 terminate-instances --region us-west-2 --instance-ids $INSTANCE_ID
+tail -f /root/results/<batch-name>.log
+grep 'progress' /root/results/<batch-name>.log | tail -3
+wc -l /root/results/strategy_log.jsonl
 ```
 
-### Step 2 — 每次跑 batch 的流程
-
-```bash
-# 1. 起 runner 实例
-INSTANCE_ID=$(aws ec2 run-instances \
-  --region us-west-2 \
-  --launch-template LaunchTemplateId=lt-03cd70e0699fbcc90 \
-  --count 1 \
-  --query 'Instances[0].InstanceId' --output text)
-
-aws ec2 wait instance-running --region us-west-2 --instance-ids $INSTANCE_ID
-echo "Instance: $INSTANCE_ID"
-
-# 2. 等 SSM agent ready (约 60s)
-sleep 60
-
-# 3. 验证 credentials (instance profile 自动提供，无需任何手动操作)
-aws ssm send-command \
-  --region us-west-2 \
-  --instance-ids $INSTANCE_ID \
-  --document-name "AWS-RunShellScript" \
-  --parameters '{"commands":["python3 -c \"import boto3; print(boto3.client(\\\"sts\\\",region_name=\\\"us-west-2\\\").get_caller_identity()[\\\"Arn\\\"])\""]}'
-
-# 4. pull latest scripts
-aws ssm send-command \
-  --region us-west-2 \
-  --instance-ids $INSTANCE_ID \
-  --document-name "AWS-RunShellScript" \
-  --parameters '{"commands":["cd ~/jingu-swebench && git pull origin main"]}'
-
-# 5. launch batch
-CMD_ID=$(aws ssm send-command \
-  --region us-west-2 \
-  --instance-ids $INSTANCE_ID \
-  --document-name "AWS-RunShellScript" \
-  --timeout-seconds 7200 \
-  --parameters '{"commands":["cd ~/jingu-swebench && python3 scripts/run_with_jingu_gate.py --instance-ids django__django-10914 django__django-11910 --output ~/results/p169-treatment --workers 5 > ~/results/p169.log 2>&1"]}' \
-  --query 'Command.CommandId' --output text)
-
-# 6. 查进度
-aws ssm get-command-invocation \
-  --region us-west-2 \
-  --command-id $CMD_ID \
-  --instance-id $INSTANCE_ID \
-  --query '{Status:Status,Out:StandardOutputContent}' --output json
-
-# 7. 跑完后 terminate
-aws ec2 terminate-instances --region us-west-2 --instance-ids $INSTANCE_ID
-```
+Completion signal: `[progress] N/N done` and `report saved -> /app/results/.../run_report.json`
 
 ---
 
-## IAM — ecsInstanceRole 权限
+## Common Issues
 
-```
-inline: jingu-swebench-bedrock   → bedrock:InvokeModel + InvokeModelWithResponseStream
-inline: jingu-swebench-ecr-push  → ECR push/pull (us-west-2 repository)
-managed: AmazonSSMManagedInstanceCore        → SSM agent (start-session / send-command)
-managed: AmazonEC2ContainerServiceforEC2Role → ECS agent
-managed: InfoSecHostMonitoringPolicy-DO-NOT-DELETE
-```
-
-credentials 由 EC2 metadata service (IMDSv2) 自动提供，每小时轮转，**永不过期**。
-boto3 默认 credential chain 会自动使用，无需任何配置。
-
----
-
-## 常见问题
-
-**Q: credentials 过期**
-A: 如果在 jingu 账号 EC2 上出现，说明 `~/.aws/credentials` 里有旧的静态 token 覆盖了 instance profile。
-删掉或 rename：`mv ~/.aws/credentials ~/.aws/credentials.bak`
-
-**Q: gate_runner.js 找不到模块**
-A: `JINGU_TRUST_GATE_DIST` 未设置，fallback 到本地路径。
-已在 `jingu_gate_bridge.py` 里修复：自动 fallback 到 `~/jingu-swebench/jingu-trust-gate/dist/src`
-
-**Q: SSM InvalidInstanceId**
-A: SSM agent 还没 ready，等 60s 再试。
+| Symptom | Cause | Fix |
+|---------|-------|-----|
+| `ModuleNotFoundError: No module named 'X'` | New script not in Dockerfile COPY | Add to COPY list, rebuild image |
+| `[preflight] FAIL [node]` | `node_modules` missing from image | npm install + rebuild |
+| Script change has no effect | Old image still running | git push + rebuild + push to ECR |
+| `~/.aws/credentials` causes auth errors | Static tokens overriding instance profile | `mv ~/.aws/credentials ~/.aws/credentials.bak` |

@@ -1,144 +1,159 @@
-# Build and Deploy — jingu-swebench ECS Image
+# Build and Deploy — jingu-swebench
 
-## ⚠️ Important: Build on EC2, Not Local Mac
+## Important: Build on EC2, Not Local Mac
 
-Local Docker Desktop is blocked by org policy (requires [amazonians] org login).
-**Always build on EC2** using the builder AMI below.
+Local Docker Desktop is blocked by org policy.
+**Always build on EC2 via SSM** using the builder AMI.
 
 ---
 
-## EC2 Build (Recommended)
+## Builder AMI
 
-### Builder AMI
 `ami-068cfa06f1b8dd28c` — jingu-swebench-builder-20260402
-Pre-installed: git, nodejs 18, docker, aws cli, ssm agent.
+Pre-installed: git, nodejs 18, npm, docker, aws cli, ssm agent.
 
-### Steps
+---
+
+## Build Steps
+
+### 1. Scale up ASG
 
 ```bash
-# 1. Scale up ASG to get a build instance
 aws autoscaling set-desired-capacity \
   --auto-scaling-group-name jingu-swebench-ecs-asg \
   --desired-capacity 1 --region us-west-2
+```
 
-# 2. Wait for instance + SSM to be ready (~60s)
+### 2. Get instance ID (wait ~30s)
+
+```bash
 aws ec2 describe-instances --region us-west-2 \
   --filters "Name=tag:aws:autoscaling:groupName,Values=jingu-swebench-ecs-asg" \
             "Name=instance-state-name,Values=running" \
   --query 'Reservations[0].Instances[0].InstanceId' --output text
+```
 
-# 3. Send build script via SSM (Python boto3 for multiline)
-python3 - <<'PYEOF'
-import boto3
-script = """#!/bin/bash
-dnf install -y nodejs npm git 2>&1 | tail -3
-rm -rf /tmp/jb /tmp/jt
-git clone https://github.com/ylu999/jingu-swebench.git /tmp/jb
-git clone https://github.com/ylu999/jingu-trust-gate.git /tmp/jt
-cd /tmp/jt && npm install && npm run build
-mkdir -p /tmp/jb/jingu-trust-gate
-cp -r /tmp/jt/dist /tmp/jt/package.json /tmp/jt/node_modules /tmp/jb/jingu-trust-gate/
+### 3. Send build + push script via Python boto3
+
+**Use Python boto3, not AWS CLI** — multiline scripts mangle with `--parameters commands=[...]`.
+
+```python
+import boto3, time
+
+INSTANCE_ID = 'i-XXXXXXXXXXXXXXXXX'  # from step 2
+ssm = boto3.client('ssm', region_name='us-west-2')
+
+script = """
+cd /root/jingu-swebench
+git pull origin main
+git log --oneline -3
+
+# npm install for jingu-trust-gate (uses node:18-alpine container for glibc compat)
+docker run --rm \
+  -v /root/jingu-swebench/jingu-trust-gate:/work \
+  -w /work node:18-alpine \
+  npm install --silent 2>&1 | tail -3
+
+# docker build
+GIT_COMMIT=$(git rev-parse HEAD)
+BUILD_TIMESTAMP=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 ECR=235494812052.dkr.ecr.us-west-2.amazonaws.com
 IMAGE=$ECR/jingu-swebench:latest
-GIT_COMMIT=$(git -C /tmp/jb rev-parse HEAD)
-BUILD_TIMESTAMP=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+
 aws ecr get-login-password --region us-west-2 | docker login --username AWS --password-stdin $ECR
-cd /tmp/jb && docker build --platform linux/amd64 \\
-  --build-arg GIT_COMMIT=$GIT_COMMIT --build-arg BUILD_TIMESTAMP=$BUILD_TIMESTAMP -t $IMAGE .
+docker build --build-arg GIT_COMMIT=$GIT_COMMIT --build-arg BUILD_TIMESTAMP=$BUILD_TIMESTAMP -t $IMAGE . 2>&1 | tail -8
 docker push $IMAGE
 echo "PUSHED: commit=$GIT_COMMIT timestamp=$BUILD_TIMESTAMP"
 """
-ssm = boto3.client('ssm', region_name='us-west-2')
+
 resp = ssm.send_command(
-    InstanceIds=['<INSTANCE_ID>'],  # replace with actual instance ID
+    InstanceIds=[INSTANCE_ID],
     DocumentName='AWS-RunShellScript',
     Parameters={'commands': [script]},
     TimeoutSeconds=900,
 )
-print(resp['Command']['CommandId'])
-PYEOF
+cmd_id = resp['Command']['CommandId']
+print('CommandId:', cmd_id)
 
-# 4. Poll for completion
-aws ssm get-command-invocation \
-  --command-id <COMMAND_ID> --instance-id <INSTANCE_ID> \
-  --region us-west-2 --query 'Status' --output text
+# Poll for result
+for _ in range(60):
+    time.sleep(10)
+    try:
+        inv = ssm.get_command_invocation(CommandId=cmd_id, InstanceId=INSTANCE_ID)
+        if inv['Status'] not in ('Pending', 'InProgress'):
+            print('Status:', inv['Status'])
+            print(inv['StandardOutputContent'][-2000:])
+            break
+    except Exception:
+        pass
+```
 
-# 5. Scale ASG back to 0 (save cost)
+### 4. Verify image was pushed
+
+```bash
+aws ecr describe-images --repository-name jingu-swebench --region us-west-2 \
+  --query 'sort_by(imageDetails, &imagePushedAt)[-1].{pushed:imagePushedAt,digest:imageDigest}'
+```
+
+The `pushed` timestamp must be after your last relevant git commit.
+
+### 5. Scale ASG back to 0
+
+```bash
 aws autoscaling set-desired-capacity \
   --auto-scaling-group-name jingu-swebench-ecs-asg \
   --desired-capacity 0 --region us-west-2
 ```
 
-**Note:** If builder AMI doesn't have git/nodejs yet, the script installs them via `dnf`.
-To create a new builder AMI from the current instance:
+---
+
+## Smoke Test Before Any Batch
+
+Always run 1 instance to confirm the image is correct before launching a full batch:
+
+```python
+import boto3, time
+
+INSTANCE_ID = 'i-XXXXXXXXXXXXXXXXX'
+ssm = boto3.client('ssm', region_name='us-west-2')
+
+script = """
+nohup docker run --rm --privileged \
+  -v /root/results:/app/results \
+  jingu-swebench:latest \
+  --instance-ids django__django-11039 \
+  --mode jingu --max-attempts 1 --workers 1 \
+  --output /app/results/smoke-$(date +%Y%m%d) \
+  > /root/results/smoke.log 2>&1 &
+echo "PID: $!"
+sleep 15
+head -20 /root/results/smoke.log
+"""
+
+resp = ssm.send_command(
+    InstanceIds=[INSTANCE_ID],
+    DocumentName='AWS-RunShellScript',
+    Parameters={'commands': [script]},
+)
+```
+
+Check smoke log for: `[preflight] ALL CHECKS PASSED` and `[jingu] START django__django-11039`.
+
+---
+
+## Updating Builder AMI
+
+After installing new system deps on the EC2 instance:
+
 ```bash
 aws ec2 create-image --instance-id <INSTANCE_ID> \
   --name "jingu-swebench-builder-$(date +%Y%m%d)" \
   --no-reboot --region us-west-2
+# Then update memory/MEMORY.md with the new AMI ID
 ```
 
 ---
 
-## Local Build (Reference Only — usually blocked by Docker Desktop org policy)
+## Launching a Batch
 
-Prerequisites:
-- `jingu-swebench` — main repo (scripts, Dockerfile, entrypoint)
-- `jingu-trust-gate` — TypeScript gate, must be built first
-
-## Build Steps
-
-```bash
-# 1. Clone/update both repos side by side
-cd /tmp
-git clone https://github.com/ylu999/jingu-swebench.git jb
-git clone https://github.com/ylu999/jingu-trust-gate.git jt
-
-# 2. Build jingu-trust-gate (produces dist/ + node_modules/)
-cd jt && npm install && npm run build && cd ..
-
-# 3. Copy trust-gate artifacts into jingu-swebench build context
-mkdir -p jb/jingu-trust-gate
-cp -r jt/dist jt/package.json jt/node_modules jb/jingu-trust-gate/
-
-# 4. Build and push (with provenance args)
-GIT_COMMIT=$(git -C jb rev-parse HEAD)
-BUILD_TIMESTAMP=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-ECR=235494812052.dkr.ecr.us-west-2.amazonaws.com
-IMAGE=$ECR/jingu-swebench:latest
-
-cd jb
-aws ecr get-login-password --region us-west-2 | docker login --username AWS --password-stdin $ECR
-docker build --platform linux/amd64 \
-  --build-arg GIT_COMMIT=$GIT_COMMIT \
-  --build-arg BUILD_TIMESTAMP=$BUILD_TIMESTAMP \
-  -t $IMAGE .
-docker push $IMAGE
-echo "Pushed: commit=$GIT_COMMIT timestamp=$BUILD_TIMESTAMP"
-```
-
-## Verify
-
-```bash
-# Check ECR pushed time
-aws ecr describe-images --repository-name jingu-swebench --region us-west-2 \
-  --query 'sort_by(imageDetails, &imagePushedAt)[-1].{pushed:imagePushedAt,digest:imageDigest}'
-
-# RT1 check: confirm image was pushed AFTER relevant commits
-git -C jb log --oneline --since="<pushed_at>"
-# Should be empty if image is up to date
-```
-
-## RT5 — Smoke Test Before Batch
-
-Always run 1 instance before a multi-instance batch to confirm new behavior is live:
-
-```bash
-bash scripts/ecs_launch.sh \
-  --run-id smoke-$(date +%Y%m%d) \
-  --instances "django__django-11039" \
-  --max-attempts 1 \
-  --workers 1 \
-  --wait
-```
-
-Check logs for `[init] git_commit=<expected_sha>` and `[init] declaration_protocol=enabled`.
+See [memory/runner-ops.md](../../.claude/projects/-Users-ysl-jingu/memory/runner-ops.md) for the full batch launch template.
