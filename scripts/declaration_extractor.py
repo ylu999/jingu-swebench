@@ -76,12 +76,12 @@ if __name__ == "__main__":
     sample = """
 After applying the fix:
 
-FIX_TYPE: root_cause_fix
-PRINCIPALS: fix_cause_not_symptom, verify_before_submit
+FIX_TYPE: execution
+PRINCIPALS: evidence_based minimal_change causality
 """
     result = extract_declaration(sample)
-    assert result["type"] == "root_cause_fix", f"expected root_cause_fix, got {result}"
-    assert "fix_cause_not_symptom" in result["principals"], result
+    assert result["type"] == "execution", f"expected execution, got {result}"
+    assert "evidence_based" in result["principals"], result
     print("PASS declaration_extractor smoke test")
 
     # No declaration

@@ -48,10 +48,10 @@ from declaration_extractor import extract_declaration, extract_last_agent_messag
 from patch_signals import extract_patch_signals
 from cognition_check import check_cognition
 
-# Controlled vocabulary — must match TYPE_PRINCIPAL_POLICY keys in jingu-policy-core
+# Controlled vocabulary — CDP v1 taxonomy (p170), must match TYPE_POLICIES keys in jingu-policy-core
 VALID_FIX_TYPES = {
-    "root_cause_fix", "workaround_fix", "exploration",
-    "test_validation", "environment_fix",
+    "understanding", "observation", "analysis", "diagnosis",
+    "decision", "design", "planning", "execution", "validation",
 }
 
 
