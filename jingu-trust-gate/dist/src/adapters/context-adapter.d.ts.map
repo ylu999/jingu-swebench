@@ -1,0 +1,1 @@
+{"version":3,"file":"context-adapter.d.ts","sourceRoot":"","sources":["../../../src/adapters/context-adapter.ts"],"names":[],"mappings":"AAAA,OAAO,KAAK,EAAE,eAAe,EAAE,MAAM,sBAAsB,CAAC;AAE5D;;;;;;;;;;;GAWG;AACH,MAAM,WAAW,cAAc,CAAC,OAAO;IACrC,KAAK,CAAC,OAAO,EAAE,eAAe,GAAG,OAAO,CAAC;CAC1C"}
