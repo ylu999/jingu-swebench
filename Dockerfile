@@ -27,7 +27,11 @@ RUN pip install --no-cache-dir \
     "swebench==4.1.0" \
     "boto3==1.42.1" \
     "pydantic==2.12.5"
-    
+
+# Copy jingu-swebench.yaml into the installed mini-swe-agent config directory.
+# mini-swe-agent 2.2.8 ships swebench.yaml; we add our fork alongside it.
+# This overrides ENVIRONMENT_NOT_AGENT_WORK violations from swebench.yaml defaults.
+COPY config/jingu-swebench.yaml /usr/local/lib/python3.12/site-packages/minisweagent/config/benchmarks/jingu-swebench.yaml
 
 # Working dir
 WORKDIR /app
