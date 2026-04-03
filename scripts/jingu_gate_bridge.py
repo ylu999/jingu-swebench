@@ -41,7 +41,9 @@ _NODE_BIN = _find_node()
 
 # NODE_PATH: jingu-trust-gate node_modules (needed on cloud where npm install wasn't run)
 # Convention: trust-gate dist lives at $JINGU_TRUST_GATE_DIST, node_modules one level up
-_GATE_DIST = os.environ.get("JINGU_TRUST_GATE_DIST", "")
+_GATE_DIST = os.environ.get("JINGU_TRUST_GATE_DIST") or str(
+    Path.home() / "jingu-swebench" / "jingu-trust-gate" / "dist" / "src"
+)
 _NODE_MODULES_CANDIDATES = []
 if _GATE_DIST:
     # e.g. ~/jingu-swebench/jingu-trust-gate/dist/src → ~/jingu-swebench/jingu-trust-gate/node_modules
