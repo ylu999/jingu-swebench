@@ -46,11 +46,11 @@ ASG `jingu-swebench-ecs-asg` + LT `jingu-swebench-ecs-lt` 仅用于 ECS worker�
 
 | 资源 | ID / 名称 | 说明 |
 |------|-----------|------|
-| AMI (builder) | `ami-068cfa06f1b8dd28c` | jingu-swebench-builder-20260402，有 git/docker/aws-cli，**无 Python 3.12/boto3/node** |
+| AMI (runner) | `ami-093e263e1bc987212` | jingu-swebench-runner-20260403 — Python 3.12/node 18/boto3/litellm/minisweagent/jingu-swebench |
 | AMI (ECS) | `ami-060921e471f88bf4c` | ECS worker AMI，有 Python 3.9/Docker，**无 mise/boto3/node** |
 | ASG | `jingu-swebench-ecs-asg` | ECS worker 用，LT=jingu-swebench-ecs-lt |
 | LT (ECS) | `lt-024c610e94921a069` jingu-swebench-ecs-lt | c5.9xlarge, ECS AMI |
-| LT (runner) | `lt-03cd70e0699fbcc90` jingu-swebench-runner-lt | c5.4xlarge, builder AMI，**AMI 需修** |
+| LT (runner) | `lt-03cd70e0699fbcc90` jingu-swebench-runner-lt | c5.4xlarge, runner AMI v2 (default) |
 | IAM Profile | `ecsInstanceRole` | 两个 LT 都用，有 Bedrock + ECR + SSM 权限 |
 | SG | `sg-098d7e41bdb28cd46` | 两个 LT 都用 |
 
