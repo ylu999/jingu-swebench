@@ -40,6 +40,10 @@ from retry_controller import build_retry_plan
 from declaration_extractor import extract_declaration, extract_last_agent_message
 from patch_signals import extract_patch_signals
 from cognition_check import check_cognition, format_cognition_feedback
+from preflight import run_preflight
+
+# P-INV-001: run environment invariant checks before any batch work
+run_preflight()
 
 # B1 gate mode: "trust_gate" (B1) or "structural" (B0 fallback)
 GATE_MODE = "trust_gate"
