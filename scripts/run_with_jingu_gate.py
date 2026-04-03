@@ -640,23 +640,24 @@ def run_agent(
     # B4: declaration protocol — agent must declare fix type and principals
     # before submitting. Extraction runs in cognition gate post-submission.
     # Format is a hard protocol: two lines, controlled vocabulary, no prose.
+    # Vocabulary: CDP v1 taxonomy (p170) — 9 types + 12 principal atoms.
     extra_parts.append(
         "DECLARATION PROTOCOL (required before every submission):\n"
         "Before calling submit, output these two lines exactly:\n\n"
-        "  FIX_TYPE: <one of: root_cause_fix | workaround_fix | exploration | test_validation | environment_fix>\n"
-        "  PRINCIPALS: <space-separated subset of: fix_cause_not_symptom workaround_only probe_until_signal verify_before_submit fix_environment_first>\n\n"
+        "  FIX_TYPE: <one of: understanding | observation | analysis | diagnosis | decision | design | planning | execution | validation>\n"
+        "  PRINCIPALS: <space-separated subset of: evidence_based no_hallucination constraint_awareness scope_control consistency_check execution_first minimal_change causality hypothesis_testing completeness risk_awareness explicit_assumption>\n\n"
         "Rules:\n"
         "  - FIX_TYPE must be exactly one value from the list above\n"
         "  - PRINCIPALS must be one or more values from the list above\n"
         "  - Choose the values that best describe YOUR fix strategy for this specific problem\n"
-        "  - root_cause_fix = you found and fixed the actual cause of the bug\n"
-        "  - workaround_fix = you bypassed the problem without fixing its root cause\n"
-        "  - test_validation = your fix is primarily about making tests pass correctly\n"
-        "  - environment_fix = the fix is about configuration or environment setup\n"
-        "  - exploration = you are still investigating, not yet submitting a fix\n"
+        "  - execution = you applied a fix (code change) to make the failing tests pass\n"
+        "  - diagnosis = you identified the root cause of the bug before fixing\n"
+        "  - analysis = you analyzed the code structure to understand the failure\n"
+        "  - validation = you verified your fix is correct by running the tests\n"
+        "  - understanding = you studied the codebase to understand the context\n"
         "Example:\n"
-        "  FIX_TYPE: root_cause_fix\n"
-        "  PRINCIPALS: fix_cause_not_symptom verify_before_submit"
+        "  FIX_TYPE: execution\n"
+        "  PRINCIPALS: evidence_based minimal_change causality"
     )
 
     fail_to_pass = instance.get("FAIL_TO_PASS", [])
