@@ -179,39 +179,90 @@ def patch_fingerprint(patch: str) -> dict:
             "lines_added": added, "lines_removed": removed}
 
 
-# Tool names that produce a meaningful signal (write or submit)
+# Tool names (structured tool calls) that produce a meaningful write/submit signal
 _SIGNAL_TOOL_NAMES: frozenset[str] = frozenset({
     "edit_file", "write_file", "create_file",
     "str_replace_editor", "str_replace", "apply_patch",
     "bash_write", "patch", "submit",
 })
 
+# Bash command fragments that indicate a write or submit signal
+# Covers: shell file writes (cat > file, tee file), submit sentinel, inline patches
+_SIGNAL_BASH_PATTERNS: tuple[str, ...] = (
+    "cat >",           # shell file write: cat > /path/to/file
+    "tee ",            # shell file write via tee
+    "COMPLETE_TASK_AND_SUBMIT",   # SWE-bench submit sentinel
+    "> /testbed/",     # redirect-write into testbed
+    "str_replace",     # bash str_replace call
+    "apply_patch",     # bash apply_patch call
+)
+
+
+def _msg_has_signal(msg: dict) -> bool:
+    """
+    Return True if an assistant message contains at least one write/submit signal.
+
+    Checks two sources:
+    1. msg.tool_calls[].function.name — structured tool calls (str_replace_editor etc.)
+    2. msg.extra.actions[].command — bash shell commands (cat >, SUBMIT sentinel etc.)
+
+    Both formats appear in real trajs: structured tool calls are in tool_calls,
+    the corresponding shell commands are mirrored in extra.actions with a 'command' key.
+    """
+    # Source 1: structured tool_calls (non-bash tool names)
+    for tc in msg.get("tool_calls", []):
+        name = tc.get("function", {}).get("name", "").lower()
+        if any(sig in name for sig in _SIGNAL_TOOL_NAMES):
+            return True
+        # bash tool — check command content below
+        if name == "bash":
+            cmd = ""
+            try:
+                import json as _json
+                args = tc.get("function", {}).get("arguments", "")
+                cmd = (_json.loads(args) if isinstance(args, str) else args).get("command", "")
+            except Exception:
+                pass
+            if any(p in cmd for p in _SIGNAL_BASH_PATTERNS):
+                return True
+
+    # Source 2: extra.actions (may have 'tool' key or just 'command' key)
+    for action in msg.get("extra", {}).get("actions", []):
+        if not isinstance(action, dict):
+            action_str = str(action).lower()
+            if any(sig in action_str for sig in _SIGNAL_TOOL_NAMES):
+                return True
+            continue
+        # Structured action with tool name
+        tool_name = action.get("tool", action.get("name", "")).lower()
+        if tool_name and any(sig in tool_name for sig in _SIGNAL_TOOL_NAMES):
+            return True
+        # Shell command content
+        cmd = action.get("command", "")
+        if cmd and any(p in cmd for p in _SIGNAL_BASH_PATTERNS):
+            return True
+
+    return False
+
 
 def compute_steps_since_last_signal(traj_msgs: list[dict]) -> int:
     """
-    Count consecutive trailing steps with no write/submit tool call.
+    Count consecutive trailing steps with no write/submit signal.
 
     p164 runner layer: feeds steps_since_last_signal into build_retry_plan()
     for P7 no-signal detection (STOP_NO_SIGNAL when >= NO_SIGNAL_THRESHOLD).
 
-    A "step" is one assistant turn. A "signal" is any write or submit tool call.
+    A "step" is one assistant turn. A "signal" is any write or submit action.
     Counts from the end of the conversation backward to the most recent signal.
+
+    Signal detection covers both structured tool calls (str_replace_editor etc.)
+    and bash shell commands (cat > file, COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT).
     """
     steps_without_signal = 0
     for msg in reversed(traj_msgs):
         if msg.get("role") != "assistant":
             continue
-        actions = msg.get("extra", {}).get("actions", [])
-        has_signal = False
-        for action in actions:
-            if isinstance(action, dict):
-                tool_name = action.get("tool", action.get("name", "")).lower()
-            else:
-                tool_name = str(action).lower()
-            if any(sig in tool_name for sig in _SIGNAL_TOOL_NAMES):
-                has_signal = True
-                break
-        if has_signal:
+        if _msg_has_signal(msg):
             break
         steps_without_signal += 1
     return steps_without_signal

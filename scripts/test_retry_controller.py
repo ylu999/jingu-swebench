@@ -179,14 +179,40 @@ class TestControlPaths:
 
 # ── 4. compute_steps_since_last_signal ───────────────────────────────────────
 
-def _make_assistant_msg(tool_names: list[str]) -> dict:
-    """Helper: assistant message with given tool calls in extra.actions."""
+def _make_assistant_msg_structured(tool_names: list[str]) -> dict:
+    """Helper: assistant message with structured extra.actions (tool key format)."""
     return {
         "role": "assistant",
         "extra": {
             "actions": [{"tool": t, "input": {}} for t in tool_names],
         },
     }
+
+
+def _make_assistant_msg_real(bash_commands: list[str]) -> dict:
+    """
+    Helper: assistant message in real traj format.
+    Real trajs use tool_calls[].function.name = 'bash' + extra.actions[].command.
+    """
+    import json as _json
+    tool_calls = [
+        {
+            "index": i,
+            "function": {"name": "bash", "arguments": _json.dumps({"command": cmd})},
+            "id": f"tooluse_{i}",
+        }
+        for i, cmd in enumerate(bash_commands)
+    ]
+    actions = [{"command": cmd, "tool_call_id": f"tooluse_{i}"} for i, cmd in enumerate(bash_commands)]
+    return {
+        "role": "assistant",
+        "tool_calls": tool_calls,
+        "extra": {"actions": actions},
+    }
+
+
+# Alias for backward compat in existing tests
+_make_assistant_msg = _make_assistant_msg_structured
 
 
 class TestComputeStepsSinceLastSignal:
@@ -245,6 +271,48 @@ class TestComputeStepsSinceLastSignal:
             _make_assistant_msg(["read_file"]),  # no signal
         ]
         assert compute_steps_since_last_signal(msgs) == 1
+
+    # ── Real traj format (bash tool_calls) ────────────────────────────────────
+
+    def test_real_traj_cat_write_is_signal(self):
+        """Real traj: cat > /testbed/file is a write signal."""
+        msgs = [_make_assistant_msg_real(["cat > /testbed/django/models.py << 'EOF'\n# fix\nEOF"])]
+        assert compute_steps_since_last_signal(msgs) == 0
+
+    def test_real_traj_submit_sentinel_is_signal(self):
+        """Real traj: COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT is a submit signal."""
+        msgs = [_make_assistant_msg_real(["echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT && cat patch.txt"])]
+        assert compute_steps_since_last_signal(msgs) == 0
+
+    def test_real_traj_pure_read_is_no_signal(self):
+        """Real traj: grep/cat read-only commands are not signals."""
+        msgs = [_make_assistant_msg_real(["grep -r 'def method' /testbed/django/"])]
+        assert compute_steps_since_last_signal(msgs) == 1
+
+    def test_real_traj_exploration_loop(self):
+        """Real traj: N grep/find steps with no write → STOP_NO_SIGNAL eligible."""
+        no_signal_cmds = ["find /testbed -name '*.py'", "grep -r 'def foo'", "cat /testbed/file.py"]
+        msgs = [_make_assistant_msg_real([cmd]) for cmd in no_signal_cmds * 5]
+        count = compute_steps_since_last_signal(msgs)
+        assert count == 15
+
+    def test_real_traj_write_then_read(self):
+        """Real traj: write followed by reads → counts only trailing reads."""
+        msgs = [
+            _make_assistant_msg_real(["grep -r 'foo' ."]),
+            _make_assistant_msg_real(["cat > /testbed/file.py << 'EOF'\n# fix\nEOF"]),  # write
+            _make_assistant_msg_real(["cat /testbed/file.py"]),   # read
+            _make_assistant_msg_real(["grep 'foo' /testbed/"]),   # read
+        ]
+        assert compute_steps_since_last_signal(msgs) == 2
+
+    def test_real_traj_mixed_write_in_multi_cmd_step(self):
+        """Real traj: a step with both read and write → has signal."""
+        msgs = [_make_assistant_msg_real([
+            "grep -r 'foo' .",
+            "cat > /testbed/fix.py << 'EOF'\n# patch\nEOF",
+        ])]
+        assert compute_steps_since_last_signal(msgs) == 0
 
 
 # ── 5. extract_principal_violation_codes ─────────────────────────────────────
