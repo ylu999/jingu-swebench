@@ -1604,8 +1604,13 @@ def run_agent(
 
 # ── Main loop ─────────────────────────────────────────────────────────────────
 
-def run_with_jingu(instance_id: str, output_dir: Path, max_attempts: int = 3) -> dict:
-    """Run agent + Jingu gate with retry. Returns best result."""
+def run_with_jingu(instance_id: str, output_dir: Path, max_attempts: int = 3,
+                   mode: str = "jingu") -> dict:
+    """Run agent + Jingu gate with retry. Returns best result.
+
+    mode="jingu"    — full pipeline: B1 gate + B3 structured retry (default)
+    mode="baseline" — no gate, no structured retry; attempt 2 gets no hint (truly naive)
+    """
     t_inst = Timer(f"instance: {instance_id}", parent=_timing_root)
     _instance_timers[instance_id] = t_inst
 
@@ -1642,7 +1647,8 @@ def run_with_jingu(instance_id: str, output_dir: Path, max_attempts: int = 3) ->
         print(f"  [attempt {attempt}/{max_attempts}] {instance_id}")
 
         # NBR enforcement: No Blind Retry — attempt N+1 must have concrete failure signal
-        if attempt > 1 and not last_failure.strip():
+        # Bypass in baseline mode: naive retry intentionally has no hint.
+        if attempt > 1 and not last_failure.strip() and mode != "baseline":
             raise RuntimeError(
                 f"[NBR violation] attempt {attempt} has empty last_failure. "
                 "Execution feedback is required before retry. "
@@ -1681,7 +1687,25 @@ def run_with_jingu(instance_id: str, output_dir: Path, max_attempts: int = 3) ->
 
         patch = normalize_patch(patch)
 
-        if GATE_MODE == "trust_gate":
+        if mode == "baseline":
+            # Baseline: no gate, no structured retry — accept every patch as-is.
+            score = score_patch(patch)
+            fp = patch_fingerprint(patch)
+            print(f"    [gate] BASELINE (no gate)  score={score:.0f}  lines={len(patch.splitlines())}")
+            attempts_log.append({
+                "attempt": attempt,
+                "admission_reason": "baseline_no_gate",
+                "patch_fp": fp,
+                "gate_reason_codes": [],
+                "exit_status": agent_exit,
+            })
+            candidates.append({"attempt": attempt, "patch": patch, "score": score,
+                                "gate_code": "BASELINE_NO_GATE"})
+            # Truly naive retry: no hint at all.
+            # This is the control condition — isolates jingu's structured retry value.
+            last_failure = ""
+            agent_exit = None
+        elif GATE_MODE == "trust_gate":
             # B1: run jingu-trust-gate via subprocess
             attempt_dir = output_dir / f"attempt_{attempt}"
             traj_path = attempt_dir / instance_id / f"{instance_id}.traj.json"
@@ -2015,19 +2039,119 @@ def run_with_jingu(instance_id: str, output_dir: Path, max_attempts: int = 3) ->
         "attempt_delta": delta,
     }
 
-def write_predictions(results: list, output_path: Path):
+def write_predictions(results: list, output_path: Path, mode: str = "jingu"):
+    """Write predictions JSONL. Includes all instances (empty patch for unaccepted)."""
+    model_name = "baseline-2shot" if mode == "baseline" else "mini-swe-agent+jingu"
     # Rewrite the file completely (deduplicates any incremental writes)
     with open(output_path, "w") as f:
         for r in results:
-            if r and r.get("accepted"):
-                f.write(json.dumps({
-                    "instance_id": r["instance_id"],
-                    "model_patch": r["patch"],
-                    "model_name_or_path": "mini-swe-agent+jingu",
-                }) + "\n")
-    print(f"\n[predictions] written: {output_path}")
+            if not r:
+                continue
+            # Always write an entry — empty patch counts as "no submission" in harness
+            f.write(json.dumps({
+                "instance_id": r["instance_id"],
+                "model_patch": r["patch"] if r.get("accepted") else "",
+                "model_name_or_path": model_name,
+            }) + "\n")
+    print(f"\n[predictions] written: {output_path}  model={model_name}")
     accepted = sum(1 for r in results if r and r.get("accepted"))
     print(f"[predictions] {accepted}/{len(results)} instances accepted")
+
+def _run_official_evaluation(
+    predictions_path: Path,
+    instance_ids: list[str],
+    run_id: str,
+    eval_output_dir: Path,
+    max_workers: int = 8,
+) -> dict:
+    """
+    Run the official SWE-bench harness (swebench.harness.run_evaluation).
+
+    This is the ONLY authoritative resolved-rate source.
+    controlled_verify is a mid-run signal only; this is the final verdict.
+
+    Returns a dict with resolved_ids, unresolved_ids, resolved_rate.
+    """
+    import subprocess as _sp
+
+    eval_output_dir.mkdir(parents=True, exist_ok=True)
+
+    cmd = [
+        "python", "-m", "swebench.harness.run_evaluation",
+        "--dataset_name", "SWE-bench/SWE-bench_Lite",
+        "--split", "test",
+        "--predictions_path", str(predictions_path),
+        "--run_id", run_id,
+        "--instance_ids", *instance_ids,
+        "--max_workers", str(max_workers),
+        "--cache_level", "env",
+        "--log_level", "INFO",
+    ]
+    print(f"\n[eval] running official harness: run_id={run_id}")
+    print(f"[eval] cmd: {' '.join(cmd)}")
+
+    t0 = time.monotonic()
+    proc = _sp.run(cmd, capture_output=True, text=True, timeout=7200)
+    elapsed = time.monotonic() - t0
+
+    if proc.returncode != 0:
+        print(f"[eval] harness FAILED (exit={proc.returncode}) in {elapsed:.0f}s")
+        print(f"[eval] stderr: {proc.stderr[-2000:]}")
+        return {"error": proc.stderr[-500:], "elapsed_s": round(elapsed, 1)}
+
+    print(f"[eval] harness completed in {elapsed:.0f}s")
+    if proc.stdout:
+        print(f"[eval] stdout tail:\n{proc.stdout[-1000:]}")
+
+    # Parse results file produced by run_evaluation
+    # run_evaluation writes: logs/<run_id>.<dataset>.<split>.json
+    # Search for the result JSON
+    result_file = None
+    for candidate in [
+        Path(f"logs/{run_id}.SWE-bench_SWE-bench_Lite.test.json"),
+        Path(f"logs/{run_id}.SWE-bench_Lite.test.json"),
+        Path(f"logs/{run_id}.json"),
+    ]:
+        if candidate.exists():
+            result_file = candidate
+            break
+
+    if result_file is None:
+        # Also check cwd variants
+        import glob as _glob
+        matches = _glob.glob(f"logs/{run_id}*.json") + _glob.glob(f"*{run_id}*.json")
+        if matches:
+            result_file = Path(matches[0])
+
+    if result_file is None:
+        print(f"[eval] WARNING: could not find result JSON for run_id={run_id}")
+        print(f"[eval] stdout: {proc.stdout[-500:]}")
+        return {"error": "result file not found", "elapsed_s": round(elapsed, 1)}
+
+    try:
+        raw = json.loads(result_file.read_text())
+    except Exception as e:
+        return {"error": f"parse error: {e}", "elapsed_s": round(elapsed, 1)}
+
+    resolved_ids = raw.get("resolved_ids", [])
+    all_ids = raw.get("submitted_ids", instance_ids)
+    unresolved_ids = [i for i in all_ids if i not in resolved_ids]
+
+    result = {
+        "resolved_count": len(resolved_ids),
+        "total": len(all_ids),
+        "resolved_rate": round(len(resolved_ids) / len(all_ids), 4) if all_ids else 0.0,
+        "resolved_ids": sorted(resolved_ids),
+        "unresolved_ids": sorted(unresolved_ids),
+        "elapsed_s": round(elapsed, 1),
+        "result_file": str(result_file),
+    }
+
+    print(f"\n[eval] RESULT: resolved={result['resolved_count']}/{result['total']} "
+          f"({result['resolved_rate']:.1%})")
+    print(f"[eval] resolved: {result['resolved_ids']}")
+    return result
+
 
 def main():
     parser = argparse.ArgumentParser()
@@ -2038,6 +2162,12 @@ def main():
                         help="Parallel instances to run (default: 4)")
     parser.add_argument("--stagger", type=float, default=15.0,
                         help="Seconds between sandbox starts to avoid image-pull contention (default: 15)")
+    parser.add_argument("--mode", choices=["jingu", "baseline"], default="jingu",
+                        help="jingu=full pipeline (gate+retry); baseline=no gate, no hint (control condition)")
+    parser.add_argument("--run-eval", action="store_true", default=False,
+                        help="Run official SWE-bench harness after inference (requires Docker)")
+    parser.add_argument("--run-id", default=None,
+                        help="Run ID for eval results (default: auto-generated from mode+timestamp)")
     args = parser.parse_args()
 
     global _timing_root
@@ -2060,18 +2190,22 @@ def main():
     t_parallel = Timer(f"parallel workers (×{min(args.workers, len(args.instance_ids))})", parent=_timing_root)
     results = [None] * len(args.instance_ids)
 
+    # Auto run-id: mode + timestamp
+    run_id = args.run_id or f"{args.mode}-{int(time.time())}"
+    preds_filename = f"{args.mode}-predictions.jsonl"
+
     def _run(idx: int, iid: str):
         delay = idx * args.stagger
         if delay > 0:
             print(f"[jingu] {iid} waiting {delay:.0f}s before start (stagger)")
             time.sleep(delay)
-        print(f"\n[jingu] START {iid}")
-        r = run_with_jingu(iid, output_dir, max_attempts=args.max_attempts)
+        print(f"\n[jingu] START {iid}  mode={args.mode}")
+        r = run_with_jingu(iid, output_dir, max_attempts=args.max_attempts, mode=args.mode)
         status = "ACCEPTED" if r["accepted"] else "FAILED"
         print(f"\n[jingu] {status} {iid}  ({r.get('elapsed_s', 0):.1f}s)")
         return idx, r
 
-    preds_path = output_dir / "jingu-predictions.jsonl"
+    preds_path = output_dir / preds_filename
     with ThreadPoolExecutor(max_workers=args.workers) as pool:
         futures = {pool.submit(_run, i, iid): iid
                    for i, iid in enumerate(args.instance_ids)}
@@ -2090,11 +2224,12 @@ def main():
                 r = results[idx]
             # Write incrementally: append accepted prediction immediately
             if r and r.get("accepted"):
+                _model_name = "baseline-2shot" if args.mode == "baseline" else "mini-swe-agent+jingu"
                 with open(preds_path, "a") as pf:
                     pf.write(json.dumps({
                         "instance_id": r["instance_id"],
                         "model_patch": r["patch"],
-                        "model_name_or_path": "mini-swe-agent+jingu",
+                        "model_name_or_path": _model_name,
                     }) + "\n")
                 print(f"[predictions] saved {r['instance_id']} (incremental)")
             print(f"[progress] {done}/{len(args.instance_ids)} done")
@@ -2102,7 +2237,7 @@ def main():
     t_parallel.stop()
 
     t_write = Timer("write predictions", parent=_timing_root)
-    write_predictions(results, output_dir / "jingu-predictions.jsonl")
+    write_predictions(results, preds_path, mode=args.mode)
     t_write.stop()
 
     _timing_root.stop()
@@ -2115,13 +2250,50 @@ def main():
     seq_total = sum(r.get("elapsed_s", 0) for r in results if r)
     speedup   = seq_total / t_parallel.elapsed if t_parallel.elapsed > 0 else 1
 
+    # ── Attempt-level metrics ───────────────────────────────────────────────────
+    # attempt1_accepted: instances where best_attempt == 1
+    # attempt2_rescued: accepted instances where best_attempt == 2 (failed attempt1)
+    attempt1_accepted = sum(1 for r in results if r and r.get("accepted") and r.get("best_attempt", 1) == 1)
+    attempt2_rescued  = sum(1 for r in results if r and r.get("accepted") and r.get("best_attempt", 1) == 2)
+    # For baseline mode best_attempt may not be set (all accepted on first available attempt)
+    # Fall back: count accepted with no best_attempt field as attempt1
+    total_accepted = sum(1 for r in results if r and r.get("accepted"))
+
+    # ── Failure breakdown (jingu mode only) ────────────────────────────────────
+    # Collect failure_class_v2 from strategy log entries stored in results
+    # These are attached to results that have a "strategy_entries" field if we add it.
+    # For now, load from STRATEGY_LOG_PATH if available.
+    failure_breakdown: dict[str, int] = {}
+    if STRATEGY_LOG_PATH and Path(STRATEGY_LOG_PATH).exists() and args.mode == "jingu":
+        try:
+            from strategy_logger import load_strategy_log
+            _log_entries = load_strategy_log(STRATEGY_LOG_PATH)
+            # Only count entries from this batch (matching instance_ids)
+            _batch_ids = set(args.instance_ids)
+            for _e in _log_entries:
+                if _e.instance_id in _batch_ids:
+                    fc = getattr(_e, "failure_class_v2", "signal_missing") or "signal_missing"
+                    failure_breakdown[fc] = failure_breakdown.get(fc, 0) + 1
+        except Exception:
+            pass
+
     report = {
+        "mode":             args.mode,
+        "run_id":           run_id,
         "instances":        len(args.instance_ids),
         "workers":          args.workers,
         "step_limit":       BASE_CONFIG["agent"].get("step_limit", None),
         "wall_time_s":      round(total, 1),
         "status":           "completed",
-        "patches_generated": sum(1 for r in results if r and r["accepted"]),
+        "patches_generated": total_accepted,
+        "attempt_stats": {
+            "attempt1_accepted":  attempt1_accepted,
+            "attempt2_rescued":   attempt2_rescued,
+            "total_accepted":     total_accepted,
+            # rescued_rate: of instances that had a 2nd attempt, how many were rescued
+            "rescued_rate": round(attempt2_rescued / max(1, len(args.instance_ids) - attempt1_accepted), 4),
+        },
+        "failure_breakdown": failure_breakdown,  # jingu mode only; empty for baseline
         "execution_identity": _identity,
         "model_usage": {
             "total_api_calls":    totals["api_calls"],
@@ -2137,9 +2309,10 @@ def main():
             "actual_wall_s":         round(t_parallel.elapsed, 1),
             "speedup_x":             round(speedup, 1),
         },
+        "eval_results": None,  # filled in below if --run-eval
     }
 
-    # Save machine-readable report
+    # Save machine-readable report (initial write before eval)
     report_path = output_dir / "run_report.json"
     report_path.write_text(json.dumps(report, indent=2))
 
@@ -2173,6 +2346,14 @@ def main():
         print(f"    {status} {iid:35s}  calls={calls:3d}  cost=${cost:.3f}  "
               f"{elapsed:5.1f}s  avg={avg_c:.1f}s/call  {'█'*bar_w}")
     print()
+    print(f"  ── ATTEMPT STATS ──")
+    print(f"    attempt1 accepted  : {attempt1_accepted}/{len(args.instance_ids)}")
+    print(f"    attempt2 rescued   : {attempt2_rescued}/{max(1, len(args.instance_ids) - attempt1_accepted)}")
+    if failure_breakdown:
+        print(f"  ── FAILURE BREAKDOWN (jingu) ──")
+        for fc, cnt in sorted(failure_breakdown.items(), key=lambda x: -x[1]):
+            print(f"    {fc:30s}: {cnt}")
+    print()
     print(f"  ── TIMING ──")
     print(f"    dataset prefetch   : {t_ds.elapsed:.1f}s")
     print(f"    parallel workers   : {t_parallel.elapsed:.1f}s  ({t_parallel.elapsed/total:.0%} of total)")
@@ -2180,6 +2361,23 @@ def main():
     print(f"    write predictions  : {t_write.elapsed:.1f}s")
     print()
     print(f"  report saved → {report_path}")
+
+    # ── Official evaluation (optional) ─────────────────────────────────────────
+    if args.run_eval:
+        print(f"\n{'='*62}")
+        print(f"  OFFICIAL EVALUATION  mode={args.mode}  run_id={run_id}")
+        print(f"{'='*62}")
+        eval_result = _run_official_evaluation(
+            predictions_path=preds_path,
+            instance_ids=args.instance_ids,
+            run_id=run_id,
+            eval_output_dir=output_dir / "eval_results",
+        )
+        report["eval_results"] = eval_result
+        # Update run_report.json with eval results
+        report_path.write_text(json.dumps(report, indent=2))
+        print(f"  run_report updated with eval_results → {report_path}")
+
     print(f"{'='*62}\n")
 
 if __name__ == "__main__":
