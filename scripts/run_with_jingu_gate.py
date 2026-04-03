@@ -696,6 +696,90 @@ def _build_test_command(instance: dict) -> str:
     )
 
 
+def _check_onboarding(instance: dict) -> tuple[bool, str]:
+    """
+    ONBOARDING_FIRST enforcement gate.
+
+    Verifies the instance can be run via the official SWE-bench harness path
+    before any agent execution begins. Prevents OFFICIAL_PATH_NOT_CONFIRMED and
+    ASSUMED_ENV_BEHAVIOR failure classes.
+
+    Returns (ok, reason).
+    """
+    if not instance.get("repo") or not instance.get("version"):
+        return False, "MISSING_REPO_OR_VERSION"
+
+    try:
+        from swebench.harness.constants import MAP_REPO_VERSION_TO_SPECS
+        repo = instance["repo"]
+        version = instance["version"]
+        if repo not in MAP_REPO_VERSION_TO_SPECS:
+            return False, f"OFFICIAL_PATH_NOT_CONFIRMED: repo '{repo}' not in harness specs"
+        if version not in MAP_REPO_VERSION_TO_SPECS[repo]:
+            return False, f"OFFICIAL_PATH_NOT_CONFIRMED: version '{version}' not in harness specs for {repo}"
+    except ImportError as e:
+        return False, f"HARNESS_NOT_AVAILABLE: {e}"
+
+    try:
+        cmd = _build_test_command(instance)
+        if "runtests.py" not in cmd and "pytest" not in cmd:
+            return False, f"CUSTOM_PATH_INVENTED: test command lacks runtests.py/pytest: {cmd[:80]}"
+        if "conda activate testbed" not in cmd:
+            return False, "ASSUMED_ENV_BEHAVIOR: test command missing 'conda activate testbed'"
+    except Exception as e:
+        return False, f"TEST_COMMAND_BUILD_FAILED: {e}"
+
+    if not instance.get("FAIL_TO_PASS"):
+        return False, "NO_FAIL_TO_PASS_DEFINED"
+
+    return True, "OK"
+
+
+def _build_execution_model(instance: dict) -> dict:
+    """
+    Derive the explicit execution model from the official SWE-bench harness.
+
+    This is the ground truth for what will actually run — not inferred from
+    prior experience. Printed as [execution-model] before any agent run.
+    """
+    from swebench.harness.constants import MAP_REPO_VERSION_TO_SPECS
+    from swebench.harness.test_spec.python import get_test_directives
+
+    repo = instance["repo"]
+    version = instance["version"]
+    specs = MAP_REPO_VERSION_TO_SPECS[repo][version]
+
+    return {
+        "repo": repo,
+        "version": version,
+        "env": {
+            "conda_env": "testbed",
+            "workdir": "/testbed",
+            "activate": "source /opt/miniconda3/bin/activate && conda activate testbed",
+        },
+        "test": {
+            "runner": "runtests.py" if "runtests.py" in specs["test_cmd"] else "pytest",
+            "test_cmd": specs["test_cmd"],
+            "directives": get_test_directives(instance),
+        },
+        "verify": {
+            "mode": "controlled",
+            "source": "swebench_harness",
+        },
+    }
+
+
+def _print_execution_model(model: dict) -> None:
+    """Print execution model to stdout (visible in log as [execution-model] block)."""
+    print("[execution-model]")
+    print(f"  repo: {model['repo']}  version: {model['version']}")
+    print(f"  env: conda_env={model['env']['conda_env']}  workdir={model['env']['workdir']}")
+    print(f"  test.runner: {model['test']['runner']}")
+    print(f"  test.cmd: {model['test']['test_cmd']}")
+    print(f"  test.directives: {model['test']['directives']}")
+    print(f"  verify: mode={model['verify']['mode']}  source={model['verify']['source']}")
+
+
 def _parse_test_output_counts(output: str) -> tuple[int, int]:
     """
     Parse passed/failed counts from test output.
@@ -1443,6 +1527,21 @@ def run_with_jingu(instance_id: str, output_dir: Path, max_attempts: int = 3) ->
     t_load = Timer("dataset load", parent=t_inst)
     instance = _load_instance(instance_id)
     t_load.stop()
+
+    # ONBOARDING_FIRST: verify official harness path is known before any execution
+    _ok, _reason = _check_onboarding(instance)
+    if not _ok:
+        print(f"[onboarding-check] FAIL: {_reason}")
+        return {
+            "instance_id": instance_id,
+            "status": "rejected",
+            "failure_type": "ONBOARDING_REQUIRED",
+            "reason": _reason,
+            "patch": "",
+        }
+    print("[onboarding-check] PASS")
+    _print_execution_model(_build_execution_model(instance))
+
 
     candidates = []
     attempts_log: list[dict] = []   # telemetry: one entry per attempt
