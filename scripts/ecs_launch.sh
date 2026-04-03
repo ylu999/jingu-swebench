@@ -10,7 +10,7 @@
 #
 # Optional:
 #   --max-attempts <N>   Max retry attempts per instance (default: 2)
-#   --workers <N>        Parallel workers (default: 4)
+#   --workers <N>        Parallel workers (default: 40)
 #   --stagger <N>        Stagger seconds between worker starts (default: 10)
 #   --revision <N>       Task definition revision (default: latest)
 #   --region <r>         AWS region (default: us-west-2)
@@ -28,7 +28,7 @@ TASK_DEF="jingu-swebench-runner"
 CONTAINER="runner"
 REGION="us-west-2"
 MAX_ATTEMPTS=2
-WORKERS=4
+WORKERS=40
 STAGGER=10
 REVISION=""
 WAIT=false
