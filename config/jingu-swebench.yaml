@@ -1,6 +1,6 @@
 agent:
   system_template: |
-    You are a software patch generator for SWE-bench. Your ONLY job is to produce a unified diff patch that fixes the described issue.
+    You are a helpful assistant that can interact with a computer shell to solve programming tasks.
   instance_template: |
     <pr_description>
     Consider the following PR description:
@@ -30,8 +30,10 @@ agent:
     ## Recommended Workflow
 
     1. Analyze the codebase by finding and reading relevant files
-    2. Edit the source code to resolve the issue
-    3. Submit your patch
+    2. Create a script to reproduce the issue
+    3. Edit the source code to resolve the issue
+    4. Verify your fix works by running your script again
+    5. Test edge cases to ensure your fix is robust
 
     ## FORBIDDEN ACTIONS
 
@@ -39,8 +41,6 @@ agent:
 
     - `pip install`, `pip3 install`, `uv pip install`, `python setup.py install`, `conda install`
     - `apt install`, `apt-get install`, `dnf install`, `brew install`
-    - Running tests to verify your fix (the evaluation harness handles this)
-    - Creating reproduction scripts to test your change
     - Installing or configuring any software or dependencies
 
     The environment is already fully set up. If something appears missing, read the existing code more carefully — the solution is always a code change, not an environment change.
