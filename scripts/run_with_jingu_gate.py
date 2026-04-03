@@ -100,21 +100,89 @@ def print_activation_proof(identity: dict) -> None:
 
 # ── Traj watcher: real-time per-step log ───────────────────────────────────────
 
-def _install_step_logger(instance_id: str, attempt: int) -> None:
+class StepMonitorState:
     """
-    Monkey-patch ProgressTrackingAgent.step() to emit a real-time log line
-    for every agent step. This gives per-step visibility without changing
-    mini-swe-agent internals.
+    Shared mutable state for one agent run's step monitor.
 
-    Log format:
-      [step N] ${cost:.2f}  <first 80 chars of assistant text>
+    Holds the container_id (available after env starts), the last patch snapshot
+    seen during verify, and the verify result history.
+
+    verify_history entries:
+      {"step": N, "tests_passed": K, "tests_failed": J, "delta": D, "elapsed_ms": T}
     """
+    def __init__(self, instance_id: str, attempt: int, instance: dict):
+        self.instance_id = instance_id
+        self.attempt = attempt
+        self.instance = instance
+        self.container_id: str | None = None       # set once container starts
+        self.last_verified_patch: str = ""         # patch snapshot at last verify
+        self.last_verify_time: float = 0.0         # monotonic timestamp
+        self.verify_history: list[dict] = []       # structured signal log
+        self.verify_in_flight: bool = False        # debounce flag
+        self._lock = __import__("threading").Lock()
+
+    def record_verify(self, step: int, result: dict) -> None:
+        with self._lock:
+            prev = self.verify_history[-1]["tests_passed"] if self.verify_history else -1
+            passed = result.get("tests_passed", -1)
+            delta = (passed - prev) if passed >= 0 and prev >= 0 else None
+            entry = {
+                "step": step,
+                "tests_passed": passed,
+                "tests_failed": result.get("tests_failed", -1),
+                "exit_code": result.get("exit_code", -1),
+                "elapsed_ms": result.get("elapsed_ms", 0),
+                "delta": delta,
+                "kind": result.get("verification_kind", "unknown"),
+            }
+            self.verify_history.append(entry)
+            delta_str = f"  delta={delta:+d}" if delta is not None else ""
+            print(f"    [inner-verify] step={step}  "
+                  f"passed={passed}  failed={result.get('tests_failed', -1)}"
+                  f"{delta_str}  elapsed={result.get('elapsed_ms', 0):.0f}ms  "
+                  f"kind={result.get('verification_kind', '?')}",
+                  flush=True)
+
+    def latest_tests_passed(self) -> int:
+        """Return most recent known tests_passed count, or -1."""
+        with self._lock:
+            for entry in reversed(self.verify_history):
+                if entry["tests_passed"] >= 0:
+                    return entry["tests_passed"]
+        return -1
+
+
+def _install_step_monitor(
+    instance_id: str,
+    attempt: int,
+    instance: dict,
+) -> StepMonitorState:
+    """
+    Replace step logger with a step monitor that:
+    1. Logs each step (existing behavior)
+    2. Detects patch writes via _msg_has_signal()
+    3. Runs controlled_verify in background when patch changes (debounced)
+
+    Returns StepMonitorState — caller must set .container_id once container starts.
+    The state's verify_history is the structured inner-loop signal source.
+
+    Debounce rules:
+    - Only verify if patch content changed since last verify
+    - Only verify if >= VERIFY_DEBOUNCE_S seconds since last verify started
+    - At most one verify in flight at a time
+    """
+    import threading
+
+    VERIFY_DEBOUNCE_S = 5.0   # minimum seconds between verify runs
+
     from minisweagent.run.benchmarks.swebench import ProgressTrackingAgent
     _orig_step = ProgressTrackingAgent.step
+    state = StepMonitorState(instance_id, attempt, instance)
 
-    def _logged_step(self):
+    def _monitored_step(self):
         result = _orig_step(self)
-        # Extract last assistant message snippet
+
+        # ── 1. Log step (existing behavior) ──────────────────────────────────
         snippet = ""
         for msg in reversed(self.messages):
             if msg.get("role") == "assistant":
@@ -128,9 +196,73 @@ def _install_step_logger(instance_id: str, attempt: int) -> None:
                     snippet = content.replace("\n", " ")[:80]
                 break
         print(f"    [step {self.n_calls}] ${self.cost:.2f}  {snippet}", flush=True)
+
+        # ── 2. Check for patch write signal ──────────────────────────────────
+        # Look at the most recent assistant message for write signals
+        for msg in reversed(self.messages):
+            if msg.get("role") == "assistant":
+                if not _msg_has_signal(msg):
+                    break  # latest assistant msg, no signal — skip verify
+                # Signal detected — check debounce conditions
+                cid = state.container_id
+                if not cid:
+                    break  # container not yet started (early steps)
+                now = time.monotonic()
+                with state._lock:
+                    too_soon = (now - state.last_verify_time) < VERIFY_DEBOUNCE_S
+                    in_flight = state.verify_in_flight
+                if too_soon or in_flight:
+                    break  # debounced
+                # Extract current patch from agent messages for change detection
+                current_patch = _extract_current_patch_from_messages(self.messages)
+                with state._lock:
+                    patch_changed = current_patch != state.last_verified_patch
+                    if not patch_changed:
+                        break
+                    state.last_verified_patch = current_patch
+                    state.last_verify_time = now
+                    state.verify_in_flight = True
+
+                step_n = self.n_calls
+                print(f"    [inner-verify] triggering verify at step={step_n} "
+                      f"(patch changed, container={cid[:12]}...)", flush=True)
+
+                def _run_verify(patch=current_patch, container=cid, step=step_n):
+                    try:
+                        cv_result = run_controlled_verify(
+                            patch, state.instance, container, timeout_s=45
+                        )
+                        state.record_verify(step, cv_result)
+                    except Exception as exc:
+                        print(f"    [inner-verify] ERROR: {exc}", flush=True)
+                    finally:
+                        with state._lock:
+                            state.verify_in_flight = False
+
+                t = threading.Thread(target=_run_verify, daemon=True)
+                t.start()
+                break
+
         return result
 
-    ProgressTrackingAgent.step = _logged_step
+    ProgressTrackingAgent.step = _monitored_step
+    return state
+
+
+def _extract_current_patch_from_messages(messages: list[dict]) -> str:
+    """
+    Extract a lightweight patch fingerprint from agent messages.
+    Used for change-detection debounce (not for actual patch application).
+    Looks at tool outputs containing diff/patch content.
+    """
+    for msg in reversed(messages):
+        if msg.get("role") != "tool":
+            continue
+        content = str(msg.get("content", ""))
+        if "diff --git" in content or "+++ b/" in content:
+            # Return first 500 chars as fingerprint — enough to detect changes
+            return content[:500]
+    return ""
 
 
 # ── Telemetry helpers ──────────────────────────────────────────────────────────
@@ -1151,52 +1283,38 @@ def run_agent(
     preds_path = attempt_dir / "preds.json"
     progress = RunBatchProgressManager(num_instances=1)
 
-    # Install per-step logger for real-time visibility
-    _install_step_logger(instance_id, attempt)
+    # Install step monitor: logs steps + triggers inner-loop verify on patch writes
+    _monitor = _install_step_monitor(instance_id, attempt, instance)
 
-    # Controlled verify result storage (populated inside _verifying_run hook)
-    _controlled_verify_result: list[dict] = []  # mutable single-element container
-
-    # We hook DefaultAgent.run() to run controlled verify BEFORE env cleanup.
-    # Timeline inside process_instance:
-    #   env = get_sb_environment(...)     <- container starts
-    #   agent = ProgressTrackingAgent(...)
-    #   info = agent.run(task)            <- our hook intercepts here
-    #   finally: agent.save(...)
-    #            env.__del__ -> cleanup() -> docker stop   <- too late
-    #
-    # By hooking agent.run(), we can exec into the container after agent finishes
-    # but before the finally block stops it.
+    # Hook DefaultAgent.run() to:
+    # 1. Inject container_id into _monitor as soon as container is started
+    # 2. Run a final controlled_verify BEFORE env cleanup (end-of-attempt signal)
     from minisweagent.agents.default import DefaultAgent as _DA
     _orig_run = _DA.run
-    _verify_instance = instance   # close over current instance
-    _verify_patch_holder: list[str] = []  # will be filled after traj parsing
 
     def _verifying_run(self_agent, *args, **kwargs):
-        result = _orig_run(self_agent, *args, **kwargs)
-        # Container is alive here; env.__del__ hasn't run yet
+        # Inject container_id so step monitor can start verifying mid-run
         cid = getattr(getattr(self_agent, 'env', None), 'container_id', None)
-        if not cid or _controlled_verify_result:
+        if cid and not _monitor.container_id:
+            _monitor.container_id = cid
+            print(f"    [inner-verify] container ready: {cid[:12]}...", flush=True)
+
+        result = _orig_run(self_agent, *args, **kwargs)
+
+        # Final controlled_verify at end-of-attempt (before container destroyed)
+        # Uses the actual submission patch — most accurate final signal
+        cid = getattr(getattr(self_agent, 'env', None), 'container_id', None)
+        if not cid:
             return result
-        # Extract patch from submission (what agent just produced)
         submitted = result.get("submission", "") if isinstance(result, dict) else ""
         if not submitted:
-            _controlled_verify_result.append({
-                "verification_kind": "controlled_error",
-                "tests_passed": -1, "tests_failed": -1,
-                "exit_code": -1, "elapsed_ms": 0.0,
-                "output_tail": "", "error": "no submission to verify",
-            })
             return result
-        print(f"    [controlled-verify] running on container {cid[:12]}...")
+        print(f"    [controlled-verify] final verify on container {cid[:12]}...", flush=True)
         t_cv0 = time.monotonic()
-        cv_result = run_controlled_verify(submitted, _verify_instance, cid, timeout_s=60)
-        elapsed = round((time.monotonic() - t_cv0) * 1000, 1)
-        cv_result["elapsed_ms"] = elapsed
-        _controlled_verify_result.append(cv_result)
-        print(f"    [controlled-verify] kind={cv_result['verification_kind']}  "
-              f"passed={cv_result['tests_passed']}  failed={cv_result['tests_failed']}  "
-              f"exit={cv_result['exit_code']}  elapsed={elapsed:.0f}ms")
+        cv_result = run_controlled_verify(submitted, instance, cid, timeout_s=60)
+        cv_result["elapsed_ms"] = round((time.monotonic() - t_cv0) * 1000, 1)
+        # Store as last verify_history entry (step=-1 means end-of-attempt)
+        _monitor.record_verify(-1, cv_result)
         return result
 
     _DA.run = _verifying_run
@@ -1208,7 +1326,7 @@ def run_agent(
         print(f"    [agent] ERROR: {e}")
         traceback.print_exc()
     finally:
-        _DA.run = _orig_run  # always restore — even if process_instance errors
+        _DA.run = _orig_run  # always restore
     t_llm.stop()
 
     # Parse traj for usage + submission
@@ -1249,26 +1367,41 @@ def run_agent(
             patch_for_body = sub_from_traj or sub_from_traj_diff or ""
             problem_stmt = instance.get("problem_statement", "")
             jingu_body = extract_jingu_body(traj, patch_for_body, problem_stmt)
-            # Merge controlled verify result (primary signal) into jingu_body.
-            # controlled_verify supersedes the post-hoc excerpt parse.
-            if _controlled_verify_result:
-                cv = _controlled_verify_result[0]
-                jingu_body["controlled_verify"] = cv
-                # Promote controlled_verify.tests_passed into test_results
-                # so extract_test_counts() and classify_failure_v2() see the clean signal.
-                if cv["verification_kind"] == "controlled_fail_to_pass":
-                    jingu_body["test_results"]["ran_tests"] = True
-                    jingu_body["test_results"]["controlled_passed"] = cv["tests_passed"]
-                    jingu_body["test_results"]["controlled_failed"] = cv["tests_failed"]
-                    jingu_body["test_results"]["controlled_exit_code"] = cv["exit_code"]
+            # Merge verify signal from _monitor into jingu_body.
+            # Priority: final verify (step=-1) > last inner-loop verify > nothing.
+            # verify_history[-1] is the end-of-attempt verify (most accurate).
+            _final_cv = None
+            if _monitor.verify_history:
+                # Use the last controlled_fail_to_pass result (final verify or last mid-run)
+                for _vh in reversed(_monitor.verify_history):
+                    if _vh["kind"] == "controlled_fail_to_pass":
+                        _final_cv = _vh
+                        break
+            if _final_cv:
+                cv_flat = {
+                    "verification_kind": _final_cv["kind"],
+                    "tests_passed": _final_cv["tests_passed"],
+                    "tests_failed": _final_cv["tests_failed"],
+                    "exit_code": _final_cv["exit_code"],
+                    "elapsed_ms": _final_cv["elapsed_ms"],
+                    "step": _final_cv["step"],
+                }
+                jingu_body["controlled_verify"] = cv_flat
+                jingu_body["test_results"]["ran_tests"] = True
+                jingu_body["test_results"]["controlled_passed"] = _final_cv["tests_passed"]
+                jingu_body["test_results"]["controlled_failed"] = _final_cv["tests_failed"]
+                jingu_body["test_results"]["controlled_exit_code"] = _final_cv["exit_code"]
+            # Store full verify_history for observability
+            jingu_body["verify_history"] = _monitor.verify_history
             # Write jingu_body back into traj.json so gate_runner.js can read it
             traj["jingu_body"] = jingu_body
             traj_path.write_text(json.dumps(traj, indent=2))
             cv_summary = ""
-            if _controlled_verify_result:
-                cv = _controlled_verify_result[0]
-                cv_summary = (f" cv_kind={cv['verification_kind']}"
-                              f" cv_passed={cv['tests_passed']} cv_failed={cv['tests_failed']}")
+            if _final_cv:
+                cv_summary = (f" cv_kind={_final_cv['kind']}"
+                              f" cv_passed={_final_cv['tests_passed']}"
+                              f" cv_failed={_final_cv['tests_failed']}"
+                              f" cv_step={_final_cv['step']}")
             print(f"    [jingu_body] extracted: exit={jingu_body['exit_status']} "
                   f"files_written={len(jingu_body['files_written'])} "
                   f"tests_ran={jingu_body['test_results']['ran_tests']} "
