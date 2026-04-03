@@ -407,6 +407,29 @@ def build_execution_feedback(
     return "\n".join(parts)
 
 
+def extract_test_counts(jingu_body: dict) -> int:
+    """
+    Extract number of passing tests from jingu_body.test_results.excerpt.
+
+    Parses pytest output patterns like "3 passed", "5 failed", "1 error".
+    Returns total passed count, or -1 if not determinable from excerpt.
+
+    p179: primary reward channel — tests_delta = count(N) - count(N-1).
+    """
+    excerpt = (jingu_body or {}).get("test_results", {}).get("excerpt", "")
+    if not excerpt:
+        return -1
+    # pytest summary line: "3 passed, 2 failed in 0.12s" or "5 passed in 0.05s"
+    m = re.search(r'(\d+) passed', excerpt)
+    if m:
+        return int(m.group(1))
+    # If only failures/errors visible (no passed count), passed = 0
+    # Matches: "2 failed", "failures=2", "3 error", "ERROR", "FAILED"
+    if re.search(r'\d+ failed|\d+ error|failures=\d+|errors=\d+|FAILED|ERROR', excerpt):
+        return 0
+    return -1
+
+
 def compute_attempt_delta(attempts_log: list[dict]) -> dict | None:
     """
     Compare attempt 1 and attempt 2 fingerprints.
@@ -948,6 +971,8 @@ def run_with_jingu(instance_id: str, output_dir: Path, max_attempts: int = 3) ->
     total_llm_calls = 0
     # p178: per-attempt strategy metadata (populated when retry_controller runs)
     _strategy_entries: list[dict] = []
+    # p179: track test counts per attempt for delta computation
+    _test_counts_by_attempt: dict[int, int] = {}  # attempt → passed count (-1 if unknown)
 
     for attempt in range(1, max_attempts + 1):
         print(f"  [attempt {attempt}/{max_attempts}] {instance_id}")
@@ -962,6 +987,9 @@ def run_with_jingu(instance_id: str, output_dir: Path, max_attempts: int = 3) ->
 
         patch, agent_exit, jingu_body = run_agent(instance, output_dir, attempt,
                                                   previous_failure=last_failure, parent_timer=t_inst)
+
+        # p179: record test counts for this attempt (used later for tests_delta)
+        _test_counts_by_attempt[attempt] = extract_test_counts(jingu_body)
 
         # llm_calls are recorded in _usage_tracker; no separate accumulation needed
 
@@ -1090,9 +1118,13 @@ def run_with_jingu(instance_id: str, output_dir: Path, max_attempts: int = 3) ->
                     if _principal_viol_codes:
                         print(f"    [principal-viol] {_principal_viol_codes}")
                     if RETRY_CONTROLLER_ENABLED:
-                        # Phase 2B: retry-controller builds on execution feedback + p177 extensions
+                        # Phase 2B: retry-controller builds on execution feedback + p177/p179 extensions
                         # prev_patch_fp: fingerprint of the attempt before this one
                         prev_fp = attempts_log[-2]["patch_fp"] if len(attempts_log) >= 2 else None
+                        # p179: compute tests_delta before build_retry_plan (used in classify_failure_v2)
+                        _tests_now = _test_counts_by_attempt.get(attempt, -1)
+                        _tests_prev = _test_counts_by_attempt.get(attempt - 1, -1)
+                        _tests_delta = (_tests_now - _tests_prev) if _tests_now >= 0 and _tests_prev >= 0 else 0
                         t_ctrl = Timer(f"B3 retry-controller attempt={attempt}", parent=t_inst)
                         retry_plan = build_retry_plan(
                             problem_statement=instance.get("problem_statement", ""),
@@ -1109,24 +1141,36 @@ def run_with_jingu(instance_id: str, output_dir: Path, max_attempts: int = 3) ->
                             steps_since_last_signal=_steps_since_signal,
                             principal_violation_codes=_principal_viol_codes,
                             strategy_table_path=STRATEGY_TABLE_PATH,
+                            tests_delta=_tests_delta,
+                            tests_passed_after=_tests_now,
                         )
                         t_ctrl.stop()
                         print(f"    [retry-ctrl] action={retry_plan.control_action}  "
                               f"root_causes={retry_plan.root_causes}")
                         print(f"    [retry-ctrl] must_not_do={retry_plan.must_not_do}")
                         print(f"    [retry-ctrl] hint={retry_plan.next_attempt_prompt[:200]}")
-                        # Store strategy metadata for p178 logging
+                        # Store strategy metadata for p178/p179 logging
                         _strategy_failure_class = next(
-                            (rc.split("=", 1)[1] for rc in retry_plan.root_causes if rc.startswith("failure_type=")),
+                            (rc.split("=", 1)[1] for rc in retry_plan.root_causes if rc.startswith("failure_type=") and not rc.startswith("failure_type_v2=")),
                             "unknown",
+                        )
+                        _strategy_failure_class_v2 = next(
+                            (rc.split("=", 1)[1] for rc in retry_plan.root_causes if rc.startswith("failure_type_v2=")),
+                            "signal_missing",
                         )
                         _strategy_entries.append({
                             "attempt": attempt,
                             "failure_class": _strategy_failure_class,
+                            "failure_class_v2": _strategy_failure_class_v2,
                             "control_action": retry_plan.control_action,
                             "steps_since_signal": _steps_since_signal,
                             "enforced_violations": retry_plan.principal_violations,
                             "hint_used": retry_plan.next_attempt_prompt[:300],
+                            # p179 signal fields
+                            "tests_passed_count": _tests_now,
+                            "tests_passed_prev": _tests_prev,
+                            "tests_delta": _tests_delta,
+                            "files_written_paths": (jingu_body or {}).get("files_written", []),
                         })
                         # next_attempt_prompt already merges hint_prefix + exec_feedback
                         last_failure = retry_plan.next_attempt_prompt[:600]
@@ -1186,8 +1230,9 @@ def run_with_jingu(instance_id: str, output_dir: Path, max_attempts: int = 3) ->
               f"same_reason={delta['same_admission_reason']}  "
               f"{delta['a1_admission']} → {delta['a2_admission']}")
 
-    # ── p178.1: flush strategy log entries with retry-level reward ──────────
-    # Primary reward: next_attempt_admitted (did hint help attempt N+1 get admitted?)
+    # ── p178.1 / p179: flush strategy log entries with retry-level reward ───
+    # Primary reward: tests_delta (p179) — how many more tests passed in attempt N vs N-1
+    # Secondary reward: next_attempt_admitted (did hint help attempt N+1 get admitted?)
     # Auxiliary: instance_final_admitted (did any attempt succeed?)
     if STRATEGY_LOG_PATH and _strategy_entries:
         _inst_final_admitted = bool(candidates)
@@ -1220,6 +1265,11 @@ def run_with_jingu(instance_id: str, output_dir: Path, max_attempts: int = 3) ->
                         next_attempt_has_patch=_next_has_patch,
                         instance_final_admitted=_inst_final_admitted,
                         outcome="solved" if _inst_final_admitted else "unsolved",
+                        tests_delta=_se.get("tests_delta", 0),
+                        tests_passed_before=_se.get("tests_passed_prev", -1),
+                        tests_passed_after=_se.get("tests_passed_count", -1),
+                        files_written_paths=_se.get("files_written_paths", []),
+                        failure_class_v2=_se.get("failure_class_v2", "signal_missing"),
                     ),
                     STRATEGY_LOG_PATH,
                 )

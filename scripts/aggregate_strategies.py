@@ -1,8 +1,12 @@
 """
-aggregate_strategies.py — p178: offline aggregation of strategy JSONL log.
+aggregate_strategies.py — p178/p179: offline aggregation of strategy JSONL log.
 
 Reads strategy_log.jsonl, groups by bucket key (failure_class × enforced_violations),
 computes hint win rates, writes strategy_table.json.
+
+p179 update: primary reward is now lexicographic (tests_delta, next_attempt_admitted).
+Entries with tests_delta > 0 score higher than pure admission signal.
+Also aggregates using failure_class_v2 bucket key for cleaner signal separation.
 
 Usage:
   python3 scripts/aggregate_strategies.py \
@@ -14,6 +18,7 @@ strategy_table.json format:
     "<bucket_key>": {
       "<hint_text>": {
         "win_rate": 0.73,
+        "avg_tests_delta": 1.2,
         "sample_count": 11,
         "solved": 8,
         "total": 11
@@ -32,7 +37,7 @@ import json
 from collections import defaultdict
 from pathlib import Path
 
-from strategy_logger import load_strategy_log, make_bucket_key
+from strategy_logger import load_strategy_log, make_bucket_key, make_bucket_key_v2
 
 # Minimum samples before we trust the win rate for exploitation
 MIN_SAMPLES = 3
@@ -42,36 +47,54 @@ MIN_SAMPLES = 3
 SOLVED_OUTCOMES = {"solved"}
 
 
+def _make_counts() -> dict:
+    return {"solved": 0, "total": 0, "tests_delta_sum": 0, "tests_delta_known": 0}
+
+
 def aggregate(log_path: str | Path, out_path: str | Path) -> dict:
     """
     Read JSONL log, aggregate per-bucket hint win rates, write strategy_table.json.
     Returns the table dict.
+
+    p179: uses failure_class_v2 for bucket key; adds avg_tests_delta to stats.
+    Lexicographic reward: (tests_delta > 0) > (next_attempt_admitted) > (nothing).
     """
     entries = load_strategy_log(log_path)
 
-    # bucket_key → hint_text → {solved: int, total: int}
-    counts: dict[str, dict[str, dict[str, int]]] = defaultdict(lambda: defaultdict(lambda: {"solved": 0, "total": 0}))
+    # bucket_key → hint_text → {solved, total, tests_delta_sum, tests_delta_known}
+    counts: dict[str, dict[str, dict]] = defaultdict(lambda: defaultdict(_make_counts))
 
     for entry in entries:
-        key = make_bucket_key(entry.failure_class, entry.enforced_violation_codes)
+        # p179: use v2 bucket key (signal-aware) when failure_class_v2 is populated
+        fc_v2 = getattr(entry, "failure_class_v2", "signal_missing") or "signal_missing"
+        key = make_bucket_key_v2(fc_v2, entry.enforced_violation_codes)
         hint = entry.hint_used.strip()
         if not hint:
             hint = "(no hint)"
         counts[key][hint]["total"] += 1
-        # p178.1: primary reward = next_attempt_admitted (retry-level effectiveness)
-        # next_attempt_admitted=True means the hint helped attempt N+1 get admitted
-        if entry.next_attempt_admitted:
+        # p179 lexicographic reward:
+        # primary: tests_delta > 0 means hint helped the agent make measurable progress
+        # secondary: next_attempt_admitted (gate admission)
+        td = getattr(entry, "tests_delta", 0) or 0
+        if td > 0 or entry.next_attempt_admitted:
             counts[key][hint]["solved"] += 1
+        # track tests_delta distribution for reporting
+        if td != 0 or getattr(entry, "tests_passed_after", -1) >= 0:
+            counts[key][hint]["tests_delta_sum"] += td
+            counts[key][hint]["tests_delta_known"] += 1
 
-    # Build output table with win_rate + sample_count
+    # Build output table with win_rate + avg_tests_delta + sample_count
     table: dict[str, dict[str, dict]] = {}
     for bucket_key, hints in counts.items():
         table[bucket_key] = {}
         for hint_text, stats in hints.items():
             total = stats["total"]
             solved = stats["solved"]
+            n_known = stats["tests_delta_known"]
+            avg_td = round(stats["tests_delta_sum"] / n_known, 3) if n_known > 0 else None
             table[bucket_key][hint_text] = {
                 "win_rate": round(solved / total, 4) if total > 0 else 0.0,
+                "avg_tests_delta": avg_td,
                 "sample_count": total,
                 "solved": solved,
                 "total": total,
@@ -89,7 +112,11 @@ def aggregate(log_path: str | Path, out_path: str | Path) -> dict:
         1 for hints in table.values()
         if any(h["trusted"] for h in hints.values())
     )
+    # p179 signal quality report
+    known_delta = sum(1 for e in entries if getattr(e, "tests_passed_after", -1) >= 0)
+    pos_delta = sum(1 for e in entries if (getattr(e, "tests_delta", 0) or 0) > 0)
     print(f"[aggregate] entries={total_entries}  buckets={total_buckets}  trusted={trusted_buckets}")
+    print(f"[aggregate] tests_delta known={known_delta}/{total_entries}  positive_delta={pos_delta}")
     print(f"[aggregate] written → {out_path}")
     return table
 

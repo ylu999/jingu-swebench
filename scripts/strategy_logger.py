@@ -34,7 +34,8 @@ class StrategyLogEntry:
     timestamp: str
     instance_id: str
     attempt_id: int                 # attempt that generated the hint (1-based)
-    failure_class: str              # from retry_controller.classify_failure()
+    failure_class: str              # v1: from retry_controller.classify_failure()
+    failure_class_v2: str           # p179 v2: from classify_failure_v2() using tests_delta
     control_action: str             # CONTINUE | ADJUST | STOP_NO_SIGNAL | STOP_FAIL
     steps_since_last_signal: int    # p164 runner layer
     enforced_violation_codes: list[str]   # only ENV_LEAKAGE_HARDCODE_PATH / PLAN_NO_FEEDBACK_LOOP
@@ -46,7 +47,11 @@ class StrategyLogEntry:
     instance_final_admitted: bool   # did any attempt get admitted for this instance?
     # legacy: kept for backward compat with existing code, not used in bucketing
     outcome: str                    # solved | unsolved (derived from instance_final_admitted)
-    tests_delta: int                # tests_passed_after - tests_passed_before (0 if unknown)
+    # ── p179: signal repair fields (primary reward channel) ──────────────────
+    tests_delta: int                # tests_passed_after - tests_passed_before (0 if unknown, -1 if no test info)
+    tests_passed_before: int        # passing test count from prev attempt (-1 if unknown)
+    tests_passed_after: int         # passing test count from this attempt (-1 if unknown)
+    files_written_paths: list[str]  # actual file paths modified (from patch + tool calls)
     # Logged for observability only — NOT used in bucket key
     principals_declared: list[str] = field(default_factory=list)
 
@@ -62,6 +67,19 @@ def make_bucket_key(failure_class: str, enforced_violation_codes: list[str]) -> 
     if viol_key:
         return f"{failure_class}|{viol_key}"
     return failure_class
+
+
+def make_bucket_key_v2(failure_class_v2: str, enforced_violation_codes: list[str]) -> str:
+    """
+    p179 bucket key using signal-aware failure_class_v2.
+
+    Buckets: no_patch_or_invalid | no_test_progress | positive_delta_unresolved | signal_missing
+    Violation codes are still appended (same enforcement logic as v1).
+    """
+    viol_key = "|".join(sorted(enforced_violation_codes))
+    if viol_key:
+        return f"{failure_class_v2}|{viol_key}"
+    return failure_class_v2
 
 
 # ── I/O ───────────────────────────────────────────────────────────────────────
@@ -88,6 +106,11 @@ def load_strategy_log(log_path: str | Path) -> list[StrategyLogEntry]:
                 continue
             try:
                 d = json.loads(line)
+                # p179 backward compat: fill missing new fields with defaults
+                d.setdefault("tests_passed_before", -1)
+                d.setdefault("tests_passed_after", -1)
+                d.setdefault("files_written_paths", [])
+                d.setdefault("failure_class_v2", "signal_missing")
                 entries.append(StrategyLogEntry(**d))
             except (json.JSONDecodeError, TypeError):
                 pass  # skip malformed lines
@@ -110,7 +133,12 @@ def make_entry(
     instance_final_admitted: bool = False,
     # legacy outcome field (derived from instance_final_admitted)
     outcome: str = "unsolved",
+    # p179: signal repair fields
     tests_delta: int = 0,
+    tests_passed_before: int = -1,
+    tests_passed_after: int = -1,
+    files_written_paths: Optional[list[str]] = None,
+    failure_class_v2: str = "signal_missing",
     principals_declared: Optional[list[str]] = None,
 ) -> StrategyLogEntry:
     """Construct a StrategyLogEntry with a UTC timestamp."""
@@ -122,6 +150,7 @@ def make_entry(
         instance_id=instance_id,
         attempt_id=attempt_id,
         failure_class=failure_class,
+        failure_class_v2=failure_class_v2,
         control_action=control_action,
         steps_since_last_signal=steps_since_last_signal,
         enforced_violation_codes=list(enforced_violation_codes),
@@ -131,5 +160,8 @@ def make_entry(
         instance_final_admitted=instance_final_admitted,
         outcome=outcome,
         tests_delta=tests_delta,
+        tests_passed_before=tests_passed_before,
+        tests_passed_after=tests_passed_after,
+        files_written_paths=list(files_written_paths or []),
         principals_declared=list(principals_declared or []),
     )

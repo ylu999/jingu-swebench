@@ -31,7 +31,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal, Optional
 
-from strategy_logger import make_bucket_key
+from strategy_logger import make_bucket_key, make_bucket_key_v2
 
 # P7 no-signal threshold (p164 runner layer)
 NO_SIGNAL_THRESHOLD = 15  # consecutive steps without write/submit → STOP_NO_SIGNAL
@@ -140,6 +140,48 @@ def classify_failure(
         return "no_effect_patch"
 
     return "unknown"
+
+
+def classify_failure_v2(
+    jingu_body: dict,
+    patch_fp: dict,
+    tests_delta: int,
+    tests_passed_after: int = -1,
+) -> str:
+    """
+    p179 taxonomy v1: signal-contract-aware failure classification.
+
+    Uses tests_delta as primary discriminator.
+    tests_passed_after=-1 means count is unknown (signal_missing when tests ran).
+
+    Buckets:
+      no_patch_or_invalid       — no patch, or tests couldn't run at all
+      no_test_progress          — tests ran, delta ≤ 0 (stagnant or regression)
+      positive_delta_unresolved — delta > 0 but still failing (agent is on track)
+      signal_missing            — tests ran but no count info available
+    """
+    test_results = jingu_body.get("test_results", {})
+    tests_ran = test_results.get("ran_tests", False)
+    test_passed = test_results.get("last_passed")
+    patch_size = patch_fp.get("lines_added", 0) + patch_fp.get("lines_removed", 0)
+
+    # No patch or environment didn't allow tests to run
+    if patch_size == 0 or not tests_ran:
+        return "no_patch_or_invalid"
+
+    # Tests passed — caller should have stopped before retry; classify as no_test_progress
+    if test_passed:
+        return "no_test_progress"
+
+    # tests ran and still failing — check if we have count signal
+    if tests_passed_after < 0:
+        # No count information available — delta is meaningless
+        return "signal_missing"
+
+    if tests_delta > 0:
+        return "positive_delta_unresolved"
+    # tests_delta == 0: stagnant; tests_delta < 0: regression — both = no progress
+    return "no_test_progress"
 
 
 # Deterministic intervention mapping (no LLM needed for these)
@@ -258,6 +300,8 @@ def build_retry_plan(
     steps_since_last_signal: int = 0,
     principal_violation_codes: Optional[list[str]] = None,
     strategy_table_path: Optional[str | Path] = None,
+    tests_delta: int = 0,
+    tests_passed_after: int = -1,
 ) -> RetryPlan:
     """
     Deterministic failure classification → intervention mapping → RetryPlan.
@@ -266,10 +310,13 @@ def build_retry_plan(
     - steps_since_last_signal (P7 no-signal detector, p164 runner layer)
     - principal_violation_codes (enforced principals only: ENV_LEAKAGE + PLAN_LOOP)
 
+    p179 extension: tests_delta used in classify_failure_v2 for signal-aware bucketing.
+
     No LLM involved.
     """
     fp = patch_fp or {}
     failure_type = classify_failure(jingu_body, fp, prev_patch_fp, exec_feedback)
+    failure_type_v2 = classify_failure_v2(jingu_body, fp, tests_delta, tests_passed_after)
     intervention = _INTERVENTIONS.get(failure_type, _INTERVENTIONS["unknown"])
 
     # ── Compute control_action (decision priority order) ─────────────────────
@@ -296,10 +343,12 @@ def build_retry_plan(
     viol_codes = [c for c in (principal_violation_codes or []) if c in ENFORCED_VIOLATION_CODES]
     principal_hints = [_PRINCIPAL_VIOLATION_HINTS[c] for c in viol_codes if c in _PRINCIPAL_VIOLATION_HINTS]
 
-    # ── p178: ε-greedy hint selection from strategy table ─────────────────────
+    # ── p178/p179: ε-greedy hint selection from strategy table ───────────────
+    # Use v2 bucket key (signal-aware) as primary; fall back to v1 if v2 bucket empty
+    bucket_key_v2 = make_bucket_key_v2(failure_type_v2, viol_codes)
     bucket_key = make_bucket_key(failure_type, viol_codes)
     table = _load_strategy_table(strategy_table_path)
-    bucket_data = table.get(bucket_key, {})
+    bucket_data = table.get(bucket_key_v2) or table.get(bucket_key, {})
     trusted_hints = {h: s for h, s in bucket_data.items() if s.get("trusted", False)}
 
     if trusted_hints and random.random() >= EPSILON:
@@ -323,7 +372,8 @@ def build_retry_plan(
         control_action = "ADJUST"
 
     return RetryPlan(
-        root_causes=[f"failure_type={failure_type}"] + [f"violation={c}" for c in viol_codes],
+        root_causes=[f"failure_type={failure_type}", f"failure_type_v2={failure_type_v2}"]
+                    + [f"violation={c}" for c in viol_codes],
         must_do=intervention["must_do"],
         must_not_do=intervention["must_not_do"],
         validation_requirement="Run the required FAIL_TO_PASS tests and confirm they pass",
