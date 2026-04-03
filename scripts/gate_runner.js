@@ -18,9 +18,9 @@
 
 // Resolve paths via env vars for portability (local dev vs cloud)
 const _GATE_DIST = process.env.JINGU_TRUST_GATE_DIST
-  ?? "/Users/ysl/jingu/repo/jingu-trust-gate/dist/src";
+  ?? `${process.env.HOME}/jingu-swebench/jingu-trust-gate/dist/src`;
 const _SCRIPTS_DIR = process.env.JINGU_SWEBENCH_SCRIPTS
-  ?? "/Users/ysl/jingu/repo/jingu-swebench/scripts";
+  ?? `${process.env.HOME}/jingu-swebench/scripts`;
 
 const { createTrustGate } = await import(`${_GATE_DIST}/trust-gate.js`);
 const { PatchAdmissionPolicy, parsePatchHunks, GATE_PARAMS } =
