@@ -25,9 +25,9 @@ docker run --rm --privileged \
   -v /root/results:/app/results \
   -e AWS_DEFAULT_REGION=us-west-2 \
   jingu-swebench:latest \
-  --instance-ids django__django-11019 django__django-11048 django__django-11087 \
-                 django__django-11099 django__django-11133 django__django-11163 \
-                 django__django-11239 django__django-11422 django__django-11564 \
+  --instance-ids django__django-11019 django__django-11039 django__django-11049 \
+                 django__django-11099 django__django-11133 django__django-11179 \
+                 django__django-11422 django__django-11564 django__django-11620 \
                  django__django-11905 \
   --mode baseline --max-attempts 2 --workers 5 \
   --output /app/results/calib-v1-baseline \
@@ -43,9 +43,9 @@ docker run --rm --privileged \
   -v /root/results:/app/results \
   -e AWS_DEFAULT_REGION=us-west-2 \
   jingu-swebench:latest \
-  --instance-ids django__django-11019 django__django-11048 django__django-11087 \
-                 django__django-11099 django__django-11133 django__django-11163 \
-                 django__django-11239 django__django-11422 django__django-11564 \
+  --instance-ids django__django-11019 django__django-11039 django__django-11049 \
+                 django__django-11099 django__django-11133 django__django-11179 \
+                 django__django-11422 django__django-11564 django__django-11620 \
                  django__django-11905 \
   --mode jingu --max-attempts 2 --workers 5 \
   --output /app/results/calib-v1-jingu \
@@ -117,12 +117,13 @@ run_with_jingu_gate.py
 
 ## Calibration instance set (10 instances)
 
-Selected from SWE-bench Lite django subset: FTP=60-150, ps_len<=2500, single-file logic bugs.
+Selected from SWE-bench Lite django subset: FTP=1-2, ps_len<=2500, single-file logic bugs.
+All IDs verified present in SWE-bench/SWE-bench_Lite (300 instances).
 
 ```
-django__django-11019   django__django-11048   django__django-11087
-django__django-11099   django__django-11133   django__django-11163
-django__django-11239   django__django-11422   django__django-11564
+django__django-11019   django__django-11039   django__django-11049
+django__django-11099   django__django-11133   django__django-11179
+django__django-11422   django__django-11564   django__django-11620
 django__django-11905
 ```
 
@@ -130,20 +131,81 @@ Decision rule: if jingu delta >= 2 instances on calibration set, expand to 30-in
 
 ## Architecture
 
+### What mini-swe-agent does (one attempt)
+
+mini-swe-agent is a bash-only agent with linear message history (source: mini-swe-agent README +
+`default.py`). Each call to `process_instance()` runs one attempt:
+
 ```
-run_with_jingu_gate.py
-  mini-swe-agent (jingu-swebench.yaml config)
-    agent produces patch
-  jingu-trust-gate (B1 gate)
-    gate_runner.js + patch_admission_policy.js
-  retry_controller.py   structured hint on failure
-  strategy_logger.py    JSONL log per attempt
-  _run_official_evaluation() -> swebench.harness.run_evaluation
+process_instance(instance, output_dir, config, progress)
+  get_sb_environment()        # pull SWE-bench Docker image, start container
+  DefaultAgent.run(problem_statement)
+    add_messages(system, user)        # rendered from jingu-swebench.yaml templates
+    while True:
+      query()                         # call LLM -> bash command
+      execute_actions()               # docker exec in container, append result to messages
+      if messages[-1].role == "exit": break
+    return {"exit_status": ..., "submission": <git diff>}
+  write preds.json
 ```
 
-Config layer: `config/jingu-swebench.yaml` is baked into the Docker image at
+The agent reads code, runs bash, produces a patch. It does not see test results — test execution
+is the harness's job, not the agent's.
+
+### Where jingu hooks in
+
+Jingu's retry loop wraps `process_instance`. It does not modify the agent's internal loop:
+
+```
+for attempt in 1..max_attempts:
+    # inject hint into instance_template before this attempt
+    config["agent"]["instance_template"] += hint_from_last_failure
+
+    process_instance(instance, attempt_dir, config, progress)
+    #   ^--- DefaultAgent.run() is monkey-patched here to run controlled_verify
+    #        on the same container BEFORE it is destroyed (mid-run signal only)
+
+    patch = read from traj.json
+
+    # jingu gate (B1): structural patch evaluation, not test execution
+    gate_result = evaluate_patch(patch, traj)
+    if gate_result.accepted: break
+
+    # build hint for next attempt from gate failure classification
+    # + controlled_verify output (test counts, failing test names)
+    last_failure = retry_controller(failure_class, exec_feedback)
+
+best patch -> predictions.jsonl
+_run_official_evaluation() -> python -m swebench.harness.run_evaluation  # final score only
+```
+
+**controlled_verify** (`run_controlled_verify`): orchestrator runs `git apply` + FAIL_TO_PASS
+tests via `docker exec` on the already-running container. Used to build the retry hint
+(failure counts, test names). It is mid-run signal only — not the official score.
+
+**Official score**: `swebench.harness.run_evaluation` runs after all inference is done,
+on a fresh container per instance. Its resolved_rate is the benchmark number.
+
+### Prompt injection
+
+`AgentConfig` (mini-swe-agent) has only `system_template` and `instance_template`.
+There is no `instance_template_extra` field. We append directly to `instance_template`
+before each attempt (`run_with_jingu_gate.py:1441`):
+
+```python
+config["agent"]["instance_template"] = (
+    config["agent"]["instance_template"] + "\n\n" + "\n\n".join(extra_parts)
+)
+```
+
+`extra_parts` contains: DECLARATION PROTOCOL + FAIL_TO_PASS test list + previous failure hint.
+
+### Config layer
+
+`config/jingu-swebench.yaml` is baked into the Docker image at
 `/usr/local/lib/python3.12/site-packages/minisweagent/config/benchmarks/jingu-swebench.yaml`.
-Enforces FORBIDDEN ACTIONS (pip install, running tests, reproduction scripts).
+Fork of the official `swebench.yaml`. Adds FORBIDDEN ACTIONS block (pip install, running tests,
+reproduction scripts). Agent sees these constraints for the full attempt.
 
 ## Build and deploy
 
