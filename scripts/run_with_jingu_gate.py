@@ -35,7 +35,7 @@ from jingu_gate_bridge import evaluate_patch_from_traj, build_support_pool, run_
 # B2: adversarial reviewer (cognitive governance)
 from patch_reviewer import review_patch_bedrock, ReviewResult
 # B3: retry controller (failure → diagnosis → next strategy)
-from retry_controller import build_retry_plan
+from retry_controller import build_retry_plan, RetryPlan
 from strategy_logger import log_strategy_entry, make_entry as make_strategy_entry
 # B4: cognition gate (declaration-vs-patch consistency check)
 from declaration_extractor import extract_declaration, extract_last_agent_message
@@ -428,6 +428,40 @@ def extract_test_counts(jingu_body: dict) -> int:
     if re.search(r'\d+ failed|\d+ error|failures=\d+|errors=\d+|FAILED|ERROR', excerpt):
         return 0
     return -1
+
+
+def check_test_progress_invariant(
+    tests_passed_prev: int,
+    tests_passed_now: int,
+) -> tuple[bool, str]:
+    """
+    p179 gate invariant: TEST_PROGRESS_MONOTONICITY.
+
+    Enforces that attempt N+1 must not regress or stagnate when test counts are known.
+
+    Returns (pass: bool, reason_code: str).
+
+    reason_code values:
+      SKIP_NO_PREV       — first attempt or prev count unknown (-1): invariant not applicable
+      SKIP_NO_CURRENT    — current count unknown (-1): signal missing, cannot enforce
+      POSITIVE_PROGRESS  — tests_delta > 0: invariant satisfied
+      NO_TEST_PROGRESS   — tests_delta == 0: stagnant, invariant violated
+      TEST_REGRESSION    — tests_delta < 0: regression, invariant violated
+
+    Important: only enforced when BOTH counts are known (≥ 0).
+    When signal is missing, falls back to SKIP (soft fail handled by classify_failure_v2).
+    """
+    if tests_passed_prev < 0:
+        return True, "SKIP_NO_PREV"
+    if tests_passed_now < 0:
+        return True, "SKIP_NO_CURRENT"
+
+    delta = tests_passed_now - tests_passed_prev
+    if delta > 0:
+        return True, "POSITIVE_PROGRESS"
+    if delta == 0:
+        return False, "NO_TEST_PROGRESS"
+    return False, "TEST_REGRESSION"
 
 
 def compute_attempt_delta(attempts_log: list[dict]) -> dict | None:
@@ -1125,6 +1159,10 @@ def run_with_jingu(instance_id: str, output_dir: Path, max_attempts: int = 3) ->
                         _tests_now = _test_counts_by_attempt.get(attempt, -1)
                         _tests_prev = _test_counts_by_attempt.get(attempt - 1, -1)
                         _tests_delta = (_tests_now - _tests_prev) if _tests_now >= 0 and _tests_prev >= 0 else 0
+                        # p179 gate: TEST_PROGRESS_MONOTONICITY invariant
+                        _progress_ok, _progress_code = check_test_progress_invariant(_tests_prev, _tests_now)
+                        print(f"    [test-progress] ok={_progress_ok}  code={_progress_code}  "
+                              f"prev={_tests_prev}  now={_tests_now}  delta={_tests_delta}")
                         t_ctrl = Timer(f"B3 retry-controller attempt={attempt}", parent=t_inst)
                         retry_plan = build_retry_plan(
                             problem_statement=instance.get("problem_statement", ""),
@@ -1145,6 +1183,39 @@ def run_with_jingu(instance_id: str, output_dir: Path, max_attempts: int = 3) ->
                             tests_passed_after=_tests_now,
                         )
                         t_ctrl.stop()
+                        # p179: override control_action based on TEST_PROGRESS_MONOTONICITY
+                        # Invariant violation overrides retry-controller's decision:
+                        #   TEST_REGRESSION → STOP_FAIL (cannot continue if tests got worse)
+                        #   NO_TEST_PROGRESS → ADJUST (force different strategy)
+                        if not _progress_ok and _progress_code == "TEST_REGRESSION":
+                            print(f"    [test-progress-gate] REGRESSION detected — overriding to STOP_FAIL")
+                            retry_plan = RetryPlan(
+                                root_causes=retry_plan.root_causes + [f"invariant=TEST_REGRESSION"],
+                                must_do=["Revert the direction of your fix — you made tests worse"],
+                                must_not_do=["Do not continue in the same direction as the previous attempt"],
+                                validation_requirement="Run required tests and confirm delta > 0",
+                                next_attempt_prompt=(
+                                    "REGRESSION: Your previous patch made the tests worse. "
+                                    "You must completely change your approach. "
+                                    "Do NOT expand the previous change. "
+                                    "Reread the failing tests from scratch and fix the actual root cause."
+                                )[:600],
+                                control_action="STOP_FAIL",
+                                principal_violations=retry_plan.principal_violations,
+                            )
+                        elif not _progress_ok and _progress_code == "NO_TEST_PROGRESS":
+                            # Ensure ADJUST — don't let unknown classification leave it at CONTINUE
+                            if retry_plan.control_action == "CONTINUE":
+                                print(f"    [test-progress-gate] NO_PROGRESS — upgrading CONTINUE → ADJUST")
+                                retry_plan = RetryPlan(
+                                    root_causes=retry_plan.root_causes + [f"invariant=NO_TEST_PROGRESS"],
+                                    must_do=retry_plan.must_do,
+                                    must_not_do=retry_plan.must_not_do,
+                                    validation_requirement=retry_plan.validation_requirement,
+                                    next_attempt_prompt=retry_plan.next_attempt_prompt,
+                                    control_action="ADJUST",
+                                    principal_violations=retry_plan.principal_violations,
+                                )
                         print(f"    [retry-ctrl] action={retry_plan.control_action}  "
                               f"root_causes={retry_plan.root_causes}")
                         print(f"    [retry-ctrl] must_not_do={retry_plan.must_not_do}")
@@ -1170,6 +1241,7 @@ def run_with_jingu(instance_id: str, output_dir: Path, max_attempts: int = 3) ->
                             "tests_passed_count": _tests_now,
                             "tests_passed_prev": _tests_prev,
                             "tests_delta": _tests_delta,
+                            "progress_code": _progress_code,
                             "files_written_paths": (jingu_body or {}).get("files_written", []),
                         })
                         # next_attempt_prompt already merges hint_prefix + exec_feedback
