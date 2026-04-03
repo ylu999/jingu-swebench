@@ -673,9 +673,11 @@ def run_agent(
     if previous_failure:
         extra_parts.append(f"Previous attempt failed: {previous_failure[:300]}")
     if extra_parts:
-        config = recursive_merge(config, {
-            "agent": {"instance_template_extra": "\n\n".join(extra_parts)}
-        })
+        # Append directly to instance_template — instance_template_extra is NOT a recognized
+        # AgentConfig field and would never be rendered. Direct append is the only correct path.
+        config["agent"]["instance_template"] = (
+            config["agent"]["instance_template"] + "\n\n" + "\n\n".join(extra_parts)
+        )
     t_cfg.stop()
 
     print(f"    [agent] running {instance_id} attempt={attempt}...")
