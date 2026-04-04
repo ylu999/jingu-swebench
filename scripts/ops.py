@@ -236,15 +236,27 @@ def cmd_run(args) -> None:
 # ── logs ───────────────────────────────────────────────────────────────────────
 
 def cmd_logs(args) -> None:
-    logs = boto3.client("logs", region_name=REGION)
+    logs_client = boto3.client("logs", region_name=REGION)
+    ecs = boto3.client("ecs", region_name=REGION)
     task_id = args.task_id
-    log_stream = f"ecs/runner/{task_id}"
+    log_stream = f"runner/runner/{task_id}"
 
     print(f"[ops] tailing logs: {LOG_GROUP}/{log_stream}")
     next_token = None
     last_event_time = 0
+    wait_deadline = time.monotonic() + 120  # give up waiting for stream after 2 min
 
     while True:
+        # Check if task already stopped — fail fast instead of waiting forever
+        if not args.follow:
+            try:
+                resp = ecs.describe_tasks(cluster=ECS_CLUSTER, tasks=[task_id])
+                tasks = resp.get("tasks", [])
+                if tasks and tasks[0].get("lastStatus") == "STOPPED":
+                    print(f"[ops] task is STOPPED (exit={tasks[0].get('containers', [{}])[0].get('exitCode', '?')})")
+            except Exception:
+                pass
+
         kwargs = {
             "logGroupName": LOG_GROUP,
             "logStreamName": log_stream,
@@ -254,9 +266,12 @@ def cmd_logs(args) -> None:
             kwargs["nextToken"] = next_token
 
         try:
-            resp = logs.get_log_events(**kwargs)
-        except logs.exceptions.ResourceNotFoundException:
-            print("[ops] log stream not yet available, waiting...")
+            resp = logs_client.get_log_events(**kwargs)
+        except logs_client.exceptions.ResourceNotFoundException:
+            if time.monotonic() > wait_deadline:
+                print("[ops] log stream not available after 2 min — task may have failed to start")
+                sys.exit(1)
+            print("[ops] log stream not yet available, waiting...", end="\r", flush=True)
             time.sleep(10)
             continue
 
@@ -266,11 +281,23 @@ def cmd_logs(args) -> None:
                 print(ev["message"])
                 last_event_time = ev["timestamp"]
 
-        next_token = resp.get("nextForwardToken")
+        new_token = resp.get("nextForwardToken")
 
         if not args.follow:
             break
 
+        # In follow mode: stop if task is STOPPED and we've drained all events
+        if new_token == next_token:
+            try:
+                t_resp = ecs.describe_tasks(cluster=ECS_CLUSTER, tasks=[task_id])
+                tasks = t_resp.get("tasks", [])
+                if tasks and tasks[0].get("lastStatus") == "STOPPED":
+                    print("[ops] task STOPPED — log stream exhausted")
+                    break
+            except Exception:
+                pass
+
+        next_token = new_token
         time.sleep(5)
 
 
