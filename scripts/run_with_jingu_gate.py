@@ -1328,6 +1328,9 @@ BASE_CONFIG = {
             # litellm 1.83 bug: parallel_tool_calls=true/false sends malformed tool_choice to Bedrock.
             # Setting None suppresses the param entirely, which works correctly.
             "parallel_tool_calls": None,
+            # Extended thinking: matches official mini-swe-agent Verified run
+            # (reasoning_effort=high via Anthropic API = budget_tokens=10000 via Bedrock)
+            "thinking": {"type": "enabled", "budget_tokens": 10000},
         },
     },
     "environment": {
@@ -1373,6 +1376,7 @@ def run_agent(
     attempt: int,
     previous_failure: str = "",
     parent_timer: Timer | None = None,
+    mode: str = "jingu",
 ) -> tuple[str | None, str | None, dict | None]:
     """Run mini-SWE-agent on one instance. Returns (submission patch or None, exit_status, jingu_body or None)."""
     from minisweagent.run.benchmarks.swebench import process_instance
@@ -1394,6 +1398,19 @@ def run_agent(
 
     # Build instance_template_extra: tests that must pass + optional retry hint
     extra_parts = []
+
+    # jingu-specific constraint: prevent ENVIRONMENT_NOT_AGENT_WORK violations.
+    # baseline uses the official prompt without this block.
+    if mode == "jingu":
+        extra_parts.append(
+            "## FORBIDDEN ACTIONS\n\n"
+            "The following actions are STRICTLY FORBIDDEN. Do NOT do any of these:\n\n"
+            "- `pip install`, `pip3 install`, `uv pip install`, `python setup.py install`, `conda install`\n"
+            "- `apt install`, `apt-get install`, `dnf install`, `brew install`\n"
+            "- Installing or configuring any software or dependencies\n\n"
+            "The environment is already fully set up. If something appears missing, "
+            "read the existing code more carefully — the solution is always a code change, not an environment change."
+        )
 
     # B4: declaration protocol — agent must declare fix type and principals
     # before submitting. Extraction runs in cognition gate post-submission.
@@ -1659,7 +1676,8 @@ def run_with_jingu(instance_id: str, output_dir: Path, max_attempts: int = 3,
             )
 
         patch, agent_exit, jingu_body = run_agent(instance, output_dir, attempt,
-                                                  previous_failure=last_failure, parent_timer=t_inst)
+                                                  previous_failure=last_failure, parent_timer=t_inst,
+                                                  mode=mode)
 
         # p179: record test counts for this attempt (used later for tests_delta)
         _test_counts_by_attempt[attempt] = extract_test_counts(jingu_body)

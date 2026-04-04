@@ -36,16 +36,6 @@ agent:
     4. Verify your fix works by running your script again
     5. Test edge cases to ensure your fix is robust
 
-    ## FORBIDDEN ACTIONS
-
-    The following actions are STRICTLY FORBIDDEN. Do NOT do any of these:
-
-    - `pip install`, `pip3 install`, `uv pip install`, `python setup.py install`, `conda install`
-    - `apt install`, `apt-get install`, `dnf install`, `brew install`
-    - Installing or configuring any software or dependencies
-
-    The environment is already fully set up. If something appears missing, read the existing code more carefully — the solution is always a code change, not an environment change.
-
     ## Command Execution Rules
 
     You are operating in an environment where
@@ -81,6 +71,7 @@ agent:
     - Avoid interactive tools like vi, nano, or any that require user input
     - You can use bash commands or invoke any tool that is available in the environment
     - You can also create new tools or scripts to help you with the task
+    - If a tool isn't available, you can also install it
 
     ## Submission
 
@@ -125,7 +116,7 @@ agent:
 environment:
   cwd: "/testbed"
   timeout: 60
-  interpreter: ["bash", "-l", "-c"]
+  interpreter: ["bash", "-c"]
   env:
     PAGER: cat
     MANPAGER: cat
