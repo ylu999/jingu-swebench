@@ -4,14 +4,16 @@ ops.py — jingu-swebench operational script.
 
 Subcommands:
   build       Build + push Docker image to ECR via SSM on EC2
-  run         Launch ECS batch task
-  logs        Tail ECS task logs (CloudWatch)
+  run         Launch ECS batch task (no tailing)
+  smoke       Launch ECS task + live-tail ALL instance logs in real time
+  logs        Tail a single ECS task log (CloudWatch)
   status      Show ECS task status
 
 Usage:
   python scripts/ops.py build
-  python scripts/ops.py run --instance-ids django__django-11039 django__django-11099 --batch-name b2-smoke --workers 3 --max-attempts 2
-  python scripts/ops.py logs --task-id <ecs_task_id>
+  python scripts/ops.py smoke --batch-name b5-smoke --instance-ids django__django-11039 django__django-12470
+  python scripts/ops.py run --instance-ids django__django-11039 --batch-name b2-test --workers 3
+  python scripts/ops.py logs --task-id <ecs_task_id> --follow
   python scripts/ops.py status --task-id <ecs_task_id>
 
 Environment:
@@ -20,7 +22,9 @@ Environment:
 
 import argparse
 import json
+import re
 import sys
+import threading
 import time
 
 import boto3
@@ -301,6 +305,234 @@ def cmd_logs(args) -> None:
         time.sleep(5)
 
 
+# ── smoke ──────────────────────────────────────────────────────────────────────
+
+# Lines from dockerd/containerd that are pure noise
+_NOISE_RE = re.compile(r'^time=".*?level=|^\s*$')
+
+# Lines worth highlighting
+_ALERT_RE = re.compile(
+    r'ERROR|FAILED|Traceback|Exception|ModuleNotFoundError|'
+    r'ImportError|FileNotFoundError|CRITICAL|\[jingu\] ERROR'
+)
+
+# Control-plane summary lines
+_CP_RE = re.compile(r'\[cp-step\]|\[control-plane\]|\[jingu\]|STOPPING|verdict|pee:')
+
+_COLORS = [
+    "\033[36m",  # cyan
+    "\033[33m",  # yellow
+    "\033[35m",  # magenta
+    "\033[32m",  # green
+    "\033[34m",  # blue
+    "\033[91m",  # bright red
+    "\033[96m",  # bright cyan
+    "\033[93m",  # bright yellow
+]
+_RESET = "\033[0m"
+_print_lock = threading.Lock()
+
+
+def _tail_instance_stream(
+    task_id: str,
+    instance_id: str,
+    color: str,
+    filter_pat: re.Pattern | None,
+    done_event: threading.Event,
+) -> None:
+    """Tail one ECS task's CloudWatch log stream, printing lines with instance prefix."""
+    logs = boto3.client("logs", region_name=REGION)
+    ecs = boto3.client("ecs", region_name=REGION)
+    log_stream = f"runner/runner/{task_id}"
+    prefix = f"{color}[{instance_id[:30]}]{_RESET} "
+
+    next_token: str | None = None
+    last_ts = 0
+    stream_wait_start = time.monotonic()
+    stream_available = False
+
+    while not done_event.is_set():
+        try:
+            kwargs: dict = dict(
+                logGroupName=LOG_GROUP,
+                logStreamName=log_stream,
+                startFromHead=True,
+                limit=500,
+            )
+            if next_token:
+                kwargs["nextToken"] = next_token
+            resp = logs.get_log_events(**kwargs)
+            stream_available = True
+        except logs.exceptions.ResourceNotFoundException:
+            elapsed = time.monotonic() - stream_wait_start
+            # Check if task already stopped before stream appeared
+            try:
+                t = ecs.describe_tasks(cluster=ECS_CLUSTER, tasks=[task_id])
+                status = (t.get("tasks") or [{}])[0].get("lastStatus", "")
+                if status == "STOPPED":
+                    with _print_lock:
+                        print(f"{prefix}⚠️  task STOPPED before log stream appeared", flush=True)
+                    return
+            except Exception:
+                pass
+            if elapsed > 180:
+                with _print_lock:
+                    print(f"{prefix}⚠️  log stream not available after 3 min", flush=True)
+                return
+            time.sleep(5)
+            continue
+
+        events = resp.get("events", [])
+        new_events = [e for e in events if e["timestamp"] > last_ts]
+
+        for ev in new_events:
+            msg = ev["message"]
+            last_ts = ev["timestamp"]
+
+            # Always suppress pure noise
+            if _NOISE_RE.match(msg):
+                continue
+
+            # If a filter is set, apply it
+            if filter_pat and not filter_pat.search(msg):
+                continue
+
+            line = f"⚠️  {msg}" if _ALERT_RE.search(msg) else msg
+            with _print_lock:
+                print(f"{prefix}{line}", flush=True)
+
+        new_token = resp.get("nextForwardToken")
+
+        # Exit when stream exhausted + task stopped
+        if new_token == next_token and stream_available:
+            try:
+                t = ecs.describe_tasks(cluster=ECS_CLUSTER, tasks=[task_id])
+                status = (t.get("tasks") or [{}])[0].get("lastStatus", "")
+                if status == "STOPPED":
+                    with _print_lock:
+                        print(f"{prefix}[done — task STOPPED]", flush=True)
+                    return
+            except Exception:
+                pass
+
+        next_token = new_token
+        time.sleep(5)
+
+
+def cmd_smoke(args) -> None:
+    """
+    Launch ECS task + live-tail ALL instance logs in real time.
+
+    Each instance's output is prefixed with its ID and a distinct color.
+    Exits automatically when the task stops.
+    """
+    ecs = boto3.client("ecs", region_name=REGION)
+
+    batch_name = args.batch_name
+    instance_ids = args.instance_ids
+    output_path = f"/app/results/{batch_name}"
+
+    cmd_parts = [
+        "--instance-ids", *instance_ids,
+        "--mode", args.mode,
+        "--max-attempts", str(args.max_attempts),
+        "--workers", str(args.workers),
+        "--output", output_path,
+    ]
+
+    print(f"[smoke] batch={batch_name}  instances={len(instance_ids)}", flush=True)
+    for iid in instance_ids:
+        print(f"[smoke]   {iid}", flush=True)
+    print(f"[smoke] mode={args.mode} attempts={args.max_attempts} workers={args.workers}", flush=True)
+
+    # Launch ECS task
+    resp = ecs.run_task(
+        cluster=ECS_CLUSTER,
+        taskDefinition=ECS_TASK_DEF,
+        launchType="EC2",
+        overrides={
+            "containerOverrides": [{
+                "name": "runner",
+                "command": cmd_parts,
+                "environment": [
+                    {"name": "BATCH_NAME", "value": batch_name},
+                ],
+            }]
+        },
+    )
+    failures = resp.get("failures", [])
+    if failures:
+        print(f"[smoke] FAILED to launch: {failures}", flush=True)
+        sys.exit(1)
+
+    task_arn = resp["tasks"][0]["taskArn"]
+    task_id = task_arn.split("/")[-1]
+    print(f"[smoke] ECS task: {task_id}", flush=True)
+
+    # Wait for task to reach RUNNING (up to 3 min)
+    print("[smoke] waiting for RUNNING...", end="", flush=True)
+    deadline = time.monotonic() + 180
+    while time.monotonic() < deadline:
+        t_resp = ecs.describe_tasks(cluster=ECS_CLUSTER, tasks=[task_id])
+        tasks = t_resp.get("tasks", [])
+        if tasks:
+            status = tasks[0].get("lastStatus", "")
+            if status == "RUNNING":
+                print(" RUNNING", flush=True)
+                break
+            if status == "STOPPED":
+                exit_code = tasks[0].get("containers", [{}])[0].get("exitCode", "?")
+                reason = tasks[0].get("stoppedReason", "")
+                print(f"\n[smoke] task already STOPPED (exit={exit_code} reason={reason})", flush=True)
+                sys.exit(1)
+        print(".", end="", flush=True)
+        time.sleep(5)
+    else:
+        print("\n[smoke] timeout waiting for RUNNING", flush=True)
+        sys.exit(1)
+
+    # Build optional filter pattern
+    filter_pat = re.compile(args.filter) if args.filter else None
+
+    print(f"[smoke] tailing {len(instance_ids)} instance(s){'  filter: ' + args.filter if args.filter else ''}",
+          flush=True)
+    print("─" * 70, flush=True)
+
+    # One tail thread per instance
+    done_event = threading.Event()
+    threads = []
+    for i, iid in enumerate(instance_ids):
+        color = _COLORS[i % len(_COLORS)]
+        t = threading.Thread(
+            target=_tail_instance_stream,
+            args=(task_id, iid, color, filter_pat, done_event),
+            daemon=True,
+        )
+        t.start()
+        threads.append(t)
+
+    # Wait for all tail threads to finish (each exits when its task STOPS)
+    try:
+        for t in threads:
+            t.join()
+    except KeyboardInterrupt:
+        print("\n[smoke] interrupted", flush=True)
+        done_event.set()
+
+    print("─" * 70, flush=True)
+
+    # Final status
+    try:
+        t_resp = ecs.describe_tasks(cluster=ECS_CLUSTER, tasks=[task_id])
+        tasks = t_resp.get("tasks", [])
+        if tasks:
+            s = tasks[0]
+            exit_code = s.get("containers", [{}])[0].get("exitCode", "?")
+            print(f"[smoke] final status={s.get('lastStatus')} exit={exit_code}", flush=True)
+    except Exception:
+        pass
+
+
 # ── status ─────────────────────────────────────────────────────────────────────
 
 def cmd_status(args) -> None:
@@ -338,13 +570,24 @@ def main():
                          help="Don't scale down ASG after build")
 
     # run
-    p_run = sub.add_parser("run", help="Launch ECS batch")
+    p_run = sub.add_parser("run", help="Launch ECS batch (no log tailing)")
     p_run.add_argument("--instance-ids", nargs="+", required=True)
     p_run.add_argument("--batch-name", required=True)
     p_run.add_argument("--mode", default="jingu", choices=["jingu", "baseline"])
     p_run.add_argument("--max-attempts", type=int, default=2)
     p_run.add_argument("--workers", type=int, default=3)
     p_run.add_argument("--s3-upload", action="store_true", default=True)
+
+    # smoke — launch + live tail all instances
+    p_smoke = sub.add_parser("smoke", help="Launch ECS task + live-tail all instance logs")
+    p_smoke.add_argument("--instance-ids", nargs="+", required=True)
+    p_smoke.add_argument("--batch-name", required=True)
+    p_smoke.add_argument("--mode", default="jingu", choices=["jingu", "baseline"])
+    p_smoke.add_argument("--max-attempts", type=int, default=2)
+    p_smoke.add_argument("--workers", type=int, default=3)
+    p_smoke.add_argument("--filter", "-f", default=None,
+                         help="Regex filter (default: suppress noise, show all signal lines). "
+                              "E.g. 'cp-step|control-plane'")
 
     # logs
     p_logs = sub.add_parser("logs", help="Tail ECS task logs")
@@ -361,6 +604,8 @@ def main():
         cmd_build(args)
     elif args.cmd == "run":
         cmd_run(args)
+    elif args.cmd == "smoke":
+        cmd_smoke(args)
     elif args.cmd == "logs":
         cmd_logs(args)
     elif args.cmd == "status":
