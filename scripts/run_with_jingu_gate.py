@@ -1327,14 +1327,11 @@ BASE_CONFIG = {
         "model_name": MODEL,
         "model_kwargs": {
             "drop_params": True,
-            # Official config: anthropic/claude-sonnet-4-5-20250929 + interleaved thinking
-            # reasoning_effort=high via Anthropic API — replicated with thinking+beta_header
-            # temperature must be None (not 0) when thinking is enabled
             "temperature": None,
-            "thinking": {"type": "enabled", "budget_tokens": 16000},
             "extra_headers": {
                 "anthropic-beta": "interleaved-thinking-2025-05-14",
             },
+            "reasoning_effort": "high",
             "parallel_tool_calls": True,
         },
     },
