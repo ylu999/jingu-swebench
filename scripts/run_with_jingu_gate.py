@@ -920,8 +920,6 @@ def _check_onboarding(instance: dict) -> tuple[bool, str]:
 
     try:
         cmd = _build_test_command(instance)
-        if "runtests.py" not in cmd and "pytest" not in cmd:
-            return False, f"CUSTOM_PATH_INVENTED: test command lacks runtests.py/pytest: {cmd[:80]}"
         if "conda activate testbed" not in cmd:
             return False, "ASSUMED_ENV_BEHAVIOR: test command missing 'conda activate testbed'"
     except Exception as e:
@@ -1769,6 +1767,7 @@ def run_with_jingu(instance_id: str, output_dir: Path, max_attempts: int = 3,
             "failure_type": "ONBOARDING_REQUIRED",
             "reason": _reason,
             "patch": "",
+            "accepted": False,
         }
     print("[onboarding-check] PASS")
     _print_execution_model(_build_execution_model(instance))
