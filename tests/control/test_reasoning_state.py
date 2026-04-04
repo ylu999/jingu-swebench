@@ -454,3 +454,60 @@ class TestIntegrationScenarios:
         s = update_reasoning_state(s, normalize_signals(verify_partial))
         assert s.task_success is True   # now set
         assert isinstance(decide_next(s), VerdictStop)
+
+
+class TestB2CpStateHolder:
+    """B2: cross-attempt cp_state persistence via holder list."""
+
+    def test_holder_updated_by_step_signals(self):
+        """Step signals update holder[0], caller sees updated state."""
+        holder = [initial_reasoning_state("OBSERVE")]
+        step_partial = extract_step_signals(
+            tests_passed_count=2, tests_passed_prev=0,
+            env_error_detected=False, patch_non_empty=True,
+        )
+        holder[0] = update_reasoning_state(holder[0], normalize_signals(step_partial))
+        assert holder[0].step_index == 1
+        assert holder[0].no_progress_steps == 0  # test count increased → progress
+
+    def test_holder_accumulates_across_steps(self):
+        """Multiple step updates accumulate no_progress correctly."""
+        holder = [initial_reasoning_state("OBSERVE")]
+        # 3 no-progress steps
+        for _ in range(3):
+            step_partial = extract_step_signals(
+                tests_passed_count=-1, tests_passed_prev=-1,
+                env_error_detected=False, patch_non_empty=False,
+            )
+            holder[0] = update_reasoning_state(holder[0], normalize_signals(step_partial))
+        assert holder[0].step_index == 3
+        assert holder[0].no_progress_steps == 3
+
+    def test_verify_signal_applied_after_steps_preserves_step_index(self):
+        """Verify signal at attempt boundary does not reset step_index from steps."""
+        holder = [initial_reasoning_state("OBSERVE")]
+        # Simulate 5 steps
+        for _ in range(5):
+            step_partial = extract_step_signals(
+                tests_passed_count=-1, tests_passed_prev=-1,
+                env_error_detected=False, patch_non_empty=False,
+            )
+            holder[0] = update_reasoning_state(holder[0], normalize_signals(step_partial))
+        assert holder[0].step_index == 5
+        # Apply verify signal
+        verify_partial = extract_verify_signals(controlled_verify_passed=True)
+        holder[0] = update_reasoning_state(holder[0], normalize_signals(verify_partial))
+        assert holder[0].step_index == 6   # incremented once more
+        assert holder[0].task_success is True
+        assert isinstance(decide_next(holder[0]), VerdictStop)
+
+    def test_env_error_in_step_triggers_redirect(self):
+        """env_error_detected=True in a step sets env_noise → VerdictRedirect."""
+        holder = [initial_reasoning_state("OBSERVE")]
+        step_partial = extract_step_signals(
+            tests_passed_count=-1, tests_passed_prev=-1,
+            env_error_detected=True, patch_non_empty=False,
+        )
+        holder[0] = update_reasoning_state(holder[0], normalize_signals(step_partial))
+        verdict = decide_next(holder[0])
+        assert isinstance(verdict, VerdictRedirect)

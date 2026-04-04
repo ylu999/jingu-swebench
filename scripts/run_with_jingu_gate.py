@@ -48,7 +48,7 @@ from control.reasoning_state import (
     normalize_signals, ReasoningState,
     VerdictStop, VerdictRedirect,
 )
-from control.swe_signal_adapter import extract_verify_signals
+from control.swe_signal_adapter import extract_verify_signals, extract_step_signals
 
 # P-INV-001: run environment invariant checks before any batch work
 run_preflight()
@@ -127,6 +127,48 @@ class StepMonitorState:
         self.verify_history: list[dict] = []       # structured signal log
         self.verify_in_flight: bool = False        # debounce flag
         self._lock = __import__("threading").Lock()
+        # B2-CP: reasoning control plane state for this attempt
+        # Owned here so step monitor can update it on each step.
+        # run_with_jingu() reads self.cp_state at attempt boundary.
+        self.cp_state = initial_reasoning_state("OBSERVE")
+        self._prev_step_tests_passed: int = -1     # tests_passed before current step
+        self._last_step_env_error: bool = False    # env mutation seen in latest step
+
+    def update_cp_with_step_signals(
+        self,
+        *,
+        env_error_detected: bool,
+        patch_non_empty: bool,
+        cp_state_holder: list | None = None,
+    ) -> None:
+        """
+        B2-CP: update control-plane state with step-level signals.
+        Called once per agent step from _monitored_step.
+        Uses latest_tests_passed() for evidence_gain (requires inner-verify data).
+
+        If cp_state_holder is provided (a single-element list from run_with_jingu),
+        reads/writes holder[0] so cp_state persists across attempts.
+        Otherwise updates self.cp_state (attempt-scoped).
+        """
+        tests_now = self.latest_tests_passed()
+        tests_prev = self._prev_step_tests_passed
+        # Update prev for next step BEFORE computing signals (I1/I2 monotone invariant)
+        if tests_now >= 0:
+            self._prev_step_tests_passed = tests_now
+        step_partial = extract_step_signals(
+            tests_passed_count=tests_now,
+            tests_passed_prev=tests_prev,
+            env_error_detected=env_error_detected,
+            patch_non_empty=patch_non_empty,
+        )
+        if cp_state_holder is not None:
+            cp_state_holder[0] = update_reasoning_state(
+                cp_state_holder[0], normalize_signals(step_partial)
+            )
+        else:
+            self.cp_state = update_reasoning_state(
+                self.cp_state, normalize_signals(step_partial)
+            )
 
     def record_verify(self, step: int, result: dict) -> None:
         with self._lock:
@@ -163,6 +205,7 @@ def _install_step_monitor(
     instance_id: str,
     attempt: int,
     instance: dict,
+    cp_state_holder: list | None = None,
 ) -> StepMonitorState:
     """
     Replace step logger with a step monitor that:
@@ -205,10 +248,12 @@ def _install_step_monitor(
         print(f"    [step {self.n_calls}] ${self.cost:.2f}  {snippet}", flush=True)
 
         # ── 1b. Detect env mutation (ENVIRONMENT_NOT_AGENT_WORK) ─────────────
+        _step_env_error = False
         for msg in reversed(self.messages):
             if msg.get("role") == "assistant":
                 has_mut, trigger = _msg_has_env_mutation(msg)
                 if has_mut:
+                    _step_env_error = True
                     print(
                         f"    [env-mutation] ENVIRONMENT_MUTATION_IN_AGENT_LOOP "
                         f"step={self.n_calls} trigger={trigger!r} — "
@@ -220,10 +265,12 @@ def _install_step_monitor(
 
         # ── 2. Check for patch write signal ──────────────────────────────────
         # Look at the most recent assistant message for write signals
+        _step_patch_non_empty = False
         for msg in reversed(self.messages):
             if msg.get("role") == "assistant":
                 if not _msg_has_signal(msg):
                     break  # latest assistant msg, no signal — skip verify
+                _step_patch_non_empty = True
                 # Signal detected — check debounce conditions
                 cid = state.container_id
                 if not cid:
@@ -263,6 +310,14 @@ def _install_step_monitor(
                 t = threading.Thread(target=_run_verify, daemon=True)
                 t.start()
                 break
+
+        # ── 3. B2-CP: update control-plane state with step-level signals ──────
+        # Separated from verify signals (CORR1). task_success is NEVER set here.
+        state.update_cp_with_step_signals(
+            env_error_detected=_step_env_error,
+            patch_non_empty=_step_patch_non_empty,
+            cp_state_holder=cp_state_holder,
+        )
 
         return result
 
@@ -1386,6 +1441,7 @@ def run_agent(
     previous_failure: str = "",
     parent_timer: Timer | None = None,
     mode: str = "jingu",
+    cp_state_holder: list | None = None,
 ) -> tuple[str | None, str | None, dict | None]:
     """Run mini-SWE-agent on one instance. Returns (submission patch or None, exit_status, jingu_body or None)."""
     from minisweagent.run.benchmarks.swebench import process_instance
@@ -1480,7 +1536,9 @@ def run_agent(
     progress = RunBatchProgressManager(num_instances=1)
 
     # Install step monitor: logs steps + triggers inner-loop verify on patch writes
-    _monitor = _install_step_monitor(instance_id, attempt, instance)
+    # B2-CP: cp_state_holder (from run_with_jingu) passed through so step signals
+    # update the cross-attempt cp_state directly.
+    _monitor = _install_step_monitor(instance_id, attempt, instance, cp_state_holder=cp_state_holder)
 
     # Hook DefaultAgent.run() to:
     # 1. Inject container_id into _monitor as soon as container is started
@@ -1671,9 +1729,11 @@ def run_with_jingu(instance_id: str, output_dir: Path, max_attempts: int = 3,
     _strategy_entries: list[dict] = []
     # p179: track test counts per attempt for delta computation
     _test_counts_by_attempt: dict[int, int] = {}  # attempt → passed count (-1 if unknown)
-    # B1-CP: reasoning control plane state — one per instance, updated at attempt boundary
-    # B1 only: updated with verify signals only (step-level signals added in B2)
-    cp_state = initial_reasoning_state("OBSERVE")
+    # B2-CP: reasoning control plane state — one per instance, persists across attempts.
+    # Wrapped in list so step monitor (inside run_agent) can update it via closure.
+    # Step signals (B2) update cp_state_holder[0] on every step.
+    # Verify signals (B1) are applied at attempt boundary below.
+    cp_state_holder: list = [initial_reasoning_state("OBSERVE")]
 
     for attempt in range(1, max_attempts + 1):
         print(f"  [attempt {attempt}/{max_attempts}] {instance_id}")
@@ -1689,7 +1749,7 @@ def run_with_jingu(instance_id: str, output_dir: Path, max_attempts: int = 3,
 
         patch, agent_exit, jingu_body = run_agent(instance, output_dir, attempt,
                                                   previous_failure=last_failure, parent_timer=t_inst,
-                                                  mode=mode)
+                                                  mode=mode, cp_state_holder=cp_state_holder)
 
         # p179: record test counts for this attempt (used later for tests_delta)
         _test_counts_by_attempt[attempt] = extract_test_counts(jingu_body)
@@ -1932,17 +1992,18 @@ def run_with_jingu(instance_id: str, output_dir: Path, max_attempts: int = 3,
                             "progress_code": _progress_code,
                             "files_written_paths": (jingu_body or {}).get("files_written", []),
                         })
-                        # B1-CP: update reasoning state with verify result FIRST (before any break)
-                        # This ensures control-plane verdict is always computed and logged,
-                        # and VerdictStop(task_success) becomes the authoritative termination signal.
-                        # B1 only uses verify signals (step-level signals added in B2)
+                        # B2-CP: update reasoning state with verify result FIRST (before any break)
+                        # Step-level signals (B2) already updated cp_state_holder[0] during the run.
+                        # Here we apply the verify signal (B1) — task_success only — as a
+                        # SEPARATE update_reasoning_state() call (CORR1: signal separation).
                         _cv_passed = (_strategy_failure_class_v2 == "verified_pass")
                         _verify_partial = extract_verify_signals(controlled_verify_passed=_cv_passed)
-                        cp_state = update_reasoning_state(cp_state, normalize_signals(_verify_partial))
-                        cp_verdict = decide_next(cp_state)
-                        print(f"    [control-plane] state=phase:{cp_state.phase} "
-                              f"step:{cp_state.step_index} no_progress:{cp_state.no_progress_steps} "
-                              f"task_success:{cp_state.task_success}")
+                        cp_state_holder[0] = update_reasoning_state(cp_state_holder[0], normalize_signals(_verify_partial))
+                        _cp_state_now = cp_state_holder[0]
+                        cp_verdict = decide_next(_cp_state_now)
+                        print(f"    [control-plane] state=phase:{_cp_state_now.phase} "
+                              f"step:{_cp_state_now.step_index} no_progress:{_cp_state_now.no_progress_steps} "
+                              f"task_success:{_cp_state_now.task_success}")
                         print(f"    [control-plane] verdict={cp_verdict}")
                         if isinstance(cp_verdict, VerdictStop):
                             print(f"    [control-plane] STOPPING — reason={cp_verdict.reason}")
