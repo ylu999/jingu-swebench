@@ -165,9 +165,19 @@ class StepMonitorState:
             cp_state_holder[0] = update_reasoning_state(
                 cp_state_holder[0], normalize_signals(step_partial)
             )
+            _s = cp_state_holder[0]
         else:
             self.cp_state = update_reasoning_state(
                 self.cp_state, normalize_signals(step_partial)
+            )
+            _s = self.cp_state
+        # B2-CP step log: emit on every step so ECS logs show state evolution
+        if step_partial:  # only log when at least one signal is non-default
+            print(
+                f"    [cp-step] signals={list(step_partial.keys())} "
+                f"no_progress:{_s.no_progress_steps} step:{_s.step_index} "
+                f"env_noise:{_s.env_noise} actionability:{_s.actionability}",
+                flush=True,
             )
 
     def record_verify(self, step: int, result: dict) -> None:
