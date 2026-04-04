@@ -22,6 +22,34 @@ python scripts/ops.py build
 
 ## Scripts
 
+### `scripts/tail-logs.py` — 实时 tail（首选）
+
+任何正在跑或刚启动的 task，直接 tail：
+
+```bash
+# 基础用法：去噪，全量显示
+python scripts/tail-logs.py <task-id>
+
+# 只看关键信号（启动 + CP + 报错）
+python scripts/tail-logs.py <task-id> \
+  --filter '\[entrypoint\]|\[preflight\]|\[init\]|\[jingu\]|ERROR|FAILED|\[control-plane\]|\[cp-step\]'
+
+# 只看 control-plane verdict
+python scripts/tail-logs.py <task-id> --filter '\[control-plane\]'
+
+# 所有行（含 dockerd 噪音）
+python scripts/tail-logs.py <task-id> --all
+
+# 调整 poll 间隔（默认 5s）
+python scripts/tail-logs.py <task-id> --interval 10
+```
+
+**行为**：
+- log stream 未出现 → 等待（最多 3 min），task STOPPED 即 early-fail exit
+- task STOPPED + stream 耗尽 → 自动退出（不需要 Ctrl-C）
+- ERROR/Traceback 等行自动加 ⚠️ 标记
+- 可 Ctrl-C 随时中断
+
 ### `scripts/smoke-test.sh` — 一键启动+尾随
 
 - 启动 ECS 任务
