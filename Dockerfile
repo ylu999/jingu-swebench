@@ -55,6 +55,8 @@ COPY scripts/run_with_jingu_gate.py \
      scripts/gate_runner.js \
      scripts/patch_admission_policy.js \
      /app/scripts/
+# B1-CP: reasoning control plane Python module
+COPY scripts/control/ /app/scripts/control/
 
 # Bake provenance into image (RT6: artifacts carry their own identity)
 ARG GIT_COMMIT=unknown

@@ -42,6 +42,13 @@ from declaration_extractor import extract_declaration, extract_last_agent_messag
 from patch_signals import extract_patch_signals
 from cognition_check import check_cognition, format_cognition_feedback
 from preflight import run_preflight
+# B1-CP: reasoning control plane (Python port of jingu-control-plane v0.3)
+from control.reasoning_state import (
+    initial_reasoning_state, update_reasoning_state, decide_next,
+    normalize_signals, ReasoningState,
+    VerdictStop, VerdictRedirect,
+)
+from control.swe_signal_adapter import extract_verify_signals
 
 # P-INV-001: run environment invariant checks before any batch work
 run_preflight()
@@ -1664,6 +1671,9 @@ def run_with_jingu(instance_id: str, output_dir: Path, max_attempts: int = 3,
     _strategy_entries: list[dict] = []
     # p179: track test counts per attempt for delta computation
     _test_counts_by_attempt: dict[int, int] = {}  # attempt → passed count (-1 if unknown)
+    # B1-CP: reasoning control plane state — one per instance, updated at attempt boundary
+    # B1 only: updated with verify signals only (step-level signals added in B2)
+    cp_state = initial_reasoning_state("OBSERVE")
 
     for attempt in range(1, max_attempts + 1):
         print(f"  [attempt {attempt}/{max_attempts}] {instance_id}")
@@ -1930,6 +1940,33 @@ def run_with_jingu(instance_id: str, output_dir: Path, max_attempts: int = 3,
                         if _strategy_failure_class_v2 == "verified_pass":
                             print(f"    [retry-ctrl] STOPPING — verified_pass (controlled_verify tests_failed=0)")
                             break
+
+                        # B1-CP: update reasoning state with verify result, then apply verdict
+                        # B1 only uses verify signals (step-level signals added in B2)
+                        _cv_passed = (_strategy_failure_class_v2 == "verified_pass")
+                        _verify_partial = extract_verify_signals(controlled_verify_passed=_cv_passed)
+                        cp_state = update_reasoning_state(cp_state, normalize_signals(_verify_partial))
+                        cp_verdict = decide_next(cp_state)
+                        print(f"    [control-plane] state=phase:{cp_state.phase} "
+                              f"step:{cp_state.step_index} no_progress:{cp_state.no_progress_steps} "
+                              f"task_success:{cp_state.task_success}")
+                        print(f"    [control-plane] verdict={cp_verdict}")
+                        if isinstance(cp_verdict, VerdictStop):
+                            print(f"    [control-plane] STOPPING — reason={cp_verdict.reason}")
+                            break
+                        if isinstance(cp_verdict, VerdictRedirect):
+                            # Unconditional override (CORR3): REDIRECT always forces ADJUST
+                            print(f"    [control-plane] REDIRECT → forcing ADJUST  reason={cp_verdict.reason}")
+                            import dataclasses as _dc
+                            retry_plan = _dc.replace(
+                                retry_plan,
+                                control_action="ADJUST",
+                                next_attempt_prompt=(
+                                    retry_plan.next_attempt_prompt
+                                    + f"\n\n[Control-plane redirect: {cp_verdict.reason} — re-examine environment assumptions before patching]"
+                                ),
+                            )
+
                         # next_attempt_prompt already merges hint_prefix + exec_feedback
                         last_failure = retry_plan.next_attempt_prompt[:600]
                     else:
