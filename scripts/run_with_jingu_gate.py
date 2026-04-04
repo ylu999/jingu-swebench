@@ -1330,7 +1330,9 @@ BASE_CONFIG = {
             "parallel_tool_calls": None,
             # Extended thinking: matches official mini-swe-agent Verified run
             # (reasoning_effort=high via Anthropic API = budget_tokens=10000 via Bedrock)
+            # temperature must be 1 when thinking is enabled (Bedrock requirement)
             "thinking": {"type": "enabled", "budget_tokens": 10000},
+            "temperature": 1,
         },
     },
     "environment": {
