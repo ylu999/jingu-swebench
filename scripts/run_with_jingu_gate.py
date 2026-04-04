@@ -173,7 +173,11 @@ class StepMonitorState:
         if tests_now >= 0:
             self._prev_step_tests_passed = tests_now
         self._prev_verify_history_len = verify_len_now
-        self._prev_patch_non_empty = patch_non_empty
+        # B5 latch: _prev_patch_non_empty is monotone — once True, stays True.
+        # This tracks "has a patch ever been written this attempt", not "did last step write".
+        # Without the latch, any read step followed by a write step re-triggers patch_first_write.
+        if patch_non_empty:
+            self._prev_patch_non_empty = True
 
         step_partial, progress_evaluable_event = extract_step_signals(
             tests_passed_count=tests_now,
