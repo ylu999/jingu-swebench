@@ -1317,7 +1317,9 @@ def extract_jingu_body(traj: dict, patch_text: str, problem_statement: str = "")
 
 # ── mini-SWE-agent runner (direct Python API) ─────────────────────────────────
 
-MODEL = "bedrock/global.anthropic.claude-sonnet-4-5-20250929-v1:0"
+# Official mini-swe-agent Verified run config (collection 737e5dd2, run b6e8010b)
+# Uses Anthropic direct API with interleaved thinking (reasoning_effort=high)
+MODEL = "anthropic/claude-sonnet-4-5-20250929"
 
 BASE_CONFIG = {
     "model": {
@@ -1325,19 +1327,17 @@ BASE_CONFIG = {
         "model_name": MODEL,
         "model_kwargs": {
             "drop_params": True,
-            # litellm 1.83 bug: parallel_tool_calls=true/false sends malformed tool_choice to Bedrock.
-            # Setting None suppresses the param entirely, which works correctly.
-            "parallel_tool_calls": None,
-            # Extended thinking: matches official mini-swe-agent Verified run
-            # (reasoning_effort=high via Anthropic API = budget_tokens=10000 via Bedrock)
-            # temperature must be 1 when thinking is enabled (Bedrock requirement)
-            "thinking": {"type": "enabled", "budget_tokens": 10000},
-            "temperature": 1,
+            "temperature": None,
+            "extra_headers": {
+                "anthropic-beta": "interleaved-thinking-2025-05-14",
+            },
+            "reasoning_effort": "high",
+            "parallel_tool_calls": True,
         },
     },
     "environment": {
         "environment_class": "docker",
-        "container_timeout": "30m",
+        "container_timeout": "2h",
         "pull_timeout": 600,  # 10 min — first pull of swebench eval images is slow
     },
     "agent": {
