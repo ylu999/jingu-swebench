@@ -56,17 +56,18 @@ https://docent.transluce.org/dashboard/737e5dd2-8555-435a-9fbd-1c6907c972f1/agen
 
 | | Official (b6e8010b) | Our Baseline (v2) | Our Jingu (v2) |
 |---|---|---|---|
-| **Resolved** | ✅ 1/1 | (eval pending) | (eval pending) |
+| **Resolved** | ✅ 1/1 | ✅ 1/1 | ✅ 1/1 |
 | Model | claude-sonnet-4-5 | claude-sonnet-4-5 | claude-sonnet-4-5 |
-| Thinking | reasoning_effort=high | budget_tokens=10000 | budget_tokens=10000 |
-| API Calls | 21 | 35 | 45 |
-| Cost | $0.236 | $0.328 | $0.399 |
-| Wall time | — | 464s | 324s |
-| Attempts | 1 | 1 | 1 |
+| Thinking | reasoning_effort=high | reasoning_effort=high | reasoning_effort=high |
+| API Calls | 21 | 30 | 44 |
+| Cost | $0.236 | $0.360 | $0.432 |
+| Wall time | — | 416s | 409s |
+| Attempts | 1 | 1 | 1 (gate: no rescue needed) |
 
 **Notes:**
 - v1 baseline (temperature=0, no extended thinking): 54 calls, $0.566 — wasted steps on pip install + file write failures
-- v2 uses extended thinking (budget_tokens=10000) matching official config
-- Baseline v2: 35 calls vs official 21 — gap likely due to mini_version differences (v2.0.0 vs our version)
-- Jingu v2: 45 calls — higher than baseline because jingu gate adds overhead (declaration protocol + hint injection)
-- Eval (resolved/unresolved) to be run separately
+- v2 (Bedrock): thinking param silently ignored on Bedrock Sonnet 4.5 — thinking_blocks=0 in trajectory
+- v4 (this run): Anthropic direct API + reasoning_effort=high (= budget_tokens=4096 via litellm) — correct extended thinking
+- Baseline v4: 30 calls vs official 21 — still a gap, likely mini_version differences (2.1.0 same but our config layer adds overhead)
+- Jingu v4: 44 calls — higher than baseline; jingu gate adds declaration protocol + controlled_verify overhead
+- Jingu attempt1 accepted (gate passed) → no attempt2 needed; resolved on first try
