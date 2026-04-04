@@ -143,7 +143,7 @@ class StepMonitorState:
         env_error_detected: bool,
         patch_non_empty: bool,
         cp_state_holder: list | None = None,
-    ) -> None:
+    ) -> bool:
         """
         B5: update control-plane state with step-level signals.
         Called once per agent step from _monitored_step.
@@ -160,6 +160,8 @@ class StepMonitorState:
         If cp_state_holder is provided (a single-element list from run_with_jingu),
         reads/writes holder[0] so cp_state persists across attempts.
         Otherwise updates self.cp_state (attempt-scoped).
+
+        Returns progress_evaluable_event (for logging).
         """
         tests_now = self.latest_tests_passed()
         tests_prev = self._prev_step_tests_passed
@@ -195,6 +197,7 @@ class StepMonitorState:
             )
             _s = self.cp_state
         # B3.1: step log moved to _monitored_step section 3 (has instance_id + attempt)
+        return progress_evaluable_event
 
     def record_verify(self, step: int, result: dict) -> None:
         with self._lock:
@@ -341,12 +344,12 @@ def _install_step_monitor(
         # B3.2: step-level does NOT advance no_progress_steps (gated to verify window).
         # B3.3: weak_progress_seen captured for log-only observability (no stagnation effect).
         # task_success is NEVER set here (CORR1).
-        state.update_cp_with_step_signals(
+        _pee = state.update_cp_with_step_signals(
             env_error_detected=_step_env_error,
             patch_non_empty=_step_patch_non_empty,
             cp_state_holder=cp_state_holder,
         )
-        # B3.1+B3.3: emit per-step log with instance/attempt context
+        # B3.1+B3.3+B5: emit per-step log with instance/attempt context
         _cp_s = cp_state_holder[0] if cp_state_holder is not None else state.cp_state
         _step_signals_present = bool(_step_env_error or _step_patch_non_empty)
         _weak_progress = extract_weak_progress(
@@ -360,7 +363,7 @@ def _install_step_monitor(
                 f" signals={[k for k,v in [('env',_step_env_error),('patch',_step_patch_non_empty)] if v]}"
                 f" no_progress:{_cp_s.no_progress_steps} step:{_cp_s.step_index}"
                 f" env_noise:{_cp_s.env_noise} actionability:{_cp_s.actionability}"
-                f" weak_progress:{_weak_progress}",
+                f" weak_progress:{_weak_progress} pee:{_pee}",
                 flush=True,
             )
 
