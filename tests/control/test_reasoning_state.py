@@ -277,7 +277,7 @@ class TestSweSignalAdapter:
     # extract_step_signals
 
     def test_step_no_signals_when_no_progress(self):
-        partial, pee = extract_step_signals(
+        partial, pee, _ = extract_step_signals(
             tests_passed_count=5,
             tests_passed_prev=5,
             env_error_detected=False,
@@ -287,7 +287,7 @@ class TestSweSignalAdapter:
         assert pee is False  # no boundary event
 
     def test_step_evidence_gain_when_tests_increase(self):
-        partial, pee = extract_step_signals(
+        partial, pee, _ = extract_step_signals(
             tests_passed_count=6,
             tests_passed_prev=5,
             env_error_detected=False,
@@ -298,7 +298,7 @@ class TestSweSignalAdapter:
 
     def test_step_actionability_when_patch_non_empty(self):
         """CORR2: actionability = patch_non_empty, not verify result."""
-        partial, pee = extract_step_signals(
+        partial, pee, _ = extract_step_signals(
             tests_passed_count=5,
             tests_passed_prev=5,
             env_error_detected=False,
@@ -308,7 +308,7 @@ class TestSweSignalAdapter:
         assert "task_success" not in partial  # CORR1: task_success NOT in step signals
 
     def test_step_env_noise(self):
-        partial, pee = extract_step_signals(
+        partial, pee, _ = extract_step_signals(
             tests_passed_count=5,
             tests_passed_prev=5,
             env_error_detected=True,
@@ -318,7 +318,7 @@ class TestSweSignalAdapter:
 
     def test_C5_files_written_but_no_test_change_no_evidence(self):
         """C5: patch_non_empty alone does NOT set evidence_gain."""
-        partial, pee = extract_step_signals(
+        partial, pee, _ = extract_step_signals(
             tests_passed_count=5,
             tests_passed_prev=5,
             env_error_detected=False,
@@ -332,7 +332,7 @@ class TestSweSignalAdapter:
     def test_step_no_task_success(self):
         """CORR1: extract_step_signals must never set task_success."""
         for cv_passed in [True, False]:
-            partial, _ = extract_step_signals(
+            partial, _, _r = extract_step_signals(
                 tests_passed_count=10,
                 tests_passed_prev=5,
                 env_error_detected=False,
@@ -369,7 +369,7 @@ class TestIntegrationScenarios:
         # Use EXECUTE phase (no phase gates active there)
         s = initial_reasoning_state("EXECUTE")
         # step: patch written, tests improved
-        step_partial, _ = extract_step_signals(
+        step_partial, _, _r = extract_step_signals(
             tests_passed_count=8, tests_passed_prev=5,
             env_error_detected=False, patch_non_empty=True,
         )
@@ -388,7 +388,7 @@ class TestIntegrationScenarios:
         """C2: 2 steps without test progress → VerdictAdvance."""
         s = initial_reasoning_state("OBSERVE")
         for _ in range(NO_PROGRESS_THRESHOLD):
-            step_partial, _ = extract_step_signals(
+            step_partial, _, _r = extract_step_signals(
                 tests_passed_count=5, tests_passed_prev=5,  # no test change
                 env_error_detected=False, patch_non_empty=False,
             )
@@ -400,7 +400,7 @@ class TestIntegrationScenarios:
     def test_C3_env_noise_redirect(self):
         """C3: env error → VerdictRedirect (unconditional)."""
         s = initial_reasoning_state("OBSERVE")
-        step_partial, _ = extract_step_signals(
+        step_partial, _, _r = extract_step_signals(
             tests_passed_count=5, tests_passed_prev=5,
             env_error_detected=True, patch_non_empty=False,
         )
@@ -414,7 +414,7 @@ class TestIntegrationScenarios:
         s = initial_reasoning_state("OBSERVE")
         base = 0
         for i in range(5):
-            step_partial, _ = extract_step_signals(
+            step_partial, _, _r = extract_step_signals(
                 tests_passed_count=base + 1, tests_passed_prev=base,
                 env_error_detected=False, patch_non_empty=True,
             )
@@ -429,7 +429,7 @@ class TestIntegrationScenarios:
         """C5: writing patch without test improvement → stagnation increments."""
         s = initial_reasoning_state("OBSERVE")
         for _ in range(NO_PROGRESS_THRESHOLD):
-            step_partial, _ = extract_step_signals(
+            step_partial, _, _r = extract_step_signals(
                 tests_passed_count=5, tests_passed_prev=5,  # no test change
                 env_error_detected=False, patch_non_empty=True,  # patch written
             )
@@ -443,7 +443,7 @@ class TestIntegrationScenarios:
         """CORR1: step signals and verify signals are applied as separate update calls."""
         s = initial_reasoning_state("EXECUTE")
         # step
-        step_partial, _ = extract_step_signals(
+        step_partial, _, _r = extract_step_signals(
             tests_passed_count=3, tests_passed_prev=1,
             env_error_detected=False, patch_non_empty=True,
         )
@@ -463,7 +463,7 @@ class TestB2CpStateHolder:
     def test_holder_updated_by_step_signals(self):
         """Step signals update holder[0], caller sees updated state."""
         holder = [initial_reasoning_state("OBSERVE")]
-        step_partial, _ = extract_step_signals(
+        step_partial, _, _r = extract_step_signals(
             tests_passed_count=2, tests_passed_prev=0,
             env_error_detected=False, patch_non_empty=True,
         )
@@ -476,7 +476,7 @@ class TestB2CpStateHolder:
         holder = [initial_reasoning_state("OBSERVE")]
         # 3 no-progress steps
         for _ in range(3):
-            step_partial, _ = extract_step_signals(
+            step_partial, _, _r = extract_step_signals(
                 tests_passed_count=-1, tests_passed_prev=-1,
                 env_error_detected=False, patch_non_empty=False,
             )
@@ -489,7 +489,7 @@ class TestB2CpStateHolder:
         holder = [initial_reasoning_state("OBSERVE")]
         # Simulate 5 steps
         for _ in range(5):
-            step_partial, _ = extract_step_signals(
+            step_partial, _, _r = extract_step_signals(
                 tests_passed_count=-1, tests_passed_prev=-1,
                 env_error_detected=False, patch_non_empty=False,
             )
@@ -505,7 +505,7 @@ class TestB2CpStateHolder:
     def test_env_error_in_step_triggers_redirect(self):
         """env_error_detected=True in a step sets env_noise → VerdictRedirect."""
         holder = [initial_reasoning_state("OBSERVE")]
-        step_partial, _ = extract_step_signals(
+        step_partial, _, _r = extract_step_signals(
             tests_passed_count=-1, tests_passed_prev=-1,
             env_error_detected=True, patch_non_empty=False,
         )
@@ -560,7 +560,7 @@ class TestB3StagnationGating:
 
         # Simulate 20 agent steps with no test progress — step-level calls
         for _ in range(20):
-            step_partial, _ = extract_step_signals(
+            step_partial, _, _r = extract_step_signals(
                 tests_passed_count=5, tests_passed_prev=5,
                 env_error_detected=False, patch_non_empty=True,
             )
@@ -574,7 +574,7 @@ class TestB3StagnationGating:
         # Now apply 1 verify window with no test progress
         verify_partial = extract_verify_signals(controlled_verify_passed=False)
         # verify signals only set task_success; we also feed step signals for the window
-        window_partial, _ = extract_step_signals(
+        window_partial, _, _r = extract_step_signals(
             tests_passed_count=5, tests_passed_prev=5,
             env_error_detected=False, patch_non_empty=True,
         )
@@ -670,7 +670,7 @@ class TestB3WeakProgress:
         """
         s = initial_reasoning_state("OBSERVE")
         # step with patch but no test change
-        step_partial, _ = extract_step_signals(
+        step_partial, _, _r = extract_step_signals(
             tests_passed_count=3, tests_passed_prev=3,
             env_error_detected=False, patch_non_empty=True,
         )
@@ -704,7 +704,7 @@ class TestB5SemanticEventGating:
 
     def test_pee_false_on_normal_step(self):
         """No boundary event → progress_evaluable_event=False."""
-        _, pee = extract_step_signals(
+        _, pee, _r = extract_step_signals(
             tests_passed_count=5, tests_passed_prev=5,
             env_error_detected=False, patch_non_empty=True,
             patch_was_non_empty_prev=True,  # already had patch, not first write
@@ -714,7 +714,7 @@ class TestB5SemanticEventGating:
 
     def test_pee_true_on_inner_verify_new(self):
         """New inner-verify result → progress_evaluable_event=True."""
-        _, pee = extract_step_signals(
+        _, pee, _r = extract_step_signals(
             tests_passed_count=5, tests_passed_prev=5,
             env_error_detected=False, patch_non_empty=True,
             patch_was_non_empty_prev=True,
@@ -724,7 +724,7 @@ class TestB5SemanticEventGating:
 
     def test_pee_true_on_env_error(self):
         """Env failure → progress_evaluable_event=True."""
-        _, pee = extract_step_signals(
+        _, pee, _r = extract_step_signals(
             tests_passed_count=5, tests_passed_prev=5,
             env_error_detected=True, patch_non_empty=False,
             patch_was_non_empty_prev=False,
@@ -734,7 +734,7 @@ class TestB5SemanticEventGating:
 
     def test_pee_true_on_patch_first_write(self):
         """patch False→True transition → progress_evaluable_event=True."""
-        _, pee = extract_step_signals(
+        _, pee, _r = extract_step_signals(
             tests_passed_count=5, tests_passed_prev=5,
             env_error_detected=False, patch_non_empty=True,   # patch now exists
             patch_was_non_empty_prev=False,                   # first write
@@ -744,7 +744,7 @@ class TestB5SemanticEventGating:
 
     def test_pee_false_on_patch_subsequent_edit(self):
         """Subsequent patch edits do NOT set progress_evaluable_event."""
-        _, pee = extract_step_signals(
+        _, pee, _r = extract_step_signals(
             tests_passed_count=5, tests_passed_prev=5,
             env_error_detected=False, patch_non_empty=True,
             patch_was_non_empty_prev=True,  # already had patch — not first write
@@ -754,7 +754,7 @@ class TestB5SemanticEventGating:
 
     def test_pee_false_when_patch_stays_empty(self):
         """Patch stays empty (no write at all) → not a boundary event."""
-        _, pee = extract_step_signals(
+        _, pee, _r = extract_step_signals(
             tests_passed_count=5, tests_passed_prev=5,
             env_error_detected=False, patch_non_empty=False,
             patch_was_non_empty_prev=False,
@@ -771,13 +771,13 @@ class TestB5SemanticEventGating:
         """
         s = initial_reasoning_state("OBSERVE")
         # First write (makes pee=True once)
-        _, pee = extract_step_signals(
+        _, pee, _r = extract_step_signals(
             tests_passed_count=5, tests_passed_prev=5,
             env_error_detected=False, patch_non_empty=True,
             patch_was_non_empty_prev=False,  # first write
             verify_history_len=0, verify_history_len_prev=0,
         )
-        step_partial_first, _ = extract_step_signals(
+        step_partial_first, _, _r = extract_step_signals(
             tests_passed_count=5, tests_passed_prev=5,
             env_error_detected=False, patch_non_empty=True,
             patch_was_non_empty_prev=False,
@@ -789,7 +789,7 @@ class TestB5SemanticEventGating:
 
         # Subsequent edits (pee=False) — 30 steps
         for _ in range(30):
-            step_partial, pee = extract_step_signals(
+            step_partial, pee, _ = extract_step_signals(
                 tests_passed_count=5, tests_passed_prev=5,
                 env_error_detected=False, patch_non_empty=True,
                 patch_was_non_empty_prev=True,  # not first write
@@ -809,7 +809,7 @@ class TestB5SemanticEventGating:
 
         # 10 non-boundary steps (pee=False each)
         for _ in range(10):
-            step_partial, pee = extract_step_signals(
+            step_partial, pee, _ = extract_step_signals(
                 tests_passed_count=5, tests_passed_prev=5,
                 env_error_detected=False, patch_non_empty=True,
                 patch_was_non_empty_prev=True,
@@ -821,7 +821,7 @@ class TestB5SemanticEventGating:
         assert s.no_progress_steps == 0  # frozen
 
         # Inner verify fires (pee=True)
-        step_partial, pee = extract_step_signals(
+        step_partial, pee, _ = extract_step_signals(
             tests_passed_count=5, tests_passed_prev=5,
             env_error_detected=False, patch_non_empty=True,
             patch_was_non_empty_prev=True,
@@ -835,7 +835,7 @@ class TestB5SemanticEventGating:
 
     def test_pee_all_three_conditions_simultaneously(self):
         """All three boundary conditions at once → pee=True (any is sufficient)."""
-        _, pee = extract_step_signals(
+        _, pee, _r = extract_step_signals(
             tests_passed_count=5, tests_passed_prev=5,
             env_error_detected=True,
             patch_non_empty=True,
@@ -847,7 +847,7 @@ class TestB5SemanticEventGating:
     def test_pee_default_args_no_boundary(self):
         """Default optional args: no prev state → only env_error or patch_first_write can set pee."""
         # With all defaults (no prev data), patch_first_write can't trigger (patch_non_empty=False)
-        _, pee = extract_step_signals(
+        _, pee, _r = extract_step_signals(
             tests_passed_count=5, tests_passed_prev=5,
             env_error_detected=False, patch_non_empty=False,
         )

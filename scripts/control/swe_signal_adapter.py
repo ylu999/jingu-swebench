@@ -45,10 +45,10 @@ def extract_step_signals(
     patch_was_non_empty_prev: bool = False,
     verify_history_len: int = 0,
     verify_history_len_prev: int = 0,
-) -> tuple[dict, bool]:
+) -> tuple[dict, bool, str]:
     """
     Map one agent step's observable data to a partial CognitionSignals dict
-    plus a progress_evaluable_event gate.
+    plus a progress_evaluable_event gate and its reason.
 
     Called once per step. Does NOT set task_success.
 
@@ -62,10 +62,13 @@ def extract_step_signals(
         verify_history_len_prev:  number of inner-verify results before this step
 
     Returns:
-        (partial_signals, progress_evaluable_event)
+        (partial_signals, progress_evaluable_event, pee_reason)
         partial_signals:          dict — only keys with signal present
         progress_evaluable_event: bool — True only on semantic boundary events
                                   Pass as update_stagnation= to update_reasoning_state()
+        pee_reason:               str — which condition triggered pee (empty if not triggered)
+                                  One of: "inner_verify_new", "env_error", "patch_first_write",
+                                  or comma-joined if multiple fire simultaneously.
     """
     partial: dict = {}
 
@@ -98,7 +101,17 @@ def extract_step_signals(
     patch_first_write = patch_non_empty and not patch_was_non_empty_prev
     progress_evaluable_event = inner_verify_new or env_error_detected or patch_first_write
 
-    return partial, progress_evaluable_event
+    # Build reason string for observability logging
+    reasons = []
+    if inner_verify_new:
+        reasons.append("inner_verify_new")
+    if env_error_detected:
+        reasons.append("env_error")
+    if patch_first_write:
+        reasons.append("patch_first_write")
+    pee_reason = ",".join(reasons)
+
+    return partial, progress_evaluable_event, pee_reason
 
 
 def extract_weak_progress(

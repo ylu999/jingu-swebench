@@ -143,7 +143,7 @@ class StepMonitorState:
         env_error_detected: bool,
         patch_non_empty: bool,
         cp_state_holder: list | None = None,
-    ) -> bool:
+    ) -> tuple[bool, str]:
         """
         B5: update control-plane state with step-level signals.
         Called once per agent step from _monitored_step.
@@ -161,7 +161,7 @@ class StepMonitorState:
         reads/writes holder[0] so cp_state persists across attempts.
         Otherwise updates self.cp_state (attempt-scoped).
 
-        Returns progress_evaluable_event (for logging).
+        Returns (progress_evaluable_event, pee_reason) for logging.
         """
         tests_now = self.latest_tests_passed()
         tests_prev = self._prev_step_tests_passed
@@ -179,7 +179,7 @@ class StepMonitorState:
         if patch_non_empty:
             self._prev_patch_non_empty = True
 
-        step_partial, progress_evaluable_event = extract_step_signals(
+        step_partial, progress_evaluable_event, _pee_reason = extract_step_signals(
             tests_passed_count=tests_now,
             tests_passed_prev=tests_prev,
             env_error_detected=env_error_detected,
@@ -201,7 +201,7 @@ class StepMonitorState:
             )
             _s = self.cp_state
         # B3.1: step log moved to _monitored_step section 3 (has instance_id + attempt)
-        return progress_evaluable_event
+        return progress_evaluable_event, _pee_reason
 
     def record_verify(self, step: int, result: dict) -> None:
         with self._lock:
@@ -348,7 +348,7 @@ def _install_step_monitor(
         # B3.2: step-level does NOT advance no_progress_steps (gated to verify window).
         # B3.3: weak_progress_seen captured for log-only observability (no stagnation effect).
         # task_success is NEVER set here (CORR1).
-        _pee = state.update_cp_with_step_signals(
+        _pee, _pee_reason = state.update_cp_with_step_signals(
             env_error_detected=_step_env_error,
             patch_non_empty=_step_patch_non_empty,
             cp_state_holder=cp_state_holder,
@@ -362,12 +362,13 @@ def _install_step_monitor(
             latest_tests_passed=state.latest_tests_passed(),
         )
         if _step_signals_present or _weak_progress:
+            _pee_str = f"True({_pee_reason})" if _pee else "False"
             print(
                 f"    [cp-step] instance={state.instance_id} attempt={state.attempt}"
                 f" signals={[k for k,v in [('env',_step_env_error),('patch',_step_patch_non_empty)] if v]}"
                 f" no_progress:{_cp_s.no_progress_steps} step:{_cp_s.step_index}"
                 f" env_noise:{_cp_s.env_noise} actionability:{_cp_s.actionability}"
-                f" weak_progress:{_weak_progress} pee:{_pee}",
+                f" weak_progress:{_weak_progress} pee:{_pee_str}",
                 flush=True,
             )
 
