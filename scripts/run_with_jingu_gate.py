@@ -1835,7 +1835,8 @@ def run_with_jingu(instance_id: str, output_dir: Path, max_attempts: int = 3,
                         # p179: compute tests_delta before build_retry_plan (used in classify_failure_v2)
                         _tests_now = _test_counts_by_attempt.get(attempt, -1)
                         _tests_prev = _test_counts_by_attempt.get(attempt - 1, -1)
-                        _tests_delta = (_tests_now - _tests_prev) if _tests_now >= 0 and _tests_prev >= 0 else 0
+                        # Three-state delta: None when baseline unknown (prevents false "no_progress")
+                        _tests_delta = (_tests_now - _tests_prev) if _tests_now >= 0 and _tests_prev >= 0 else None
                         # p179 gate: TEST_PROGRESS_MONOTONICITY invariant
                         _progress_ok, _progress_code = check_test_progress_invariant(_tests_prev, _tests_now)
                         print(f"    [test-progress] ok={_progress_ok}  code={_progress_code}  "
@@ -1921,6 +1922,14 @@ def run_with_jingu(instance_id: str, output_dir: Path, max_attempts: int = 3,
                             "progress_code": _progress_code,
                             "files_written_paths": (jingu_body or {}).get("files_written", []),
                         })
+                        # Honor control_action: stop when verify passed or no signal
+                        if retry_plan.control_action in ("STOP_FAIL", "STOP_NO_SIGNAL"):
+                            print(f"    [retry-ctrl] STOPPING — action={retry_plan.control_action}")
+                            break
+                        # verified_pass: controlled_verify confirmed all tests pass — no retry needed
+                        if _strategy_failure_class_v2 == "verified_pass":
+                            print(f"    [retry-ctrl] STOPPING — verified_pass (controlled_verify tests_failed=0)")
+                            break
                         # next_attempt_prompt already merges hint_prefix + exec_feedback
                         last_failure = retry_plan.next_attempt_prompt[:600]
                     else:
@@ -2014,7 +2023,7 @@ def run_with_jingu(instance_id: str, output_dir: Path, max_attempts: int = 3,
                         next_attempt_has_patch=_next_has_patch,
                         instance_final_admitted=_inst_final_admitted,
                         outcome="solved" if _inst_final_admitted else "unsolved",
-                        tests_delta=_se.get("tests_delta", 0),
+                        tests_delta=_se.get("tests_delta", None),
                         tests_passed_before=_se.get("tests_passed_prev", -1),
                         tests_passed_after=_se.get("tests_passed_count", -1),
                         files_written_paths=_se.get("files_written_paths", []),

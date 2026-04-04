@@ -48,7 +48,7 @@ class StrategyLogEntry:
     # legacy: kept for backward compat with existing code, not used in bucketing
     outcome: str                    # solved | unsolved (derived from instance_final_admitted)
     # ── p179: signal repair fields (primary reward channel) ──────────────────
-    tests_delta: int                # tests_passed_after - tests_passed_before (0 if unknown, -1 if no test info)
+    tests_delta: Optional[int]      # tests_passed_after - tests_passed_before (None if baseline unknown)
     tests_passed_before: int        # passing test count from prev attempt (-1 if unknown)
     tests_passed_after: int         # passing test count from this attempt (-1 if unknown)
     files_written_paths: list[str]  # actual file paths modified (from patch + tool calls)
@@ -134,7 +134,7 @@ def make_entry(
     # legacy outcome field (derived from instance_final_admitted)
     outcome: str = "unsolved",
     # p179: signal repair fields
-    tests_delta: int = 0,
+    tests_delta: Optional[int] = None,
     tests_passed_before: int = -1,
     tests_passed_after: int = -1,
     files_written_paths: Optional[list[str]] = None,

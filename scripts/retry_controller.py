@@ -145,7 +145,7 @@ def classify_failure(
 def classify_failure_v2(
     jingu_body: dict,
     patch_fp: dict,
-    tests_delta: int,
+    tests_delta: Optional[int],
     tests_passed_after: int = -1,
 ) -> str:
     """
@@ -153,28 +153,31 @@ def classify_failure_v2(
 
     Uses tests_delta as primary discriminator.
     tests_passed_after=-1 means count is unknown (signal_missing when tests ran).
+    tests_delta=None means baseline is unknown — cannot compute delta.
 
     Buckets:
       no_patch_or_invalid       — no patch, or tests couldn't run at all
+      verified_pass             — controlled_verify / local tests passed (strong signal)
       no_test_progress          — tests ran, delta ≤ 0 (stagnant or regression)
       positive_delta_unresolved — delta > 0 but still failing (agent is on track)
       signal_missing            — tests ran but no count info available
     """
     test_results = jingu_body.get("test_results", {})
     tests_ran = test_results.get("ran_tests", False)
-    test_passed = test_results.get("last_passed")
     patch_size = patch_fp.get("lines_added", 0) + patch_fp.get("lines_removed", 0)
 
     # No patch or environment didn't allow tests to run
     if patch_size == 0 or not tests_ran:
         return "no_patch_or_invalid"
 
-    # Tests passed — caller should have stopped before retry; classify as no_test_progress
-    if test_passed:
-        return "no_test_progress"
+    # controlled_verify passed (tests_failed == 0 from orchestrator-controlled run)
+    cv = jingu_body.get("controlled_verify", {})
+    cv_failed = cv.get("tests_failed", -1)
+    if cv_failed == 0:
+        return "verified_pass"
 
     # tests ran and still failing — check if we have count signal
-    if tests_passed_after < 0:
+    if tests_passed_after < 0 or tests_delta is None:
         # No count information available — delta is meaningless
         return "signal_missing"
 
@@ -300,7 +303,7 @@ def build_retry_plan(
     steps_since_last_signal: int = 0,
     principal_violation_codes: Optional[list[str]] = None,
     strategy_table_path: Optional[str | Path] = None,
-    tests_delta: int = 0,
+    tests_delta: Optional[int] = None,
     tests_passed_after: int = -1,
 ) -> RetryPlan:
     """
