@@ -306,58 +306,86 @@ def cmd_logs(args) -> None:
 
 
 # ── smoke ──────────────────────────────────────────────────────────────────────
+#
+# All instances share ONE CloudWatch log stream: runner/runner/<task-id>
+# Lines are interleaved by timestamp. We tail once and color-code by instance_id.
 
-# Lines from dockerd/containerd that are pure noise
-_NOISE_RE = re.compile(r'^time=".*?level=|^\s*$')
+# Lines from dockerd/containerd/dataset-download that add no information
+_NOISE_RE = re.compile(
+    r'^time=".*?level='          # dockerd structured log
+    r'|Generating \w+ split:'    # HuggingFace dataset progress
+    r'|^\s*$'                    # blank lines
+)
 
-# Lines worth highlighting
+# Lines worth highlighting as alerts
 _ALERT_RE = re.compile(
     r'ERROR|FAILED|Traceback|Exception|ModuleNotFoundError|'
     r'ImportError|FileNotFoundError|CRITICAL|\[jingu\] ERROR'
 )
 
-# Control-plane summary lines
-_CP_RE = re.compile(r'\[cp-step\]|\[control-plane\]|\[jingu\]|STOPPING|verdict|pee:')
+# Default filter: lines that carry actual signal (LLM calls, CP, agent output, errors)
+# Suppresses docker pull / preflight / minisweagent DEBUG noise
+_DEFAULT_FILTER = re.compile(
+    r'\[jingu\]|\[cp-step\]|\[control-plane\]|\[agent\]|'
+    r'\[inner-verify\]|\[controlled-verify\]|'
+    r'STOPPING|verdict|pee:|task_success|'
+    r'ERROR|FAILED|Traceback|\[preflight\]|\[init\]'
+)
 
 _COLORS = [
-    "\033[36m",  # cyan
-    "\033[33m",  # yellow
-    "\033[35m",  # magenta
-    "\033[32m",  # green
-    "\033[34m",  # blue
-    "\033[91m",  # bright red
-    "\033[96m",  # bright cyan
-    "\033[93m",  # bright yellow
+    "\033[36m",   # cyan       — instance 0
+    "\033[33m",   # yellow     — instance 1
+    "\033[35m",   # magenta    — instance 2
+    "\033[32m",   # green      — instance 3
+    "\033[34m",   # blue       — instance 4
+    "\033[91m",   # bright red — instance 5
+    "\033[96m",   # bright cyan
+    "\033[93m",   # bright yellow
 ]
 _RESET = "\033[0m"
-_print_lock = threading.Lock()
 
 
-def _tail_instance_stream(
+def _color_for_instance(instance_id: str, instance_ids: list[str]) -> str:
+    try:
+        idx = instance_ids.index(instance_id)
+    except ValueError:
+        idx = hash(instance_id) % len(_COLORS)
+    return _COLORS[idx % len(_COLORS)]
+
+
+def _tail_shared_stream(
     task_id: str,
-    instance_id: str,
-    color: str,
-    filter_pat: re.Pattern | None,
-    done_event: threading.Event,
+    instance_ids: list[str],
+    filter_pat: re.Pattern,
 ) -> None:
-    """Tail one ECS task's CloudWatch log stream, printing lines with instance prefix."""
+    """
+    Tail the single shared log stream for this ECS task.
+    Color-code each line by the instance_id it belongs to (extracted from log content).
+    One thread, one stream — no duplication.
+    """
     logs = boto3.client("logs", region_name=REGION)
     ecs = boto3.client("ecs", region_name=REGION)
     log_stream = f"runner/runner/{task_id}"
-    prefix = f"{color}[{instance_id[:30]}]{_RESET} "
+
+    # Pre-build color map
+    color_map = {iid: _color_for_instance(iid, instance_ids) for iid in instance_ids}
+    current_color = _COLORS[0]  # track which instance is "active" for un-tagged lines
+
+    # Regex to extract instance_id from log lines
+    _iid_re = re.compile(r'instance=([\w_\-\.]+)')
 
     next_token: str | None = None
     last_ts = 0
     stream_wait_start = time.monotonic()
     stream_available = False
 
-    while not done_event.is_set():
+    while True:
         try:
             kwargs: dict = dict(
                 logGroupName=LOG_GROUP,
                 logStreamName=log_stream,
                 startFromHead=True,
-                limit=500,
+                limit=1000,
             )
             if next_token:
                 kwargs["nextToken"] = next_token
@@ -365,20 +393,18 @@ def _tail_instance_stream(
             stream_available = True
         except logs.exceptions.ResourceNotFoundException:
             elapsed = time.monotonic() - stream_wait_start
-            # Check if task already stopped before stream appeared
             try:
                 t = ecs.describe_tasks(cluster=ECS_CLUSTER, tasks=[task_id])
                 status = (t.get("tasks") or [{}])[0].get("lastStatus", "")
                 if status == "STOPPED":
-                    with _print_lock:
-                        print(f"{prefix}⚠️  task STOPPED before log stream appeared", flush=True)
+                    print("[smoke] task STOPPED before log stream appeared — early failure", flush=True)
                     return
             except Exception:
                 pass
             if elapsed > 180:
-                with _print_lock:
-                    print(f"{prefix}⚠️  log stream not available after 3 min", flush=True)
+                print("[smoke] log stream not available after 3 min", flush=True)
                 return
+            print(f"\r[smoke] waiting for log stream... {elapsed:.0f}s    ", end="", flush=True)
             time.sleep(5)
             continue
 
@@ -389,17 +415,22 @@ def _tail_instance_stream(
             msg = ev["message"]
             last_ts = ev["timestamp"]
 
-            # Always suppress pure noise
-            if _NOISE_RE.match(msg):
+            # Always drop pure noise
+            if _NOISE_RE.search(msg):
                 continue
 
-            # If a filter is set, apply it
-            if filter_pat and not filter_pat.search(msg):
+            # Apply signal filter
+            if not filter_pat.search(msg):
                 continue
 
-            line = f"⚠️  {msg}" if _ALERT_RE.search(msg) else msg
-            with _print_lock:
-                print(f"{prefix}{line}", flush=True)
+            # Detect which instance this line belongs to, update color
+            m = _iid_re.search(msg)
+            if m:
+                iid = m.group(1)
+                current_color = color_map.get(iid, _COLORS[0])
+
+            alert = "⚠️  " if _ALERT_RE.search(msg) else ""
+            print(f"{current_color}{alert}{msg}{_RESET}", flush=True)
 
         new_token = resp.get("nextForwardToken")
 
@@ -409,22 +440,22 @@ def _tail_instance_stream(
                 t = ecs.describe_tasks(cluster=ECS_CLUSTER, tasks=[task_id])
                 status = (t.get("tasks") or [{}])[0].get("lastStatus", "")
                 if status == "STOPPED":
-                    with _print_lock:
-                        print(f"{prefix}[done — task STOPPED]", flush=True)
+                    print("[smoke] task STOPPED — stream exhausted, done", flush=True)
                     return
             except Exception:
                 pass
 
         next_token = new_token
-        time.sleep(5)
+        time.sleep(3)
 
 
 def cmd_smoke(args) -> None:
     """
     Launch ECS task + live-tail ALL instance logs in real time.
 
-    Each instance's output is prefixed with its ID and a distinct color.
-    Exits automatically when the task stops.
+    Single stream, color-coded by instance_id detected in each log line.
+    Default filter shows: [jingu] [cp-step] [control-plane] [agent] errors.
+    Use --filter to narrow further, --all to show everything.
     """
     ecs = boto3.client("ecs", region_name=REGION)
 
@@ -441,9 +472,22 @@ def cmd_smoke(args) -> None:
     ]
 
     print(f"[smoke] batch={batch_name}  instances={len(instance_ids)}", flush=True)
-    for iid in instance_ids:
-        print(f"[smoke]   {iid}", flush=True)
+    for i, iid in enumerate(instance_ids):
+        color = _COLORS[i % len(_COLORS)]
+        print(f"  {color}●{_RESET} {iid}", flush=True)
     print(f"[smoke] mode={args.mode} attempts={args.max_attempts} workers={args.workers}", flush=True)
+
+    # Determine filter
+    if args.all:
+        filter_pat = re.compile(r'.')  # match everything
+        filter_desc = "all lines"
+    elif args.filter:
+        filter_pat = re.compile(args.filter)
+        filter_desc = f"filter: {args.filter}"
+    else:
+        filter_pat = _DEFAULT_FILTER
+        filter_desc = "default (signal lines only)"
+    print(f"[smoke] {filter_desc}", flush=True)
 
     # Launch ECS task
     resp = ecs.run_task(
@@ -469,7 +513,7 @@ def cmd_smoke(args) -> None:
     task_id = task_arn.split("/")[-1]
     print(f"[smoke] ECS task: {task_id}", flush=True)
 
-    # Wait for task to reach RUNNING (up to 3 min)
+    # Wait for RUNNING (up to 3 min)
     print("[smoke] waiting for RUNNING...", end="", flush=True)
     deadline = time.monotonic() + 180
     while time.monotonic() < deadline:
@@ -483,7 +527,7 @@ def cmd_smoke(args) -> None:
             if status == "STOPPED":
                 exit_code = tasks[0].get("containers", [{}])[0].get("exitCode", "?")
                 reason = tasks[0].get("stoppedReason", "")
-                print(f"\n[smoke] task already STOPPED (exit={exit_code} reason={reason})", flush=True)
+                print(f"\n[smoke] task STOPPED early (exit={exit_code} reason={reason})", flush=True)
                 sys.exit(1)
         print(".", end="", flush=True)
         time.sleep(5)
@@ -491,37 +535,16 @@ def cmd_smoke(args) -> None:
         print("\n[smoke] timeout waiting for RUNNING", flush=True)
         sys.exit(1)
 
-    # Build optional filter pattern
-    filter_pat = re.compile(args.filter) if args.filter else None
-
-    print(f"[smoke] tailing {len(instance_ids)} instance(s){'  filter: ' + args.filter if args.filter else ''}",
-          flush=True)
     print("─" * 70, flush=True)
 
-    # One tail thread per instance
-    done_event = threading.Event()
-    threads = []
-    for i, iid in enumerate(instance_ids):
-        color = _COLORS[i % len(_COLORS)]
-        t = threading.Thread(
-            target=_tail_instance_stream,
-            args=(task_id, iid, color, filter_pat, done_event),
-            daemon=True,
-        )
-        t.start()
-        threads.append(t)
-
-    # Wait for all tail threads to finish (each exits when its task STOPS)
     try:
-        for t in threads:
-            t.join()
+        _tail_shared_stream(task_id, instance_ids, filter_pat)
     except KeyboardInterrupt:
         print("\n[smoke] interrupted", flush=True)
-        done_event.set()
 
     print("─" * 70, flush=True)
 
-    # Final status
+    # Final status summary
     try:
         t_resp = ecs.describe_tasks(cluster=ECS_CLUSTER, tasks=[task_id])
         tasks = t_resp.get("tasks", [])
@@ -586,8 +609,9 @@ def main():
     p_smoke.add_argument("--max-attempts", type=int, default=2)
     p_smoke.add_argument("--workers", type=int, default=3)
     p_smoke.add_argument("--filter", "-f", default=None,
-                         help="Regex filter (default: suppress noise, show all signal lines). "
-                              "E.g. 'cp-step|control-plane'")
+                         help="Regex filter (overrides default). E.g. 'cp-step|control-plane|pee'")
+    p_smoke.add_argument("--all", "-a", action="store_true",
+                         help="Show all lines including noise (no filter)")
 
     # logs
     p_logs = sub.add_parser("logs", help="Tail ECS task logs")
