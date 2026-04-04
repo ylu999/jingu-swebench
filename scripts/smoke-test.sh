@@ -7,6 +7,14 @@
 # Examples:
 #   ./scripts/smoke-test.sh b3-smoke-$(date +%Y%m%d) django__django-11039 django__django-12470 django__django-10914
 #   ./scripts/smoke-test.sh b3-quick django__django-12470   # single instance
+#   DATASET=Lite ./scripts/smoke-test.sh b3-quick django__django-11039
+#   DATASET=Verified MODE=baseline ./scripts/smoke-test.sh exp-baseline-v1 django__django-11099
+#
+# Env vars:
+#   MAX_ATTEMPTS  default: 2
+#   WORKERS       default: number of instances
+#   DATASET       default: Verified   (Lite | Verified)
+#   MODE          default: jingu      (jingu | baseline)
 #
 # What it does:
 #   1. Launches ECS task via ops.py run
@@ -39,15 +47,19 @@ shift
 INSTANCE_IDS=("$@")
 MAX_ATTEMPTS="${MAX_ATTEMPTS:-2}"
 WORKERS="${WORKERS:-${#INSTANCE_IDS[@]}}"
+DATASET="${DATASET:-Verified}"
+MODE="${MODE:-jingu}"
 
 echo "[smoke] batch=$BATCH_NAME instances=${INSTANCE_IDS[*]}"
-echo "[smoke] max_attempts=$MAX_ATTEMPTS workers=$WORKERS"
+echo "[smoke] dataset=$DATASET mode=$MODE max_attempts=$MAX_ATTEMPTS workers=$WORKERS"
 
 # ── Step 1: Launch ECS task ───────────────────────────────────────────────────
 
 LAUNCH_OUT=$(python "$SCRIPT_DIR/ops.py" run \
     --instance-ids "${INSTANCE_IDS[@]}" \
     --batch-name "$BATCH_NAME" \
+    --dataset "$DATASET" \
+    --mode "$MODE" \
     --max-attempts "$MAX_ATTEMPTS" \
     --workers "$WORKERS" 2>&1)
 

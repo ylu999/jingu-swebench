@@ -10,7 +10,11 @@ git add ... && git commit -m "..." && git push
 python scripts/ops.py build
 
 # 3. 启动 smoke test（自动尾随日志到结束）
-./scripts/smoke-test.sh b3-smoke-$(date +%Y%m%d) django__django-11039 django__django-12470 django__django-10914
+# Verified（默认）
+./scripts/smoke-test.sh b5-smoke-$(date +%Y%m%d) django__django-11039 django__django-12470 django__django-10914
+
+# Lite（历史 calibration 实例）
+DATASET=Lite ./scripts/smoke-test.sh b3-smoke-$(date +%Y%m%d) django__django-11039 django__django-12470 django__django-10914
 
 # 4. 对已跑完的任务查看日志
 ./scripts/logs.sh <task-id>
@@ -62,9 +66,13 @@ python scripts/tail-logs.py <task-id> --interval 10
 ```bash
 ./scripts/smoke-test.sh <batch-name> <instance-id> [instance-id ...]
 
-# 可选环境变量
-MAX_ATTEMPTS=1 ./scripts/smoke-test.sh b3-quick django__django-12470
-WORKERS=1 ./scripts/smoke-test.sh b3-quick django__django-12470
+# 可选环境变量（默认值）
+MAX_ATTEMPTS=1  DATASET=Verified  MODE=jingu  WORKERS=<实例数>
+
+# 示例
+MAX_ATTEMPTS=1 ./scripts/smoke-test.sh b5-smoke-$(date +%Y%m%d) django__django-11039
+DATASET=Lite ./scripts/smoke-test.sh b3-quick django__django-11039 django__django-12470
+DATASET=Verified MODE=baseline MAX_ATTEMPTS=1 ./scripts/smoke-test.sh exp-baseline-v1 django__django-11099
 ```
 
 ### `scripts/logs.sh` — 事后查日志
