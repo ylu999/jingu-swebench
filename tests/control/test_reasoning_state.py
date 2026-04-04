@@ -20,7 +20,7 @@ from control.reasoning_state import (
     VerdictAdvance, VerdictRedirect, VerdictStop, VerdictContinue,
     NO_PROGRESS_THRESHOLD,
 )
-from control.swe_signal_adapter import extract_step_signals, extract_verify_signals
+from control.swe_signal_adapter import extract_step_signals, extract_verify_signals, extract_weak_progress
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -511,3 +511,175 @@ class TestB2CpStateHolder:
         holder[0] = update_reasoning_state(holder[0], normalize_signals(step_partial))
         verdict = decide_next(holder[0])
         assert isinstance(verdict, VerdictRedirect)
+
+
+# ── B3 Stagnation Gating (verify-window level) ────────────────────────────────
+
+class TestB3StagnationGating:
+    """
+    B3.2 — stagnation is a verify-window concept, not a step concept.
+    update_stagnation=False: step-level calls; no_progress_steps frozen.
+    update_stagnation=True (default): verify-boundary calls; I1/I2 apply.
+    """
+
+    def test_step_level_does_not_advance_no_progress(self):
+        """update_stagnation=False: no_progress_steps stays at prev value."""
+        s = state_at("OBSERVE", no_progress=1)
+        s2 = update_reasoning_state(s, no_progress_signals(), update_stagnation=False)
+        assert s2.no_progress_steps == 1  # frozen — not incremented
+
+    def test_step_level_does_not_reset_no_progress(self):
+        """update_stagnation=False: even evidence_gain does NOT reset stagnation."""
+        s = state_at("OBSERVE", no_progress=3)
+        signals = normalize_signals({"evidence_gain": 1})
+        s2 = update_reasoning_state(s, signals, update_stagnation=False)
+        assert s2.no_progress_steps == 3  # frozen — not reset either
+
+    def test_verify_window_increments_no_progress(self):
+        """update_stagnation=True (default): I2 applies — no-signal increments."""
+        s = state_at("OBSERVE", no_progress=1)
+        s2 = update_reasoning_state(s, no_progress_signals(), update_stagnation=True)
+        assert s2.no_progress_steps == 2
+
+    def test_verify_window_resets_on_evidence(self):
+        """update_stagnation=True (default): I1 applies — evidence_gain resets."""
+        s = state_at("OBSERVE", no_progress=3)
+        signals = normalize_signals({"evidence_gain": 1})
+        s2 = update_reasoning_state(s, signals, update_stagnation=True)
+        assert s2.no_progress_steps == 0
+
+    def test_many_step_calls_then_one_verify_call(self):
+        """
+        Core B3.2 scenario:
+        N step calls (update_stagnation=False) → no_progress stays 0
+        1 verify call (update_stagnation=True, no evidence) → no_progress = 1
+        After NO_PROGRESS_THRESHOLD verify calls without progress → stagnation fires.
+        """
+        s = initial_reasoning_state("OBSERVE")
+
+        # Simulate 20 agent steps with no test progress — step-level calls
+        for _ in range(20):
+            step_partial = extract_step_signals(
+                tests_passed_count=5, tests_passed_prev=5,
+                env_error_detected=False, patch_non_empty=True,
+            )
+            s = update_reasoning_state(s, normalize_signals(step_partial),
+                                       update_stagnation=False)
+
+        # After 20 steps, no_progress should still be 0 (frozen at step level)
+        assert s.no_progress_steps == 0
+        assert s.step_index == 20
+
+        # Now apply 1 verify window with no test progress
+        verify_partial = extract_verify_signals(controlled_verify_passed=False)
+        # verify signals only set task_success; we also feed step signals for the window
+        window_partial = extract_step_signals(
+            tests_passed_count=5, tests_passed_prev=5,
+            env_error_detected=False, patch_non_empty=True,
+        )
+        s = update_reasoning_state(s, normalize_signals(window_partial),
+                                   update_stagnation=True)
+        assert s.no_progress_steps == 1  # first verify window without progress
+
+        # One more verify window without progress
+        s = update_reasoning_state(s, normalize_signals(window_partial),
+                                   update_stagnation=True)
+        assert s.no_progress_steps == 2  # == NO_PROGRESS_THRESHOLD
+
+        # Now stagnation should fire
+        verdict = decide_next(s)
+        assert isinstance(verdict, VerdictAdvance)
+
+    def test_step_calls_do_not_trigger_stagnation_verdict(self):
+        """
+        Even with NO_PROGRESS_THRESHOLD*10 step calls (no evidence), verdict is CONTINUE
+        because no_progress_steps never advances with update_stagnation=False.
+        """
+        s = initial_reasoning_state("OBSERVE")
+        for _ in range(NO_PROGRESS_THRESHOLD * 10):
+            s = update_reasoning_state(s, no_progress_signals(), update_stagnation=False)
+        assert s.no_progress_steps == 0
+        verdict = decide_next(s)
+        assert isinstance(verdict, VerdictContinue)
+
+    def test_step_index_still_increments_with_false(self):
+        """I4 still holds: step_index monotone even when update_stagnation=False."""
+        s = initial_reasoning_state("OBSERVE")
+        for i in range(1, 6):
+            s = update_reasoning_state(s, no_progress_signals(), update_stagnation=False)
+            assert s.step_index == i
+
+    def test_default_parameter_is_true(self):
+        """Calling without update_stagnation arg behaves like update_stagnation=True."""
+        s = state_at("OBSERVE", no_progress=1)
+        s_default = update_reasoning_state(s, no_progress_signals())        # no arg
+        s_explicit = update_reasoning_state(s, no_progress_signals(), update_stagnation=True)
+        assert s_default.no_progress_steps == s_explicit.no_progress_steps
+
+
+# ── B3.3 Weak Progress ────────────────────────────────────────────────────────
+
+class TestB3WeakProgress:
+    """
+    B3.3 — extract_weak_progress() is a log-only diagnostic.
+    Does NOT affect stagnation counter. Signals: patch_non_empty OR env_error OR tests>=0.
+    """
+
+    def test_patch_non_empty_is_weak_signal(self):
+        assert extract_weak_progress(
+            env_error_detected=False,
+            patch_non_empty=True,
+            latest_tests_passed=0,
+        ) is True
+
+    def test_env_error_is_weak_signal(self):
+        assert extract_weak_progress(
+            env_error_detected=True,
+            patch_non_empty=False,
+            latest_tests_passed=-1,
+        ) is True
+
+    def test_tests_passed_zero_is_weak_signal(self):
+        """latest_tests_passed >= 0 means test data available — weak signal."""
+        assert extract_weak_progress(
+            env_error_detected=False,
+            patch_non_empty=False,
+            latest_tests_passed=0,
+        ) is True
+
+    def test_all_false_negative_tests_is_not_weak(self):
+        """No patch, no env error, no test data (< 0) → no weak signal."""
+        assert extract_weak_progress(
+            env_error_detected=False,
+            patch_non_empty=False,
+            latest_tests_passed=-1,
+        ) is False
+
+    def test_all_signals_present_is_weak(self):
+        assert extract_weak_progress(
+            env_error_detected=True,
+            patch_non_empty=True,
+            latest_tests_passed=5,
+        ) is True
+
+    def test_weak_progress_does_not_affect_stagnation(self):
+        """
+        Weak progress is log-only. The stagnation counter is NOT influenced
+        by patch_non_empty alone — only by evidence_gain/hypothesis_narrowing at verify boundary.
+        """
+        s = initial_reasoning_state("OBSERVE")
+        # step with patch but no test change
+        step_partial = extract_step_signals(
+            tests_passed_count=3, tests_passed_prev=3,
+            env_error_detected=False, patch_non_empty=True,
+        )
+        # step-level call (no stagnation) — weak_progress would be True
+        s = update_reasoning_state(s, normalize_signals(step_partial),
+                                   update_stagnation=False)
+        weak = extract_weak_progress(
+            env_error_detected=False,
+            patch_non_empty=True,
+            latest_tests_passed=3,
+        )
+        assert weak is True
+        assert s.no_progress_steps == 0  # not reset because update_stagnation=False

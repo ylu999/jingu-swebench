@@ -48,7 +48,7 @@ from control.reasoning_state import (
     normalize_signals, ReasoningState,
     VerdictStop, VerdictRedirect,
 )
-from control.swe_signal_adapter import extract_verify_signals, extract_step_signals
+from control.swe_signal_adapter import extract_verify_signals, extract_step_signals, extract_weak_progress
 
 # P-INV-001: run environment invariant checks before any batch work
 run_preflight()
@@ -163,22 +163,17 @@ class StepMonitorState:
         )
         if cp_state_holder is not None:
             cp_state_holder[0] = update_reasoning_state(
-                cp_state_holder[0], normalize_signals(step_partial)
+                cp_state_holder[0], normalize_signals(step_partial),
+                update_stagnation=False,  # B3.2: step-level never advances no_progress
             )
             _s = cp_state_holder[0]
         else:
             self.cp_state = update_reasoning_state(
-                self.cp_state, normalize_signals(step_partial)
+                self.cp_state, normalize_signals(step_partial),
+                update_stagnation=False,
             )
             _s = self.cp_state
-        # B2-CP step log: emit on every step so ECS logs show state evolution
-        if step_partial:  # only log when at least one signal is non-default
-            print(
-                f"    [cp-step] signals={list(step_partial.keys())} "
-                f"no_progress:{_s.no_progress_steps} step:{_s.step_index} "
-                f"env_noise:{_s.env_noise} actionability:{_s.actionability}",
-                flush=True,
-            )
+        # B3.1: step log moved to _monitored_step section 3 (has instance_id + attempt)
 
     def record_verify(self, step: int, result: dict) -> None:
         with self._lock:
@@ -321,13 +316,32 @@ def _install_step_monitor(
                 t.start()
                 break
 
-        # ── 3. B2-CP: update control-plane state with step-level signals ──────
-        # Separated from verify signals (CORR1). task_success is NEVER set here.
+        # ── 3. B3-CP: update control-plane state with step-level signals ──────
+        # B3.2: step-level does NOT advance no_progress_steps (gated to verify window).
+        # B3.3: weak_progress_seen captured for log-only observability (no stagnation effect).
+        # task_success is NEVER set here (CORR1).
         state.update_cp_with_step_signals(
             env_error_detected=_step_env_error,
             patch_non_empty=_step_patch_non_empty,
             cp_state_holder=cp_state_holder,
         )
+        # B3.1+B3.3: emit per-step log with instance/attempt context
+        _cp_s = cp_state_holder[0] if cp_state_holder is not None else state.cp_state
+        _step_signals_present = bool(_step_env_error or _step_patch_non_empty)
+        _weak_progress = extract_weak_progress(
+            env_error_detected=_step_env_error,
+            patch_non_empty=_step_patch_non_empty,
+            latest_tests_passed=state.latest_tests_passed(),
+        )
+        if _step_signals_present or _weak_progress:
+            print(
+                f"    [cp-step] instance={state.instance_id} attempt={state.attempt}"
+                f" signals={[k for k,v in [('env',_step_env_error),('patch',_step_patch_non_empty)] if v]}"
+                f" no_progress:{_cp_s.no_progress_steps} step:{_cp_s.step_index}"
+                f" env_noise:{_cp_s.env_noise} actionability:{_cp_s.actionability}"
+                f" weak_progress:{_weak_progress}",
+                flush=True,
+            )
 
         return result
 
@@ -2002,25 +2016,34 @@ def run_with_jingu(instance_id: str, output_dir: Path, max_attempts: int = 3,
                             "progress_code": _progress_code,
                             "files_written_paths": (jingu_body or {}).get("files_written", []),
                         })
-                        # B2-CP: update reasoning state with verify result FIRST (before any break)
-                        # Step-level signals (B2) already updated cp_state_holder[0] during the run.
-                        # Here we apply the verify signal (B1) — task_success only — as a
-                        # SEPARATE update_reasoning_state() call (CORR1: signal separation).
+                        # B3-CP: update reasoning state with verify result FIRST (before any break)
+                        # B3.2: verify-window IS the stagnation gate — update_stagnation=True (default).
+                        # Step-level signals (B2) updated env_noise/actionability but NOT no_progress.
+                        # Here we apply verify signal (B1) with stagnation update + task_success.
+                        # Two separate calls enforced (CORR1: signal separation):
+                        #   call 1 (step-level, B2): update_stagnation=False
+                        #   call 2 (verify-level, here): update_stagnation=True (default)
                         _cv_passed = (_strategy_failure_class_v2 == "verified_pass")
                         _verify_partial = extract_verify_signals(controlled_verify_passed=_cv_passed)
-                        cp_state_holder[0] = update_reasoning_state(cp_state_holder[0], normalize_signals(_verify_partial))
+                        cp_state_holder[0] = update_reasoning_state(
+                            cp_state_holder[0], normalize_signals(_verify_partial)
+                            # update_stagnation=True (default) — verify window advances stagnation
+                        )
                         _cp_state_now = cp_state_holder[0]
                         cp_verdict = decide_next(_cp_state_now)
-                        print(f"    [control-plane] state=phase:{_cp_state_now.phase} "
-                              f"step:{_cp_state_now.step_index} no_progress:{_cp_state_now.no_progress_steps} "
-                              f"task_success:{_cp_state_now.task_success}")
-                        print(f"    [control-plane] verdict={cp_verdict}")
+                        # B3.1: add instance + attempt to control-plane logs
+                        _iid_short = instance_id.split("__")[-1] if "__" in instance_id else instance_id
+                        print(f"    [control-plane] instance={_iid_short} attempt={attempt}"
+                              f" state=phase:{_cp_state_now.phase}"
+                              f" step:{_cp_state_now.step_index} no_progress:{_cp_state_now.no_progress_steps}"
+                              f" task_success:{_cp_state_now.task_success}")
+                        print(f"    [control-plane] instance={_iid_short} attempt={attempt} verdict={cp_verdict}")
                         if isinstance(cp_verdict, VerdictStop):
-                            print(f"    [control-plane] STOPPING — reason={cp_verdict.reason}")
+                            print(f"    [control-plane] instance={_iid_short} STOPPING — reason={cp_verdict.reason}")
                             break
                         if isinstance(cp_verdict, VerdictRedirect):
                             # Unconditional override (CORR3): REDIRECT always forces ADJUST
-                            print(f"    [control-plane] REDIRECT → forcing ADJUST  reason={cp_verdict.reason}")
+                            print(f"    [control-plane] instance={_iid_short} REDIRECT → forcing ADJUST  reason={cp_verdict.reason}")
                             import dataclasses as _dc
                             retry_plan = _dc.replace(
                                 retry_plan,

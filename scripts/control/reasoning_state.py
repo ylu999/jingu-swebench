@@ -87,7 +87,11 @@ def initial_reasoning_state(phase: Phase) -> ReasoningState:
     """Create a fresh state at attempt start. Mirror of initialReasoningState()."""
     return ReasoningState(phase=phase)
 
-def update_reasoning_state(prev: ReasoningState, signals: CognitionSignals) -> ReasoningState:
+def update_reasoning_state(
+    prev: ReasoningState,
+    signals: CognitionSignals,
+    update_stagnation: bool = True,
+) -> ReasoningState:
     """
     Pure function. Apply one step's signals to produce next state.
 
@@ -100,9 +104,19 @@ def update_reasoning_state(prev: ReasoningState, signals: CognitionSignals) -> R
     C5: evidence_gain is set by the ADAPTER, not here.
         Files written alone do NOT reset stagnation — adapter must decide
         whether writes constituted real evidence (e.g., test count changed).
+
+    B3.2 — update_stagnation:
+        True  (default): verify-window calls — I1/I2 apply, no_progress_steps advances.
+        False           : step-level calls   — no_progress_steps frozen at prev value.
+        This separates "stagnation granularity" from "step granularity":
+        stagnation is a verify-window concept (how many verify windows had no progress),
+        not a step concept (how many individual steps had no test count change).
     """
-    has_progress = signals.evidence_gain > 0 or signals.hypothesis_narrowing > 0
-    no_progress_steps = 0 if has_progress else (prev.no_progress_steps + 1)
+    if update_stagnation:
+        has_progress = signals.evidence_gain > 0 or signals.hypothesis_narrowing > 0
+        no_progress_steps = 0 if has_progress else (prev.no_progress_steps + 1)
+    else:
+        no_progress_steps = prev.no_progress_steps  # frozen — step-level doesn't gate stagnation
 
     return ReasoningState(
         phase                = prev.phase,          # I5

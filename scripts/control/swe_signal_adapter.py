@@ -65,6 +65,29 @@ def extract_step_signals(
     return partial
 
 
+def extract_weak_progress(
+    *,
+    env_error_detected: bool,
+    patch_non_empty: bool,
+    latest_tests_passed: int,
+) -> bool:
+    """
+    B3.3 — Log-only weak progress indicator.
+
+    Returns True if the step shows any observable activity (weak signal),
+    even when strong evidence_gain criteria are not met.
+
+    Does NOT affect stagnation counter — purely diagnostic / observability.
+    Helps distinguish "truly idle steps" from "working but no test progress yet".
+
+    Weak signals (any one triggers):
+    - patch_non_empty: agent has written code (actionability but not evidence)
+    - env_error_detected: environment noise observed (signal, just bad kind)
+    - latest_tests_passed >= 0: any test data available this window
+    """
+    return patch_non_empty or env_error_detected or latest_tests_passed >= 0
+
+
 def extract_verify_signals(*, controlled_verify_passed: bool) -> dict:
     """
     Map controlled_verify result to a partial CognitionSignals dict.

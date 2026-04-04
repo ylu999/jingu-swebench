@@ -199,8 +199,7 @@ def cmd_run(args) -> None:
         "--workers", str(args.workers),
         "--output", output_path,
     ]
-    if args.s3_upload:
-        cmd_parts += ["--s3-upload", f"s3://{S3_BUCKET}/{batch_name}"]
+    # Note: s3 upload is handled by docker-entrypoint.sh via S3_BUCKET env var
 
     print(f"[ops] launching ECS task: {batch_name}")
     print(f"[ops] instances: {instance_ids_str}")
