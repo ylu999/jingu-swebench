@@ -198,6 +198,7 @@ def cmd_run(args) -> None:
 
     cmd_parts = [
         "--instance-ids", *args.instance_ids,
+        "--dataset", args.dataset,
         "--mode", args.mode,
         "--max-attempts", str(args.max_attempts),
         "--workers", str(args.workers),
@@ -589,6 +590,7 @@ def cmd_smoke(args) -> None:
     output_path = f"/app/results/{batch_name}"
     cmd_parts = [
         "--instance-ids", *instance_ids,
+        "--dataset", args.dataset,
         "--mode", args.mode,
         "--max-attempts", str(args.max_attempts),
         "--workers", str(args.workers),
@@ -599,7 +601,7 @@ def cmd_smoke(args) -> None:
     for i, iid in enumerate(instance_ids):
         color = _COLORS[i % len(_COLORS)]
         print(f"  {color}●{_RESET} {iid}", flush=True)
-    print(f"[smoke] mode={args.mode} attempts={args.max_attempts} workers={args.workers}", flush=True)
+    print(f"[smoke] dataset={args.dataset} mode={args.mode} attempts={args.max_attempts} workers={args.workers}", flush=True)
     print(f"[smoke] {filter_desc}", flush=True)
 
     resp = ecs.run_task(
@@ -706,8 +708,9 @@ def main():
     p_run.add_argument("--instance-ids", nargs="+", required=True)
     p_run.add_argument("--batch-name", required=True)
     p_run.add_argument("--mode", default="jingu", choices=["jingu", "baseline"])
-    p_run.add_argument("--max-attempts", type=int, default=2)
+    p_run.add_argument("--max-attempts", type=int, default=1)
     p_run.add_argument("--workers", type=int, default=3)
+    p_run.add_argument("--dataset", default="Verified", choices=["Lite", "Verified"])
     p_run.add_argument("--s3-upload", action="store_true", default=True)
 
     # smoke — launch + live tail, OR attach to existing task
@@ -722,8 +725,9 @@ def main():
     p_smoke.add_argument("--batch-name", default=None,
                          help="Batch name (required when launching)")
     p_smoke.add_argument("--mode", default="jingu", choices=["jingu", "baseline"])
-    p_smoke.add_argument("--max-attempts", type=int, default=2)
+    p_smoke.add_argument("--max-attempts", type=int, default=1)
     p_smoke.add_argument("--workers", type=int, default=3)
+    p_smoke.add_argument("--dataset", default="Verified", choices=["Lite", "Verified"])
     p_smoke.add_argument("--filter", "-f", default=None,
                          help="Regex filter (overrides default). E.g. 'cp-step|control-plane|pee'")
     p_smoke.add_argument("--all", "-a", action="store_true",
