@@ -1932,16 +1932,9 @@ def run_with_jingu(instance_id: str, output_dir: Path, max_attempts: int = 3,
                             "progress_code": _progress_code,
                             "files_written_paths": (jingu_body or {}).get("files_written", []),
                         })
-                        # Honor control_action: stop when verify passed or no signal
-                        if retry_plan.control_action in ("STOP_FAIL", "STOP_NO_SIGNAL"):
-                            print(f"    [retry-ctrl] STOPPING — action={retry_plan.control_action}")
-                            break
-                        # verified_pass: controlled_verify confirmed all tests pass — no retry needed
-                        if _strategy_failure_class_v2 == "verified_pass":
-                            print(f"    [retry-ctrl] STOPPING — verified_pass (controlled_verify tests_failed=0)")
-                            break
-
-                        # B1-CP: update reasoning state with verify result, then apply verdict
+                        # B1-CP: update reasoning state with verify result FIRST (before any break)
+                        # This ensures control-plane verdict is always computed and logged,
+                        # and VerdictStop(task_success) becomes the authoritative termination signal.
                         # B1 only uses verify signals (step-level signals added in B2)
                         _cv_passed = (_strategy_failure_class_v2 == "verified_pass")
                         _verify_partial = extract_verify_signals(controlled_verify_passed=_cv_passed)
@@ -1966,6 +1959,16 @@ def run_with_jingu(instance_id: str, output_dir: Path, max_attempts: int = 3,
                                     + f"\n\n[Control-plane redirect: {cp_verdict.reason} — re-examine environment assumptions before patching]"
                                 ),
                             )
+
+                        # Honor control_action: stop when verify passed or no signal
+                        if retry_plan.control_action in ("STOP_FAIL", "STOP_NO_SIGNAL"):
+                            print(f"    [retry-ctrl] STOPPING — action={retry_plan.control_action}")
+                            break
+                        # verified_pass: controlled_verify confirmed all tests pass — no retry needed
+                        # (kept as fallback; VerdictStop(task_success) above is the primary path)
+                        if _strategy_failure_class_v2 == "verified_pass":
+                            print(f"    [retry-ctrl] STOPPING — verified_pass (controlled_verify tests_failed=0)")
+                            break
 
                         # next_attempt_prompt already merges hint_prefix + exec_feedback
                         last_failure = retry_plan.next_attempt_prompt[:600]
