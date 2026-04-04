@@ -22,14 +22,14 @@ RUN curl -fsSL https://deb.nodesource.com/setup_18.x | bash - \
 
 # Install Python packages
 RUN pip install --no-cache-dir \
-    "mini-swe-agent==2.2.8" \
+    "mini-swe-agent==2.1.0" \
     "litellm==1.83.0" \
     "swebench==4.1.0" \
     "boto3==1.42.1" \
     "pydantic==2.12.5"
 
 # Copy jingu-swebench.yaml into the installed mini-swe-agent config directory.
-# mini-swe-agent 2.2.8 ships swebench.yaml; we add our fork alongside it.
+# mini-swe-agent 2.1.0 ships swebench.yaml; we add our fork alongside it.
 # This overrides ENVIRONMENT_NOT_AGENT_WORK violations from swebench.yaml defaults.
 COPY config/jingu-swebench.yaml /usr/local/lib/python3.12/site-packages/minisweagent/config/benchmarks/jingu-swebench.yaml
 
