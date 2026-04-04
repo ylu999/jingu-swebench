@@ -11,6 +11,7 @@ IMPORTANT — two separate event types must NOT be mixed in one update call:
   extract_step_signals()   — called once per agent step
     → evidence_gain, hypothesis_narrowing, env_noise, actionability
     → task_success is NEVER set here
+    → also returns progress_evaluable_event (meta-control gate, NOT a signal)
 
   extract_verify_signals() — called once after controlled_verify at attempt end
     → task_success ONLY
@@ -20,6 +21,17 @@ Design constraints:
   - actionability = pre-execution readiness (patch non-empty) — NOT post-verify success
   - evidence_gain requires test count increase, NOT just files written (C5: false progress)
   - files written alone = no signal (writing without test progress is not evidence)
+
+B5 — progress_evaluable_event (semantic event gating):
+  - Controls whether update_reasoning_state() may advance no_progress_steps
+  - NOT a CognitionSignal — it is a meta-control gate on the integrator
+  - True only on semantic boundary events:
+      1. inner verify returned new result (verify_history grew)
+      2. env failure detected (failure is information)
+      3. patch first write (False → True transition, not subsequent edits)
+  - Regular read/think/write steps: False → no_progress frozen
+  - Rationale: stagnation should be measured at "could-have-progressed" moments,
+    not at arbitrary step counts (hardcode) or only at attempt-end (too sparse)
 """
 from __future__ import annotations
 
@@ -30,19 +42,30 @@ def extract_step_signals(
     tests_passed_prev: int,
     env_error_detected: bool,
     patch_non_empty: bool,
-) -> dict:
+    patch_was_non_empty_prev: bool = False,
+    verify_history_len: int = 0,
+    verify_history_len_prev: int = 0,
+) -> tuple[dict, bool]:
     """
-    Map one agent step's observable data to a partial CognitionSignals dict.
+    Map one agent step's observable data to a partial CognitionSignals dict
+    plus a progress_evaluable_event gate.
+
     Called once per step. Does NOT set task_success.
 
     Args:
-        tests_passed_count:  number of tests passing after this step
-        tests_passed_prev:   number of tests passing before this step
-        env_error_detected:  True if the step encountered an environment error
-        patch_non_empty:     True if agent has written a non-empty patch
+        tests_passed_count:       number of tests passing after this step
+        tests_passed_prev:        number of tests passing before this step
+        env_error_detected:       True if the step encountered an environment error
+        patch_non_empty:          True if agent has written a non-empty patch
+        patch_was_non_empty_prev: True if patch was already non-empty before this step
+        verify_history_len:       number of inner-verify results available now
+        verify_history_len_prev:  number of inner-verify results before this step
 
-    Returns partial dict — only keys with signal present.
-    Absent keys use DEFAULT_SIGNALS (conservative baseline).
+    Returns:
+        (partial_signals, progress_evaluable_event)
+        partial_signals:          dict — only keys with signal present
+        progress_evaluable_event: bool — True only on semantic boundary events
+                                  Pass as update_stagnation= to update_reasoning_state()
     """
     partial: dict = {}
 
@@ -62,7 +85,20 @@ def extract_step_signals(
     if env_error_detected:
         partial["env_noise"] = True
 
-    return partial
+    # ── B5: progress_evaluable_event — meta-control gate ──────────────────────
+    # True only on semantic boundary events where stagnation can meaningfully be judged.
+    # NOT a signal — passed separately as update_stagnation= to update_reasoning_state().
+    #
+    # Evaluable events (B5 spec):
+    #   1. inner verify returned a new result this step
+    #   2. env failure detected (bad information is still information)
+    #   3. patch first write: False → True transition (phase boundary: explore → propose)
+    #      NOT subsequent patch edits (would re-introduce over-sensitivity)
+    inner_verify_new = verify_history_len > verify_history_len_prev
+    patch_first_write = patch_non_empty and not patch_was_non_empty_prev
+    progress_evaluable_event = inner_verify_new or env_error_detected or patch_first_write
+
+    return partial, progress_evaluable_event
 
 
 def extract_weak_progress(

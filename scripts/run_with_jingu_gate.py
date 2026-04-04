@@ -133,6 +133,9 @@ class StepMonitorState:
         self.cp_state = initial_reasoning_state("OBSERVE")
         self._prev_step_tests_passed: int = -1     # tests_passed before current step
         self._last_step_env_error: bool = False    # env mutation seen in latest step
+        # B5: state needed to detect semantic boundary events
+        self._prev_verify_history_len: int = 0     # inner-verify count before current step
+        self._prev_patch_non_empty: bool = False   # patch state before current step
 
     def update_cp_with_step_signals(
         self,
@@ -142,9 +145,17 @@ class StepMonitorState:
         cp_state_holder: list | None = None,
     ) -> None:
         """
-        B2-CP: update control-plane state with step-level signals.
+        B5: update control-plane state with step-level signals.
         Called once per agent step from _monitored_step.
         Uses latest_tests_passed() for evidence_gain (requires inner-verify data).
+
+        B5 — progress_evaluable_event semantic gating:
+        update_stagnation is now driven by progress_evaluable_event, not hardcoded False.
+        Stagnation advances only on semantic boundary events:
+          - new inner-verify result
+          - env failure (failure is information)
+          - patch first write (False → True transition)
+        Regular read/think steps: no_progress frozen.
 
         If cp_state_holder is provided (a single-element list from run_with_jingu),
         reads/writes holder[0] so cp_state persists across attempts.
@@ -152,25 +163,35 @@ class StepMonitorState:
         """
         tests_now = self.latest_tests_passed()
         tests_prev = self._prev_step_tests_passed
-        # Update prev for next step BEFORE computing signals (I1/I2 monotone invariant)
+        verify_len_now = len(self.verify_history)
+        verify_len_prev = self._prev_verify_history_len
+        patch_prev = self._prev_patch_non_empty
+
+        # Update prev-state tracking BEFORE computing signals (monotone invariant)
         if tests_now >= 0:
             self._prev_step_tests_passed = tests_now
-        step_partial = extract_step_signals(
+        self._prev_verify_history_len = verify_len_now
+        self._prev_patch_non_empty = patch_non_empty
+
+        step_partial, progress_evaluable_event = extract_step_signals(
             tests_passed_count=tests_now,
             tests_passed_prev=tests_prev,
             env_error_detected=env_error_detected,
             patch_non_empty=patch_non_empty,
+            patch_was_non_empty_prev=patch_prev,
+            verify_history_len=verify_len_now,
+            verify_history_len_prev=verify_len_prev,
         )
         if cp_state_holder is not None:
             cp_state_holder[0] = update_reasoning_state(
                 cp_state_holder[0], normalize_signals(step_partial),
-                update_stagnation=False,  # B3.2: step-level never advances no_progress
+                update_stagnation=progress_evaluable_event,  # B5: semantic gate
             )
             _s = cp_state_holder[0]
         else:
             self.cp_state = update_reasoning_state(
                 self.cp_state, normalize_signals(step_partial),
-                update_stagnation=False,
+                update_stagnation=progress_evaluable_event,  # B5: semantic gate
             )
             _s = self.cp_state
         # B3.1: step log moved to _monitored_step section 3 (has instance_id + attempt)
