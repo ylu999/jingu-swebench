@@ -324,9 +324,11 @@ _ALERT_RE = re.compile(
 )
 
 # Default filter: lines that carry actual signal (LLM calls, CP, agent output, errors)
-# Suppresses docker pull / preflight / minisweagent DEBUG noise
+# Suppresses docker pull / minisweagent DEBUG / LiteLLM noise
 _DEFAULT_FILTER = re.compile(
     r'\[jingu\]|\[cp-step\]|\[control-plane\]|\[agent\]|'
+    r'\[step \d+\]|'                          # agent step output (LLM conversation)
+    r'\[attempt |'                            # attempt headers
     r'\[inner-verify\]|\[controlled-verify\]|'
     r'STOPPING|verdict|pee:|task_success|'
     r'ERROR|FAILED|Traceback|\[preflight\]|\[init\]'
@@ -371,8 +373,17 @@ def _tail_shared_stream(
     color_map = {iid: _color_for_instance(iid, instance_ids) for iid in instance_ids}
     current_color = _COLORS[0]  # track which instance is "active" for un-tagged lines
 
-    # Regex to extract instance_id from log lines
-    _iid_re = re.compile(r'instance=([\w_\-\.]+)')
+    # Patterns that carry instance identity — used to switch active color context
+    # 1. cp-step/control-plane: instance=<id>
+    # 2. agent start:           [agent] running <id> attempt=
+    # 3. attempt header:        [attempt N/M] <id>
+    # 4. jingu start:           [jingu] START <id>
+    _iid_re = re.compile(
+        r'instance=([\w_\-\.]+)'           # cp-step / control-plane
+        r'|\[agent\] running ([\w_\-\.]+)' # agent start line
+        r'|\[attempt \d+/\d+\] ([\w_\-\.]+)'  # attempt header
+        r'|\[jingu\] START ([\w_\-\.]+)'   # jingu start
+    )
 
     next_token: str | None = None
     last_ts = 0
@@ -423,11 +434,13 @@ def _tail_shared_stream(
             if not filter_pat.search(msg):
                 continue
 
-            # Detect which instance this line belongs to, update color
+            # Detect which instance this line belongs to, update active color
             m = _iid_re.search(msg)
             if m:
-                iid = m.group(1)
-                current_color = color_map.get(iid, _COLORS[0])
+                # Take the first non-None capture group
+                iid = next((g for g in m.groups() if g), None)
+                if iid:
+                    current_color = color_map.get(iid, _COLORS[0])
 
             alert = "⚠️  " if _ALERT_RE.search(msg) else ""
             print(f"{current_color}{alert}{msg}{_RESET}", flush=True)
@@ -449,20 +462,131 @@ def _tail_shared_stream(
         time.sleep(3)
 
 
+def _get_running_tasks() -> list[dict]:
+    """Return list of currently RUNNING/PENDING tasks in the cluster with metadata."""
+    ecs = boto3.client("ecs", region_name=REGION)
+    result = []
+    for desired in ("RUNNING", "PENDING"):
+        paginator = ecs.get_paginator("list_tasks")
+        for page in paginator.paginate(cluster=ECS_CLUSTER, desiredStatus=desired):
+            arns = page.get("taskArns", [])
+            if not arns:
+                continue
+            desc = ecs.describe_tasks(cluster=ECS_CLUSTER, tasks=arns)
+            for t in desc.get("tasks", []):
+                task_id = t["taskArn"].split("/")[-1]
+                started = t.get("startedAt", t.get("createdAt", "?"))
+                batch = ""
+                for ov in t.get("overrides", {}).get("containerOverrides", []):
+                    for env in ov.get("environment", []):
+                        if env["name"] == "BATCH_NAME":
+                            batch = env["value"]
+                result.append({
+                    "task_id": task_id,
+                    "status": t.get("lastStatus", "?"),
+                    "batch": batch,
+                    "started": str(started),
+                })
+    return result
+
+
+def cmd_list_tasks(args) -> None:
+    """List currently RUNNING/PENDING ECS tasks."""
+    tasks = _get_running_tasks()
+    if not tasks:
+        print("[ops] no running/pending tasks", flush=True)
+        return
+    print(f"{'TASK ID':<44} {'STATUS':<10} {'BATCH':<30} STARTED", flush=True)
+    print("─" * 110, flush=True)
+    for t in tasks:
+        print(f"{t['task_id']:<44} {t['status']:<10} {t['batch']:<30} {t['started']}", flush=True)
+
+
 def cmd_smoke(args) -> None:
     """
-    Launch ECS task + live-tail ALL instance logs in real time.
+    Launch ECS task + live-tail logs. Or tail an existing task with --task-id.
 
-    Single stream, color-coded by instance_id detected in each log line.
-    Default filter shows: [jingu] [cp-step] [control-plane] [agent] errors.
-    Use --filter to narrow further, --all to show everything.
+    Two modes:
+      Launch + tail:  --batch-name NAME --instance-ids ID [ID ...]
+      Tail existing:  --task-id TASK_ID  (no launch, just attach)
+
+    Single stream, color-coded by instance_id found in log lines.
+    Default filter: [jingu] [cp-step] [control-plane] [agent] errors pee:
+    Use --filter to narrow, --all for everything.
     """
     ecs = boto3.client("ecs", region_name=REGION)
 
+    # ── Determine filter ──────────────────────────────────────────────────────
+    if args.all:
+        filter_pat = re.compile(r'.')
+        filter_desc = "all lines"
+    elif args.filter:
+        filter_pat = re.compile(args.filter)
+        filter_desc = f"filter: {args.filter}"
+    else:
+        filter_pat = _DEFAULT_FILTER
+        filter_desc = "default (signal lines only)"
+
+    # ── Mode: attach to existing task ─────────────────────────────────────────
+    if args.task_id:
+        task_id = args.task_id
+        # Discover instance_ids from task override command args
+        instance_ids: list[str] = args.instance_ids or []
+        if not instance_ids:
+            # Try to extract from task description
+            try:
+                t_resp = ecs.describe_tasks(cluster=ECS_CLUSTER, tasks=[task_id])
+                tasks_list = t_resp.get("tasks", [])
+                if tasks_list:
+                    for ov in tasks_list[0].get("overrides", {}).get("containerOverrides", []):
+                        cmd = ov.get("command", [])
+                        if "--instance-ids" in cmd:
+                            idx = cmd.index("--instance-ids") + 1
+                            while idx < len(cmd) and not cmd[idx].startswith("--"):
+                                instance_ids.append(cmd[idx])
+                                idx += 1
+            except Exception:
+                pass
+        status_str = ""
+        try:
+            t_resp = ecs.describe_tasks(cluster=ECS_CLUSTER, tasks=[task_id])
+            t = (t_resp.get("tasks") or [{}])[0]
+            status_str = t.get("lastStatus", "?")
+        except Exception:
+            pass
+        print(f"[smoke] attaching to task={task_id}  status={status_str}", flush=True)
+        print(f"[smoke] instances={instance_ids or '(unknown)'}", flush=True)
+        print(f"[smoke] {filter_desc}", flush=True)
+        print("─" * 70, flush=True)
+        try:
+            _tail_shared_stream(task_id, instance_ids, filter_pat)
+        except KeyboardInterrupt:
+            print("\n[smoke] interrupted", flush=True)
+        print("─" * 70, flush=True)
+        return
+
+    # ── Mode: launch new task ─────────────────────────────────────────────────
+    if not args.batch_name or not args.instance_ids:
+        print("[smoke] ERROR: --batch-name and --instance-ids required when launching a new task", flush=True)
+        print("        To tail an existing task: --task-id TASK_ID", flush=True)
+        sys.exit(1)
+
     batch_name = args.batch_name
     instance_ids = args.instance_ids
-    output_path = f"/app/results/{batch_name}"
 
+    # Check for already-running tasks — warn user before launching duplicate
+    running = _get_running_tasks()
+    if running:
+        print(f"[smoke] WARNING: {len(running)} task(s) already running:", flush=True)
+        for t in running:
+            print(f"  task={t['task_id']}  batch={t['batch'] or '(no batch)'}  status={t['status']}", flush=True)
+        print("[smoke] To tail an existing task instead:  python scripts/ops.py smoke --task-id TASK_ID", flush=True)
+        answer = input("[smoke] Launch a NEW task anyway? [y/N] ").strip().lower()
+        if answer != "y":
+            print("[smoke] aborted", flush=True)
+            sys.exit(0)
+
+    output_path = f"/app/results/{batch_name}"
     cmd_parts = [
         "--instance-ids", *instance_ids,
         "--mode", args.mode,
@@ -476,20 +600,8 @@ def cmd_smoke(args) -> None:
         color = _COLORS[i % len(_COLORS)]
         print(f"  {color}●{_RESET} {iid}", flush=True)
     print(f"[smoke] mode={args.mode} attempts={args.max_attempts} workers={args.workers}", flush=True)
-
-    # Determine filter
-    if args.all:
-        filter_pat = re.compile(r'.')  # match everything
-        filter_desc = "all lines"
-    elif args.filter:
-        filter_pat = re.compile(args.filter)
-        filter_desc = f"filter: {args.filter}"
-    else:
-        filter_pat = _DEFAULT_FILTER
-        filter_desc = "default (signal lines only)"
     print(f"[smoke] {filter_desc}", flush=True)
 
-    # Launch ECS task
     resp = ecs.run_task(
         cluster=ECS_CLUSTER,
         taskDefinition=ECS_TASK_DEF,
@@ -518,15 +630,15 @@ def cmd_smoke(args) -> None:
     deadline = time.monotonic() + 180
     while time.monotonic() < deadline:
         t_resp = ecs.describe_tasks(cluster=ECS_CLUSTER, tasks=[task_id])
-        tasks = t_resp.get("tasks", [])
-        if tasks:
-            status = tasks[0].get("lastStatus", "")
+        tasks_list = t_resp.get("tasks", [])
+        if tasks_list:
+            status = tasks_list[0].get("lastStatus", "")
             if status == "RUNNING":
                 print(" RUNNING", flush=True)
                 break
             if status == "STOPPED":
-                exit_code = tasks[0].get("containers", [{}])[0].get("exitCode", "?")
-                reason = tasks[0].get("stoppedReason", "")
+                exit_code = tasks_list[0].get("containers", [{}])[0].get("exitCode", "?")
+                reason = tasks_list[0].get("stoppedReason", "")
                 print(f"\n[smoke] task STOPPED early (exit={exit_code} reason={reason})", flush=True)
                 sys.exit(1)
         print(".", end="", flush=True)
@@ -536,20 +648,17 @@ def cmd_smoke(args) -> None:
         sys.exit(1)
 
     print("─" * 70, flush=True)
-
     try:
         _tail_shared_stream(task_id, instance_ids, filter_pat)
     except KeyboardInterrupt:
         print("\n[smoke] interrupted", flush=True)
-
     print("─" * 70, flush=True)
 
-    # Final status summary
     try:
         t_resp = ecs.describe_tasks(cluster=ECS_CLUSTER, tasks=[task_id])
-        tasks = t_resp.get("tasks", [])
-        if tasks:
-            s = tasks[0]
+        tasks_list = t_resp.get("tasks", [])
+        if tasks_list:
+            s = tasks_list[0]
             exit_code = s.get("containers", [{}])[0].get("exitCode", "?")
             print(f"[smoke] final status={s.get('lastStatus')} exit={exit_code}", flush=True)
     except Exception:
@@ -601,10 +710,17 @@ def main():
     p_run.add_argument("--workers", type=int, default=3)
     p_run.add_argument("--s3-upload", action="store_true", default=True)
 
-    # smoke — launch + live tail all instances
-    p_smoke = sub.add_parser("smoke", help="Launch ECS task + live-tail all instance logs")
-    p_smoke.add_argument("--instance-ids", nargs="+", required=True)
-    p_smoke.add_argument("--batch-name", required=True)
+    # smoke — launch + live tail, OR attach to existing task
+    p_smoke = sub.add_parser(
+        "smoke",
+        help="Launch ECS task + live-tail logs. Or attach to existing: --task-id TASK_ID",
+    )
+    p_smoke.add_argument("--task-id", default=None,
+                         help="Attach to an already-running task (no launch)")
+    p_smoke.add_argument("--instance-ids", nargs="+", default=None,
+                         help="Instance IDs to run (required when launching)")
+    p_smoke.add_argument("--batch-name", default=None,
+                         help="Batch name (required when launching)")
     p_smoke.add_argument("--mode", default="jingu", choices=["jingu", "baseline"])
     p_smoke.add_argument("--max-attempts", type=int, default=2)
     p_smoke.add_argument("--workers", type=int, default=3)
@@ -612,6 +728,9 @@ def main():
                          help="Regex filter (overrides default). E.g. 'cp-step|control-plane|pee'")
     p_smoke.add_argument("--all", "-a", action="store_true",
                          help="Show all lines including noise (no filter)")
+
+    # list-tasks — show currently running/pending ECS tasks
+    sub.add_parser("list-tasks", help="List currently RUNNING/PENDING ECS tasks")
 
     # logs
     p_logs = sub.add_parser("logs", help="Tail ECS task logs")
@@ -630,6 +749,8 @@ def main():
         cmd_run(args)
     elif args.cmd == "smoke":
         cmd_smoke(args)
+    elif args.cmd == "list-tasks":
+        cmd_list_tasks(args)
     elif args.cmd == "logs":
         cmd_logs(args)
     elif args.cmd == "status":
