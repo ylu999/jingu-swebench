@@ -1326,7 +1326,7 @@ def extract_jingu_body(traj: dict, patch_text: str, problem_statement: str = "")
 
 # Official mini-swe-agent Verified run config (collection 737e5dd2, run b6e8010b)
 # Uses Anthropic direct API with interleaved thinking (reasoning_effort=high)
-MODEL = "anthropic/claude-sonnet-4-5-20250929"
+MODEL = "bedrock/global.anthropic.claude-sonnet-4-5-20250929-v1:0"
 
 BASE_CONFIG = {
     "model": {
@@ -1334,12 +1334,12 @@ BASE_CONFIG = {
         "model_name": MODEL,
         "model_kwargs": {
             "drop_params": True,
-            "temperature": None,
-            "extra_headers": {
-                "anthropic-beta": "interleaved-thinking-2025-05-14",
-            },
-            "reasoning_effort": "high",
-            "parallel_tool_calls": True,
+            # litellm 1.83 bug: parallel_tool_calls=true/false sends malformed tool_choice to Bedrock.
+            # Setting None suppresses the param entirely, which works correctly.
+            "parallel_tool_calls": None,
+            # Extended thinking via Bedrock: temperature must be 1 (Bedrock requirement)
+            "thinking": {"type": "enabled", "budget_tokens": 10000},
+            "temperature": 1,
         },
     },
     "environment": {
