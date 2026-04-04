@@ -1338,9 +1338,7 @@ BASE_CONFIG = {
     "agent": {
         "mode": "yolo",
         "confirm_exit": False,  # critical: don't wait for user input
-        "step_limit": 100,      # DBO: do not tune this without failure classification.
-                                # Current classified failures use wrong_direction type —
-                                # which requires must_not_do hints, not fewer steps.
+        # step_limit comes from jingu-swebench.yaml (250) — matches official swebench.yaml
     },
 }
 
@@ -2085,7 +2083,6 @@ def _run_official_evaluation(
         "--instance_ids", *instance_ids,
         "--max_workers", str(max_workers),
         "--cache_level", "env",
-        "--log_level", "INFO",
     ]
     print(f"\n[eval] running official harness: run_id={run_id}")
     print(f"[eval] cmd: {' '.join(cmd)}")
