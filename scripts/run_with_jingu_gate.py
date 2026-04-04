@@ -1344,23 +1344,28 @@ BASE_CONFIG = {
 
 _INSTANCE_CACHE: dict[str, dict] = {}
 
-def _load_instances(instance_ids: list[str]) -> dict[str, dict]:
-    """Load multiple SWE-bench Lite instances in one dataset pass."""
+def _load_instances(instance_ids: list[str], dataset: str = "Lite") -> dict[str, dict]:
+    """Load SWE-bench instances in one dataset pass.
+
+    dataset: "Lite"     → SWE-bench/SWE-bench_Lite (300 instances)
+             "Verified" → SWE-bench/SWE-bench_Verified (500 instances)
+    """
     from datasets import load_dataset
+    dataset_name = f"SWE-bench/SWE-bench_{dataset}"
     needed = set(instance_ids) - set(_INSTANCE_CACHE)
     if needed:
-        ds = load_dataset("SWE-bench/SWE-bench_Lite", split="test")
+        ds = load_dataset(dataset_name, split="test")
         for inst in ds:
             if inst["instance_id"] in needed:
                 _INSTANCE_CACHE[inst["instance_id"]] = dict(inst)
     missing = set(instance_ids) - set(_INSTANCE_CACHE)
     if missing:
-        raise ValueError(f"Instances not found: {missing}")
+        raise ValueError(f"Instances not found in {dataset_name}: {missing}")
     return {iid: _INSTANCE_CACHE[iid] for iid in instance_ids}
 
 
-def _load_instance(instance_id: str) -> dict:
-    return _load_instances([instance_id])[instance_id]
+def _load_instance(instance_id: str, dataset: str = "Lite") -> dict:
+    return _load_instances([instance_id], dataset=dataset)[instance_id]
 
 def run_agent(
     instance: dict,
@@ -2061,6 +2066,7 @@ def _run_official_evaluation(
     run_id: str,
     eval_output_dir: Path,
     max_workers: int = 8,
+    dataset: str = "Lite",
 ) -> dict:
     """
     Run the official SWE-bench harness (swebench.harness.run_evaluation).
@@ -2074,9 +2080,10 @@ def _run_official_evaluation(
 
     eval_output_dir.mkdir(parents=True, exist_ok=True)
 
+    dataset_name = f"SWE-bench/SWE-bench_{dataset}"
     cmd = [
         "python", "-m", "swebench.harness.run_evaluation",
-        "--dataset_name", "SWE-bench/SWE-bench_Lite",
+        "--dataset_name", dataset_name,
         "--split", "test",
         "--predictions_path", str(predictions_path),
         "--run_id", run_id,
@@ -2104,7 +2111,10 @@ def _run_official_evaluation(
     # run_evaluation writes: logs/<run_id>.<dataset>.<split>.json
     # Search for the result JSON
     result_file = None
+    dataset_short = dataset_name.split("/")[-1]  # e.g. SWE-bench_Lite or SWE-bench_Verified
     for candidate in [
+        Path(f"logs/{run_id}.SWE-bench_{dataset_short}.test.json"),
+        Path(f"logs/{run_id}.{dataset_short}.test.json"),
         Path(f"logs/{run_id}.SWE-bench_SWE-bench_Lite.test.json"),
         Path(f"logs/{run_id}.SWE-bench_Lite.test.json"),
         Path(f"logs/{run_id}.json"),
@@ -2165,6 +2175,8 @@ def main():
                         help="Run official SWE-bench harness after inference (requires Docker)")
     parser.add_argument("--run-id", default=None,
                         help="Run ID for eval results (default: auto-generated from mode+timestamp)")
+    parser.add_argument("--dataset", choices=["Lite", "Verified"], default="Lite",
+                        help="SWE-bench dataset variant: Lite (300) or Verified (500) (default: Lite)")
     args = parser.parse_args()
 
     global _timing_root
@@ -2178,9 +2190,9 @@ def main():
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # Pre-load all instances in a single dataset pass (avoids N redundant downloads)
-    print(f"[jingu] loading {len(args.instance_ids)} instances from dataset...")
+    print(f"[jingu] loading {len(args.instance_ids)} instances from dataset SWE-bench_{args.dataset}...")
     t_ds = Timer("dataset prefetch", parent=_timing_root)
-    _load_instances(args.instance_ids)
+    _load_instances(args.instance_ids, dataset=args.dataset)
     t_ds.stop()
     print(f"[jingu] loaded in {t_ds.elapsed:.1f}s. launching {args.workers} parallel workers...")
 
@@ -2369,6 +2381,7 @@ def main():
             instance_ids=args.instance_ids,
             run_id=run_id,
             eval_output_dir=output_dir / "eval_results",
+            dataset=args.dataset,
         )
         report["eval_results"] = eval_result
         # Update run_report.json with eval results
