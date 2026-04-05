@@ -20,11 +20,11 @@ try:
     from subtype_contracts import build_phase_principal_guidance as _build_pg
     _ANALYZE_PRINCIPAL = _build_pg("ANALYZE") or "You MUST declare PRINCIPALS: causal_grounding."
     _EXECUTE_PRINCIPAL = _build_pg("EXECUTE") or "You MUST declare PRINCIPALS: minimal_change."
-    _JUDGE_PRINCIPAL   = _build_pg("JUDGE")   or "You MUST declare PRINCIPALS: invariant_preservation."
+    _JUDGE_PRINCIPAL   = _build_pg("JUDGE")   or "You MUST declare PRINCIPALS: result_verification, uncertainty_honesty."
 except Exception:
     _ANALYZE_PRINCIPAL = "You MUST declare PRINCIPALS: causal_grounding."
     _EXECUTE_PRINCIPAL = "You MUST declare PRINCIPALS: minimal_change."
-    _JUDGE_PRINCIPAL   = "You MUST declare PRINCIPALS: invariant_preservation."
+    _JUDGE_PRINCIPAL   = "You MUST declare PRINCIPALS: result_verification, uncertainty_honesty."
 
 # Phase guidance = behavior text + principal guidance from contract (p193)
 _ANALYZE_GUIDANCE = (

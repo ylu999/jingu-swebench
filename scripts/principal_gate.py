@@ -43,7 +43,7 @@ except Exception:
         "OBSERVE":  [],
         "ANALYZE":  ["causal_grounding"],
         "EXECUTE":  ["minimal_change"],
-        "JUDGE":    ["invariant_preservation"],
+        "JUDGE":    ["result_verification", "uncertainty_honesty"],
     }
     PHASE_VIOLATION_REDIRECT = {
         "ANALYZE":  "OBSERVE",
@@ -68,6 +68,14 @@ _FEEDBACK: dict[str, str] = {
     "missing_invariant_preservation": (
         "Your judge output must verify an invariant was preserved. "
         "Declare PRINCIPALS: invariant_preservation"
+    ),
+    "missing_result_verification": (
+        "Your judge output must verify the actual result. "
+        "Declare PRINCIPALS: result_verification"
+    ),
+    "missing_uncertainty_honesty": (
+        "Your judge output must express honest uncertainty. "
+        "Declare PRINCIPALS: uncertainty_honesty"
     ),
 }
 
