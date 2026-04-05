@@ -154,7 +154,23 @@ def _verify_prerequisites(cognition_result: str | None = None, judge_result=None
         # Conservative fallback: allow controlled_verify to run on unexpected errors
         return True, ""
 
-# ── Traj watcher: real-time per-step log ───────────────────────────────────────
+# ╔══════════════════════════════════════════════════════════════════════════════╗
+# ║  LAYER 2 — RUNTIME STATE (agent responsibility)                             ║
+# ║                                                                              ║
+# ║  Stateful bookkeeping for the control loop.  MUST NOT contain:              ║
+# ║    • cognition/governance truth  (phase, principal, evidence_refs)          ║
+# ║    • Jingu admission logic       (validation, rejection, repair hints)      ║
+# ║                                                                              ║
+# ║  Owns:                                                                       ║
+# ║    last_verify_time, verify_in_flight, _prev_patch_non_empty,               ║
+# ║    no_progress_steps, verify_history, cp_state                              ║
+# ║                                                                              ║
+# ║  Separation invariant (three-kind rule):                                    ║
+# ║    fact         — observable signal from ONE step (patch_non_empty, etc.)   ║
+# ║    control state— cross-step bookkeeping (debounce, in-flight, stagnation)  ║
+# ║    governance   — cognition truth (phase, subtype, principals, verdict)     ║
+# ║  A variable MUST belong to exactly one kind.  Cross-kind = structural bug.  ║
+# ╚══════════════════════════════════════════════════════════════════════════════╝
 
 class StepMonitorState:
     """
@@ -292,6 +308,23 @@ class StepMonitorState:
                     return entry["tests_passed"]
         return -1
 
+
+# ╔══════════════════════════════════════════════════════════════════════════════╗
+# ║  LAYER 3 — RUNTIME CONTROL (agent responsibility)                           ║
+# ║                                                                              ║
+# ║  Loop control: decides WHEN to trigger verify, advance stagnation,          ║
+# ║  enforce stop.  Reads/writes RuntimeState.  MUST NOT contain:               ║
+# ║    • Jingu validation logic  (principal check, schema, admission)           ║
+# ║    • governance truth        (phase taxonomy, subtype, evidence)            ║
+# ║                                                                              ║
+# ║  Owns:                                                                       ║
+# ║    _install_step_monitor, _monitored_step                                   ║
+# ║    debounce, patch_first_write detection, pee gating,                       ║
+# ║    inner-verify scheduling, stagnation counter, VerdictStop enforcement     ║
+# ║                                                                              ║
+# ║  Key rule: "should_trigger_verify" and "should_stop" are RUNTIME decisions. ║
+# ║  They depend on history. They do NOT belong in Jingu governance.            ║
+# ╚══════════════════════════════════════════════════════════════════════════════╝
 
 def _install_step_monitor(
     instance_id: str,
@@ -777,6 +810,22 @@ _ENV_MUTATION_PATTERNS: tuple[str, ...] = (
 )
 
 
+# ╔══════════════════════════════════════════════════════════════════════════════╗
+# ║  LAYER 1 — SIGNAL EXTRACTION (fact extraction, stateless)                   ║
+# ║                                                                              ║
+# ║  Pure functions: given ONE step's observable data, return what happened.    ║
+# ║  No history, no control decisions, no governance.                           ║
+# ║                                                                              ║
+# ║  Owns:                                                                       ║
+# ║    _msg_has_env_mutation, _msg_has_signal,                                  ║
+# ║    compute_steps_since_last_signal, signal pattern constants                ║
+# ║                                                                              ║
+# ║  Key invariants:                                                             ║
+# ║    • Returns only "what happened this step" — NOT "what to do next"         ║
+# ║    • patch_non_empty = fact (file was written)                              ║
+# ║    • Does NOT set patch_first_write — that is a derived RUNTIME event       ║
+# ╚══════════════════════════════════════════════════════════════════════════════╝
+
 def _msg_has_env_mutation(msg: dict) -> tuple[bool, str]:
     """
     Return (True, trigger) if an assistant message attempts environment mutation.
@@ -898,6 +947,22 @@ _FEEDBACK_KEYWORDS = (
 )
 
 
+# ╔══════════════════════════════════════════════════════════════════════════════╗
+# ║  LAYER 4 — JINGU ADAPTER (translation layer)                                ║
+# ║                                                                              ║
+# ║  Translates raw agent output + signals into Jingu-readable proposals.       ║
+# ║  Bridges runtime layer and governance layer.  MUST NOT contain:             ║
+# ║    • debounce / in-flight / stagnation state                                ║
+# ║    • loop control decisions                                                  ║
+# ║                                                                              ║
+# ║  Owns:                                                                       ║
+# ║    extract_principal_violation_codes, build_execution_feedback,             ║
+# ║    extract_jingu_body (+ helpers: build_test_command, check_onboarding…)   ║
+# ║                                                                              ║
+# ║  Future: phase_record.py and principal_inference.py belong here.           ║
+# ║  They extract cognition declarations from raw text — that is adapter work.  ║
+# ╚══════════════════════════════════════════════════════════════════════════════╝
+
 def extract_principal_violation_codes(decl: dict | None) -> list[str]:
     """
     Lightweight Python-side detection of enforced-principal violations.
@@ -1017,6 +1082,19 @@ def build_execution_feedback(
 
     return "\n".join(parts)
 
+
+# ╔══════════════════════════════════════════════════════════════════════════════╗
+# ║  LAYER 3b — CONTROLLED VERIFY (runtime-adjacent)                            ║
+# ║                                                                              ║
+# ║  Executes patch + runs tests inside the eval container.                     ║
+# ║  Classified as RUNTIME (not governance) because:                            ║
+# ║    • decides WHEN to run (debounce, in-flight — in Layer 3)                ║
+# ║    • result feeds back into RuntimeState.verify_history                    ║
+# ║    • depends on container lifecycle, not on cognition declaration           ║
+# ║                                                                              ║
+# ║  NOTE: run_controlled_verify is a PURE FUNCTION (no state of its own).     ║
+# ║  The scheduling / debounce / in-flight guard live in _monitored_step (L3). ║
+# ╚══════════════════════════════════════════════════════════════════════════════╝
 
 def run_controlled_verify(
     patch_text: str,
@@ -1573,7 +1651,22 @@ class ModelUsageTracker:
 
 _usage_tracker = ModelUsageTracker()
 
-# ── Jingu gates ───────────────────────────────────────────────────────────────
+# ╔══════════════════════════════════════════════════════════════════════════════╗
+# ║  LAYER 5 — JINGU VALIDATION / GOVERNANCE (Jingu's actual core)             ║
+# ║                                                                              ║
+# ║  Stateless admission: given the current proposal, is it valid?              ║
+# ║  MUST NOT depend on:                                                        ║
+# ║    • loop history (last_verify_time, no_progress_steps)                    ║
+# ║    • runtime scheduling (verify_in_flight, debounce)                       ║
+# ║    • which attempt this is                                                  ║
+# ║                                                                              ║
+# ║  Owns:                                                                       ║
+# ║    normalize_patch, jingu_structural_check, score_patch, extract_jingu_body ║
+# ║    (plus gate_runner.js, jingu-trust-gate/ — the actual structural checks) ║
+# ║                                                                              ║
+# ║  Key invariant: "given only this proposal, can you judge it?"               ║
+# ║  YES → belongs here.  NO (needs history) → belongs in runtime layers.      ║
+# ╚══════════════════════════════════════════════════════════════════════════════╝
 
 def normalize_patch(patch_text: str) -> str:
     """Pad truncated hunks so git apply does not fail with 'corrupt patch'.
