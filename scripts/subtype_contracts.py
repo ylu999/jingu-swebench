@@ -1,24 +1,27 @@
 """
-subtype_contracts.py — canonical source for phase/subtype principal contracts (p193)
+subtype_contracts.py — Python adapter for jingu-cognition v2.0 contracts (p193+)
 
-SUBTYPE_CONTRACTS is the single source of truth for:
-  - required_principals per phase (consumed by principal_gate.py)
-  - phase prompt guidance (consumed by phase_prompt.py)
-  - repair_target routing (consumed by run_with_jingu_gate.py)
-  - required_fields per subtype (consumed by evaluate_admission)
-  - allowed_next phase transitions (consumed by evaluate_admission)
+This file is a CONSUMER/ADAPTER of the canonical ontology defined in:
+  jingu-cognition/src/mappings.ts  (TypeScript source of truth)
 
-Adding a new subtype: edit SUBTYPE_CONTRACTS here — prompt / gate / routing auto-update.
+It must NOT invent new principal names, subtype names, or phase names.
+All taxonomy derives from jingu-cognition. Changes to contracts must
+originate there and be reflected here.
 
-v0.4 — admission contract additions:
-  required_fields:  PhaseRecord attributes that must be non-empty (RETRYABLE if missing)
-  allowed_next:     legal next phases for this subtype (REJECTED if violated — phase boundary)
+v0.5 — aligned to jingu-cognition v2.0 COGNITION_CONTRACTS:
+  - required_principals: now includes cross-phase ontology_alignment +
+    phase_boundary_discipline on every subtype
+  - forbidden_principals: per-subtype (observation/analysis forbid action_grounding)
+  - DESIGN phase added: design.solution_shape
+  - analysis: added evidence_linkage to required (was expected)
+  - judge: replaced invariant_preservation with result_verification + uncertainty_honesty
+  - decision: added option_comparison + constraint_satisfaction to required
 
 Admission taxonomy:
   RETRYABLE — missing_required_principal, missing_required_field
               (right phase, incomplete material — redirect to repair)
-  REJECTED  — forbidden_transition, subtype_phase_mismatch
-              (wrong phase position or forbidden boundary crossing — stop, do not redirect)
+  REJECTED  — forbidden_transition, forbidden_principal_declared
+              (wrong phase position or boundary violation — stop, do not redirect)
 """
 
 from __future__ import annotations
@@ -27,51 +30,103 @@ from typing import TypedDict
 
 
 class SubtypeContract(TypedDict, total=False):
-    """Contract definition for a phase subtype."""
+    """Contract definition for a phase subtype. Mirrors CognitionContract in jingu-cognition."""
     phase: str                       # Phase name (ANALYZE, EXECUTE, JUDGE, ...)
     required_principals: list[str]   # Principals the agent MUST declare (hard — gate enforces)
     expected_principals: list[str]   # Principals the agent SHOULD declare (soft — quality signal)
-    forbidden_principals: list[str]  # Principals the agent must NOT declare
+    forbidden_principals: list[str]  # Principals the agent must NOT declare (hard — fake principal)
     repair_target: str               # Phase to redirect to on RETRYABLE violation
     required_fields: list[str]       # PhaseRecord attributes that must be non-empty (RETRYABLE)
     allowed_next: list[str]          # Legal next phases; violation → REJECTED (boundary error)
 
 
-# Canonical subtype contracts — edit here to update prompt / gate / routing
+# Subtype contracts — Python adapter aligned to jingu-cognition v2.0 COGNITION_CONTRACTS.
 #
-# required_principals: gate-enforced — missing → RETRYABLE, triggers repair_target routing
+# DO NOT add new principal names here. All names must exist in jingu-cognition/src/principals.ts.
+# required_principals: gate-enforced (hard) — missing → RETRYABLE → repair_target routing
+# forbidden_principals: gate-enforced (hard) — declared → REJECTED (fake principal / phase violation)
+# expected_principals: quality signal (soft) — missing → inference diff warning only
 # required_fields:     PhaseRecord attribute non-empty check — missing → RETRYABLE
 # allowed_next:        legal next phases — violation → REJECTED (wrong phase position)
-# expected_principals: quality signal (soft) — missing → inference diff warning only
 SUBTYPE_CONTRACTS: dict[str, SubtypeContract] = {
+    "observation.fact_gathering": {
+        "phase": "OBSERVE",
+        "required_principals": [
+            "ontology_alignment",
+            "phase_boundary_discipline",
+            "evidence_completeness",
+        ],
+        "expected_principals": [],
+        "forbidden_principals": ["action_grounding", "minimal_change"],
+        "required_fields": ["evidence_refs"],
+        "allowed_next": ["ANALYZE", "OBSERVE"],
+        "repair_target": "OBSERVE",
+    },
     "analysis.root_cause": {
         "phase": "ANALYZE",
-        "required_principals": ["causal_grounding"],
-        "expected_principals": ["evidence_linkage", "alternative_hypothesis_check"],
+        "required_principals": [
+            "ontology_alignment",
+            "phase_boundary_discipline",
+            "causal_grounding",
+            "evidence_linkage",
+        ],
+        "expected_principals": ["alternative_hypothesis_check", "uncertainty_honesty"],
+        "forbidden_principals": ["action_grounding", "minimal_change"],
         "required_fields": ["evidence_refs"],
-        "allowed_next": ["DECIDE", "ANALYZE"],
+        "allowed_next": ["DECIDE", "ANALYZE", "OBSERVE"],
         "repair_target": "OBSERVE",
     },
     "decision.fix_direction": {
         "phase": "DECIDE",
-        "required_principals": [],
-        "expected_principals": ["alternative_hypothesis_check"],
+        "required_principals": [
+            "ontology_alignment",
+            "phase_boundary_discipline",
+            "option_comparison",
+            "constraint_satisfaction",
+        ],
+        "expected_principals": ["uncertainty_honesty"],
+        "forbidden_principals": [],
         "required_fields": [],
-        "allowed_next": ["EXECUTE", "ANALYZE"],
+        "allowed_next": ["DESIGN", "DECIDE", "ANALYZE"],
         "repair_target": "ANALYZE",
+    },
+    "design.solution_shape": {
+        "phase": "DESIGN",
+        "required_principals": [
+            "ontology_alignment",
+            "phase_boundary_discipline",
+            "invariant_preservation",
+            "scope_minimality",
+        ],
+        "expected_principals": [],
+        "forbidden_principals": ["minimal_change"],
+        "required_fields": [],
+        "allowed_next": ["EXECUTE", "DESIGN", "DECIDE"],
+        "repair_target": "DECIDE",
     },
     "execution.code_patch": {
         "phase": "EXECUTE",
-        "required_principals": ["minimal_change"],
-        "expected_principals": ["action_grounding"],
+        "required_principals": [
+            "ontology_alignment",
+            "phase_boundary_discipline",
+            "action_grounding",
+            "minimal_change",
+        ],
+        "expected_principals": ["invariant_preservation"],
+        "forbidden_principals": [],
         "required_fields": [],
         "allowed_next": ["JUDGE", "EXECUTE", "ANALYZE"],
         "repair_target": "ANALYZE",
     },
     "judge.verification": {
         "phase": "JUDGE",
-        "required_principals": ["invariant_preservation"],
-        "expected_principals": [],
+        "required_principals": [
+            "ontology_alignment",
+            "result_verification",
+            "uncertainty_honesty",
+        ],
+        "expected_principals": ["residual_risk_detection"],
+        "forbidden_principals": [],
         "required_fields": [],
         "allowed_next": ["EXECUTE", "ANALYZE"],
         "repair_target": "EXECUTE",
@@ -99,6 +154,21 @@ def get_required_principals(phase: str) -> list[str]:
     subtype = _PHASE_TO_SUBTYPE.get(phase.upper(), "")
     contract = SUBTYPE_CONTRACTS.get(subtype, {})
     return list(contract.get("required_principals", []))
+
+
+def get_forbidden_principals(phase: str) -> list[str]:
+    """
+    Return forbidden principals for the given phase.
+
+    Gate-enforced: declaring a forbidden principal → REJECTED (fake principal / phase violation).
+    Returns [] if phase has no contract.
+
+    Args:
+        phase: Phase name string (e.g. "ANALYZE", "OBSERVE"). Case-insensitive.
+    """
+    subtype = _PHASE_TO_SUBTYPE.get(phase.upper(), "")
+    contract = SUBTYPE_CONTRACTS.get(subtype, {})
+    return list(contract.get("forbidden_principals", []))
 
 
 def get_expected_principals(phase: str) -> list[str]:
