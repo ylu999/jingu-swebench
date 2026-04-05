@@ -487,6 +487,18 @@ def _install_step_monitor(
         if isinstance(_step_verdict, VerdictStop):
             # Early stop: set flag — run_with_jingu will break the attempt loop
             state.early_stop_verdict = _step_verdict
+            # P3 fix: actually terminate the agent step loop now, not just set a flag.
+            # default.py:105 raises LimitsExceeded when n_calls >= step_limit.
+            # Setting n_calls = step_limit causes termination on the NEXT step start,
+            # so the current step still completes normally (patch is still extractable).
+            _sl = getattr(getattr(self, "config", None), "step_limit", 0)
+            if _sl > 0:
+                self.n_calls = _sl
+                print(
+                    f"    [cp] VerdictStop enforcement: n_calls set to step_limit={_sl}"
+                    f" — agent will stop after this step",
+                    flush=True,
+                )
         elif isinstance(_step_verdict, VerdictRedirect):
             # Mid-attempt redirect: inject correction hint into next step's context
             state.pending_redirect_hint = (
