@@ -404,8 +404,17 @@ def _install_step_monitor(
                     in_flight = state.verify_in_flight
                 if too_soon or in_flight:
                     break  # debounced
-                # Extract current patch from agent messages for change detection
-                current_patch = _extract_current_patch_from_messages(self.messages)
+                # P1 fix: get current patch via git diff from container,
+                # not from agent messages (which don't contain diff content).
+                # Agent writes files directly via editor/bash — git diff is the
+                # only reliable way to capture what changed.
+                import subprocess as _sp_iv
+                _git_diff_result = _sp_iv.run(
+                    ["docker", "exec", "-w", "/testbed", cid,
+                     "git", "diff"],
+                    capture_output=True, text=True, timeout=10,
+                )
+                current_patch = _git_diff_result.stdout.strip() if _git_diff_result.returncode == 0 else ""
                 with state._lock:
                     patch_changed = current_patch != state.last_verified_patch
                     if not patch_changed:
@@ -494,9 +503,21 @@ def _install_step_monitor(
                 ),
             })
         elif isinstance(_step_verdict, VerdictAdvance):
-            # Phase transition telemetry — log only, no behavioral change at step level
+            # P2 fix: actually advance the phase in cp_state so decide_next sees
+            # the new phase on subsequent steps. Without this, phase stays OBSERVE
+            # forever and no downstream features (phase_record, principal_gate, etc.)
+            # are ever reached.
+            _old_phase = _cp_s.phase
+            if _step_verdict.to is not None:
+                import dataclasses as _dc_adv
+                if cp_state_holder is not None:
+                    cp_state_holder[0] = _dc_adv.replace(cp_state_holder[0], phase=_step_verdict.to)
+                    _cp_s = cp_state_holder[0]
+                else:
+                    state.cp_state = _dc_adv.replace(state.cp_state, phase=_step_verdict.to)
+                    _cp_s = state.cp_state
             print(
-                f"    [cp] phase_advance from={_cp_s.phase} to={_step_verdict.to}",
+                f"    [cp] phase_advance from={_old_phase} to={_step_verdict.to}",
                 flush=True,
             )
             # p190: collect PhaseRecord for the phase that just completed.
