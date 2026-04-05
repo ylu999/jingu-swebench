@@ -502,6 +502,7 @@ def _install_step_monitor(
             # p190: collect PhaseRecord for the phase that just completed.
             # _latest_assistant_text is already captured above (line ~294).
             # Wrapped in try/except: collection failure must not crash main flow.
+            _pr = None
             try:
                 from declaration_extractor import extract_phase_record as _extract_pr
                 _pr = _extract_pr(_latest_assistant_text, str(_cp_s.phase))
@@ -515,6 +516,8 @@ def _install_step_monitor(
                 print(f"    [phase_record] error (non-fatal): {_pr_exc}", flush=True)
             # p188: principal gate — check required principals for completed phase
             try:
+                if _pr is None:
+                    raise RuntimeError("phase_record unavailable, skipping principal gate")
                 from principal_gate import (
                     check_principal_gate as _check_pg,
                     get_principal_feedback as _get_pg_feedback,
@@ -553,6 +556,8 @@ def _install_step_monitor(
             _inferred: list = []
             _inf_diff: dict = {}
             try:
+                if _pr is None:
+                    raise RuntimeError("phase_record unavailable, skipping inference check")
                 from principal_gate import check_principal_inference as _check_pi
                 _inf_violation = _check_pi(_pr, str(_cp_s.phase))
                 if _inf_violation and "fake_principal" in _inf_violation:
@@ -575,6 +580,8 @@ def _install_step_monitor(
                 print(f"    [principal_inference] check error={_pi_exc}", flush=True)
             # Telemetry: write inference results into jingu_body (best-effort, p195)
             try:
+                if _pr is None:
+                    raise RuntimeError("phase_record unavailable, skipping telemetry")
                 from principal_inference import run_inference, diff_principals
                 from subtype_contracts import _PHASE_TO_SUBTYPE as _pi_phase_map
                 _pi_subtype = _pi_phase_map.get(str(_cp_s.phase).upper(), "")
