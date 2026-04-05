@@ -423,6 +423,11 @@ def _install_step_monitor(
                     capture_output=True, text=True, timeout=10,
                 )
                 current_patch = _git_diff_result.stdout.strip() if _git_diff_result.returncode == 0 else ""
+                # P7 fix: _msg_has_signal detects str_replace_editor for both
+                # view and write operations. Guard here: if git diff base_commit
+                # is empty, no real file change happened — skip inner-verify.
+                if not current_patch:
+                    break
                 with state._lock:
                     state.last_verified_patch = current_patch
                     state.last_verify_time = now
