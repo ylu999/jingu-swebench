@@ -28,6 +28,7 @@ def test_phase_record_dataclass_fields():
         principals=["causality", "evidence_based"],
         claims=[],
         evidence_refs=["django/db/models.py:45"],
+        from_steps=[],
         content="Agent analyzed the root cause",
     )
     assert rec.phase == "ANALYZE"
@@ -35,6 +36,7 @@ def test_phase_record_dataclass_fields():
     assert rec.principals == ["causality", "evidence_based"]
     assert rec.claims == []
     assert rec.evidence_refs == ["django/db/models.py:45"]
+    assert rec.from_steps == []
     assert "analyzed" in rec.content
 
 
@@ -47,6 +49,7 @@ def test_phase_record_as_dict_serializable():
         principals=["scope_control"],
         claims=[],
         evidence_refs=[],
+        from_steps=[],
         content="x" * 600,  # longer than 100 chars to test truncation
     )
     d = rec.as_dict()
