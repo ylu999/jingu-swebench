@@ -55,6 +55,10 @@ COPY scripts/run_with_jingu_gate.py \
      scripts/cognition_schema.py \
      scripts/gate_runner.js \
      scripts/patch_admission_policy.js \
+     scripts/subtype_contracts.py \
+     scripts/phase_prompt.py \
+     scripts/principal_gate.py \
+     scripts/principal_inference.py \
      /app/scripts/
 # B1-CP: reasoning control plane Python module
 COPY scripts/control/ /app/scripts/control/
