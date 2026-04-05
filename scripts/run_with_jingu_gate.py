@@ -2404,6 +2404,12 @@ def run_with_jingu(instance_id: str, output_dir: Path, max_attempts: int = 3,
     for attempt in range(1, max_attempts + 1):
         print(f"  [attempt {attempt}/{max_attempts}] {instance_id}")
 
+        # Clear principal_violation at attempt boundary — prevents attempt=N violation
+        # from bleeding into attempt=N+1 first step (set_principal_violation is phase-boundary
+        # only; update_reasoning_state clears it each step, but not at attempt start).
+        import dataclasses as _dc_boundary
+        cp_state_holder[0] = _dc_boundary.replace(cp_state_holder[0], principal_violation="")
+
         # NBR enforcement: No Blind Retry — attempt N+1 must have concrete failure signal
         # Bypass in baseline mode: naive retry intentionally has no hint.
         if attempt > 1 and not last_failure.strip() and mode != "baseline":

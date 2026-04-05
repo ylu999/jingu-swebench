@@ -60,14 +60,6 @@ SUBTYPE_CONTRACTS: dict[str, SubtypeContract] = {
         "allowed_next": ["EXECUTE", "ANALYZE"],
         "repair_target": "ANALYZE",
     },
-    "design.patch_strategy": {
-        "phase": "EXECUTE",
-        "required_principals": ["minimal_change"],
-        "expected_principals": ["invariant_preservation"],
-        "required_fields": [],
-        "allowed_next": ["EXECUTE", "JUDGE", "ANALYZE"],
-        "repair_target": "ANALYZE",
-    },
     "execution.code_patch": {
         "phase": "EXECUTE",
         "required_principals": ["minimal_change"],

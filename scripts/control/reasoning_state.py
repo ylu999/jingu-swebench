@@ -179,7 +179,7 @@ class VerdictRedirect:
 @dataclass(frozen=True)
 class VerdictStop:
     type: str = "STOP"
-    reason: Literal["task_success", "no_signal"] = "no_signal"
+    reason: Literal["task_success", "no_signal", "empty_patch"] = "no_signal"
 
 @dataclass(frozen=True)
 class VerdictContinue:
