@@ -68,7 +68,6 @@ def tail(task_id: str, filter_pat: str | None, show_all: bool, interval: int) ->
     next_token: str | None = None
     stream_wait_start = time.monotonic()
     stream_available = False
-    last_event_ts = 0
 
     while True:
         # ── Fetch log events ──────────────────────────────────────────────
@@ -76,11 +75,14 @@ def tail(task_id: str, filter_pat: str | None, show_all: bool, interval: int) ->
             kwargs: dict = dict(
                 logGroupName=LOG_GROUP,
                 logStreamName=log_stream,
-                startFromHead=True,
                 limit=500,
             )
             if next_token:
+                # Use nextToken: CloudWatch returns only events after this position
                 kwargs["nextToken"] = next_token
+            else:
+                # First call: start from beginning
+                kwargs["startFromHead"] = True
 
             resp = logs.get_log_events(**kwargs)
             stream_available = True
@@ -102,13 +104,11 @@ def tail(task_id: str, filter_pat: str | None, show_all: bool, interval: int) ->
             continue
 
         # ── Print new events ──────────────────────────────────────────────
+        # No timestamp dedup needed: nextToken guarantees only new events are returned
         events = resp.get("events", [])
-        new_events = [e for e in events if e["timestamp"] > last_event_ts]
 
-        for ev in new_events:
+        for ev in events:
             msg = ev["message"]
-            last_event_ts = ev["timestamp"]
-
             # Apply filters
             if not show_all:
                 if NOISE_PATTERNS.match(msg):
