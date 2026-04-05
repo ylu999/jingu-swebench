@@ -533,6 +533,8 @@ def _step_cp_update_and_verdict(
                 f"Transition to phase {_step_verdict.to} before patching."
             ),
         })
+        # Clear pending_redirect_hint — already injected above.
+        state.pending_redirect_hint = ""
 
     elif isinstance(_step_verdict, VerdictAdvance):
         _old_phase = _cp_s.phase
@@ -642,6 +644,9 @@ def _step_cp_update_and_verdict(
                                 f"Return to phase {_pv_verdict.to} before proceeding."
                             ),
                         })
+                        # Clear pending_redirect_hint — already injected above,
+                        # so _step_inject_phase won't inject it a second time.
+                        state.pending_redirect_hint = ""
         except Exception as _pg_exc:
             print(f"    [principal_gate] error={_pg_exc}", flush=True)
 
@@ -686,8 +691,21 @@ def _step_cp_update_and_verdict(
 def _step_inject_phase(agent_self, *, cp_state_holder: "list | None", state: "StepMonitorState") -> None:
     """
     Section p189: inject current phase as a user message prefix.
+    Also consumes state.pending_redirect_hint — any hint set during this step
+    is injected now so the agent sees it at the start of the next step.
     Exception-safe — injection failure must not crash main flow.
     """
+    # Consume pending_redirect_hint set during this step (principal_gate, inference,
+    # cognition_fail, patch_format etc.). Inject before phase prefix so hint appears first.
+    try:
+        _hint = state.pending_redirect_hint
+        if _hint:
+            agent_self.messages.append({"role": "user", "content": _hint})
+            print(f"    [phase_injection] redirect_hint injected=true", flush=True)
+            state.pending_redirect_hint = ""
+    except Exception:
+        pass
+
     try:
         from phase_prompt import build_phase_prefix as _build_phase_prefix
         _cp_s = cp_state_holder[0] if cp_state_holder is not None else state.cp_state
