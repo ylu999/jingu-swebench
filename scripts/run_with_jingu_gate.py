@@ -411,9 +411,13 @@ def _install_step_monitor(
                 # same after the first write → verify never re-triggered.
                 # We still fetch git diff to pass as patch_text to run_controlled_verify.
                 import subprocess as _sp_iv
+                # P4 fix: use "git diff HEAD" to capture both staged and unstaged changes.
+                # "git diff" alone only shows unstaged changes — if the agent already ran
+                # "git add", the staged diff is invisible and patch_text is empty →
+                # run_controlled_verify immediately returns controlled_error(elapsed=0ms).
                 _git_diff_result = _sp_iv.run(
                     ["docker", "exec", "-w", "/testbed", cid,
-                     "git", "diff"],
+                     "git", "diff", "HEAD"],
                     capture_output=True, text=True, timeout=10,
                 )
                 current_patch = _git_diff_result.stdout.strip() if _git_diff_result.returncode == 0 else ""
