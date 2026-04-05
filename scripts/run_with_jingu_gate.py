@@ -2026,35 +2026,48 @@ def run_agent(
 
     # B4: phase-structured reasoning protocol — injects 4-phase structure into
     # agent reasoning loop (Phase 1 activation: prompt-only injection).
-    # Vocabulary: CDP v1 taxonomy (p170) — 9 types + 12 principal atoms.
+    # Type contracts table is generated dynamically from SUBTYPE_CONTRACTS (single source of truth).
     # Key change vs prior version: FIX_TYPE is derived from ANALYSIS findings,
     # not pre-suggested. Removed "almost always execution" bias.
+    try:
+        from subtype_contracts import SUBTYPE_CONTRACTS as _SC, get_required_principals as _grp, get_forbidden_principals as _gfp
+        _type_contracts_lines = []
+        for _subtype, _contract in _SC.items():
+            _short = _subtype.split(".")[-1]  # e.g. "root_cause" from "analysis.root_cause"
+            _req = ", ".join(_grp(_contract["phase"]))
+            _forb = ", ".join(_gfp(_contract["phase"]))
+            _forb_str = f"  forbidden=[{_forb}]" if _forb else ""
+            _type_contracts_lines.append(f"  {_short:<20} required=[{_req}]{_forb_str}")
+        _type_contracts_block = "Type contracts:\n" + "\n".join(_type_contracts_lines)
+        # Per-step PRINCIPALS from contracts
+        _analysis_req = ", ".join(_grp("ANALYZE"))
+        _decision_req = ", ".join(_grp("DECIDE"))
+        _execute_req  = ", ".join(_grp("EXECUTE"))
+    except Exception:
+        _type_contracts_block = "Type contracts: (see principal_gate for v2.0 contracts)"
+        _analysis_req = "ontology_alignment, phase_boundary_discipline, causal_grounding, evidence_linkage"
+        _decision_req = "ontology_alignment, phase_boundary_discipline, option_comparison, constraint_satisfaction"
+        _execute_req  = "ontology_alignment, phase_boundary_discipline, action_grounding, minimal_change"
     extra_parts.append(
         "REASONING PROTOCOL (output these markers as you work — they are parsed by the governance system):\n\n"
         "## STEP 1 — before writing any code, output all three:\n"
         "  PHASE: analysis\n"
-        "  PRINCIPALS: causal_grounding\n"
+        f"  PRINCIPALS: {_analysis_req}\n"
         "  EVIDENCE: <file:line or test name that shows the bug>\n"
         "  ROOT_CAUSE: <the specific line or logic that causes the failure>\n\n"
         "## STEP 2 — once root cause is clear, output:\n"
         "  PHASE: decision\n"
-        "  PRINCIPALS: constraint_satisfaction\n"
+        f"  PRINCIPALS: {_decision_req}\n"
         "  CLAIMS: <chosen fix type — execution | diagnosis | design | planning>\n"
         "  SCOPE: <which files/functions will be changed>\n\n"
         "## STEP 3 — after writing the patch, output:\n"
         "  PHASE: execution\n"
-        "  PRINCIPALS: action_grounding minimal_change\n"
+        f"  PRINCIPALS: {_execute_req}\n"
         "  EVIDENCE: <which analysis step or file:line justified this change>\n\n"
         "## STEP 4 — before calling submit, output these two lines exactly:\n"
         "  FIX_TYPE: <one of: understanding | observation | analysis | diagnosis | decision | design | planning | execution | validation>\n"
         "  PRINCIPALS: <space-separated list — must satisfy the contract for your chosen type>\n\n"
-        "Type contracts:\n"
-        "  observation: required=[ontology_alignment, phase_boundary_discipline, evidence_completeness]  forbidden=[action_grounding, minimal_change]\n"
-        "  analysis:    required=[ontology_alignment, phase_boundary_discipline, causal_grounding, evidence_linkage]  forbidden=[action_grounding, minimal_change]\n"
-        "  decision:    required=[ontology_alignment, phase_boundary_discipline, option_comparison, constraint_satisfaction]  forbidden=[]\n"
-        "  design:      required=[ontology_alignment, phase_boundary_discipline, invariant_preservation, scope_minimality]  forbidden=[minimal_change]\n"
-        "  execution:   required=[ontology_alignment, phase_boundary_discipline, action_grounding, minimal_change]  forbidden=[]\n"
-        "  judge:       required=[ontology_alignment, result_verification, uncertainty_honesty]  forbidden=[]\n\n"
+        f"{_type_contracts_block}\n\n"
         "Rules:\n"
         "  - Output PHASE: markers exactly as shown — the governance system parses them\n"
         "  - FIX_TYPE must match CLAIMS from STEP 2\n"
