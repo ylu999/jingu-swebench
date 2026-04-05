@@ -108,6 +108,8 @@ def print_activation_proof(identity: dict) -> None:
     from control.reasoning_state import NO_PROGRESS_THRESHOLD as _NPT
     print(f"[init] verdict_routing_enabled=True")
     print(f"[init] no_progress_threshold={_NPT}")
+    # p189: stage-aware prompt injection — activation proof (RT4)
+    print(f"[init] phase_injection_enabled=True")
 
 # ── Traj watcher: real-time per-step log ───────────────────────────────────────
 
@@ -452,6 +454,24 @@ def _install_step_monitor(
                 flush=True,
             )
         # VerdictContinue: no action needed
+
+        # ── p189: phase-aware prompt injection ───────────────────────────────
+        # Inject current phase as a user message prefix so agent knows which
+        # phase it is in and adjusts behavior accordingly (Option B: user msg).
+        # Injected every step so phase context is always fresh.
+        # Phase is a plain string in ReasoningState — no .value needed.
+        try:
+            from phase_prompt import build_phase_prefix as _build_phase_prefix
+            _phase_str = str(_cp_s.phase)
+            _phase_prefix = _build_phase_prefix(_phase_str)
+            if _phase_prefix:
+                self.messages.append({
+                    "role": "user",
+                    "content": _phase_prefix.rstrip("\n"),
+                })
+                print(f"    [phase_injection] phase={_phase_str} injected=true", flush=True)
+        except Exception as _phase_exc:
+            print(f"    [phase_injection] error (non-fatal): {_phase_exc}", flush=True)
 
         return result
 
@@ -1707,6 +1727,37 @@ def run_agent(
         if not submitted:
             return result
         print(f"    [controlled-verify] final verify on container {cid[:12]}...", flush=True)
+
+        # p187: cognition gate — check declaration quality before controlled_verify
+        # Fires when cp_state.phase == "JUDGE" (EXECUTE->JUDGE advance by verdict routing).
+        # Pass  → continue to controlled_verify as normal.
+        # Fail  → inject feedback as pending_redirect_hint, skip controlled_verify.
+        _skip_controlled_verify = False
+        if cp_state_holder is not None and cp_state_holder[0].phase == "JUDGE":
+            _cg_decl = {}
+            try:
+                _cg_msgs = getattr(self_agent, "messages", [])
+                _cg_last = extract_last_agent_message(_cg_msgs)
+                _cg_decl = extract_declaration(_cg_last) if _cg_last else {}
+            except Exception:
+                pass
+            _cg_signals = extract_patch_signals(submitted) if submitted else []
+            from cognition_check import check_cognition_at_judge as _cg_judge
+            _cg_pass, _cg_feedback = _cg_judge(_cg_decl, _cg_signals)
+            _cg_result = "pass" if _cg_pass else "fail"
+            print(f"    [cognition_gate] phase=JUDGE result={_cg_result}", flush=True)
+            if not _cg_pass:
+                # Inject feedback as redirect hint — agent receives it on next attempt
+                _monitor.pending_redirect_hint = f"[COGNITION_FAIL] {_cg_feedback}"
+                print(
+                    f"    [cognition_gate] skipping controlled_verify — feedback injected",
+                    flush=True,
+                )
+                _skip_controlled_verify = True
+
+        if _skip_controlled_verify:
+            return result
+
         t_cv0 = time.monotonic()
         cv_result = run_controlled_verify(submitted, instance, cid, timeout_s=60)
         cv_result["elapsed_ms"] = round((time.monotonic() - t_cv0) * 1000, 1)
