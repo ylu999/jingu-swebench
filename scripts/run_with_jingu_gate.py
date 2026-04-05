@@ -116,6 +116,8 @@ def print_activation_proof(identity: dict) -> None:
     print(f"[init] verify_gate_enabled=True")
     # p188: principal enforcement with phase routing — activation proof (RT4)
     print(f"[init] principal_gate_enabled=True")
+    # p194: system-inferred principal diff — activation proof (RT4)
+    print(f"[init] principal_inference_enabled=True")
 
 # ── Verify prerequisite gate (p192) ────────────────────────────────────────────
 
@@ -545,6 +547,43 @@ def _install_step_monitor(
                     )
             except Exception as _pg_exc:
                 print(f"    [principal_gate] error={_pg_exc}", flush=True)
+            # p194: inference check — three-way diff (fake / missing_required / missing_expected)
+            # Exception-safe: any failure here must not crash main flow.
+            _inf_violation: str | None = None
+            _inferred: list = []
+            _inf_diff: dict = {}
+            try:
+                from principal_gate import check_principal_inference as _check_pi
+                _inf_violation = _check_pi(_pr, str(_cp_s.phase))
+                if _inf_violation and "fake_principal" in _inf_violation:
+                    try:
+                        from subtype_contracts import get_repair_target as _get_repair_target
+                        _inf_repair = _get_repair_target(str(_cp_s.phase))
+                    except Exception:
+                        _inf_repair = ""
+                    state.pending_redirect_hint = (
+                        f"[PRINCIPAL_MISMATCH:{_inf_violation}] "
+                        f"Your declared principals are not supported by your reasoning. "
+                        f"Strengthen your reasoning before declaring these principals. "
+                        f"Redirect to {_inf_repair or 'previous phase'} phase."
+                    )
+                elif _inf_violation and "missing_required" in _inf_violation:
+                    # Hard reject for missing_required — already handled by principal_gate,
+                    # but log the inference perspective for telemetry clarity
+                    pass
+            except Exception as _pi_exc:
+                print(f"    [principal_inference] check error={_pi_exc}", flush=True)
+            # Telemetry: write inference results into jingu_body (best-effort)
+            try:
+                from principal_inference import infer_principals, diff_principals
+                _inferred = infer_principals(_pr)
+                _inf_diff = diff_principals(
+                    getattr(_pr, "principals", []) or [],
+                    _inferred,
+                    phase=str(_cp_s.phase),
+                )
+            except Exception:
+                pass
         # VerdictContinue: no action needed
 
         # ── p189: phase-aware prompt injection ───────────────────────────────
@@ -1986,6 +2025,28 @@ def run_agent(
             jingu_body["verify_history"] = _monitor.verify_history
             # p190: per-phase records — one entry per VerdictAdvance during this attempt
             jingu_body["phase_records"] = [r.as_dict() for r in _monitor.phase_records]
+            # p194: principal inference telemetry — declared vs inferred diff summary
+            try:
+                from principal_inference import infer_principals, diff_principals
+                _pi_telemetry = []
+                for _telem_pr in _monitor.phase_records:
+                    _telem_inferred = infer_principals(_telem_pr)
+                    _telem_diff = diff_principals(
+                        getattr(_telem_pr, "principals", []) or [],
+                        _telem_inferred,
+                        phase=str(getattr(_telem_pr, "phase", "")),
+                    )
+                    _pi_telemetry.append({
+                        "phase": str(getattr(_telem_pr, "phase", "")),
+                        "declared": list(getattr(_telem_pr, "principals", []) or []),
+                        "inferred": _telem_inferred,
+                        "missing_required": _telem_diff.get("missing_required", []),
+                        "missing_expected": _telem_diff.get("missing_expected", []),
+                        "fake": _telem_diff.get("fake", []),
+                    })
+                jingu_body["principal_inference"] = _pi_telemetry
+            except Exception:
+                pass
             # p192: verify_skipped — distinct from controlled_verify fail
             # Only set when prereq gate blocked controlled_verify from running.
             if getattr(_monitor, "_verify_skipped", False):

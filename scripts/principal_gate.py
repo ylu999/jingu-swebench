@@ -94,6 +94,63 @@ def check_principal_gate(phase_record, phase: str) -> str | None:
     return None
 
 
+def check_principal_inference(phase_record, phase: str) -> str | None:
+    """
+    p194: System-inferred principal check (three-way diff).
+
+    Infers principals from PhaseRecord behavior and diffs against declared principals.
+    Returns a violation string or None.
+
+    Violation types:
+      fake_principal:<name,...>     — declared but not inferred (hard reject)
+      missing_required:<name,...>   — required by contract but not declared (hard reject)
+      None                          — clean or only missing_expected (soft warn only)
+
+    Exception-safe: any import or inference failure returns None (no crash).
+
+    Args:
+        phase_record: PhaseRecord or any object with behavioral attributes
+        phase: Phase name string (e.g. 'ANALYZE', 'EXECUTE', 'JUDGE')
+    """
+    try:
+        from principal_inference import infer_principals, diff_principals
+        _inferred = infer_principals(phase_record)
+        _diff = diff_principals(
+            getattr(phase_record, "principals", []) or [],
+            _inferred,
+            phase=phase,
+        )
+        if _diff["fake"]:
+            print(
+                f"    [principal_inference] fake={_diff['fake']} inferred={_inferred}",
+                flush=True,
+            )
+            return f"fake_principal:{','.join(_diff['fake'])}"
+        elif _diff["missing_required"]:
+            print(
+                f"    [principal_inference] missing_required={_diff['missing_required']}"
+                f" inferred={_inferred}",
+                flush=True,
+            )
+            return f"missing_required:{','.join(_diff['missing_required'])}"
+        else:
+            if _diff["missing_expected"]:
+                print(
+                    f"    [principal_inference] missing_expected={_diff['missing_expected']}"
+                    f" inferred={_inferred}",
+                    flush=True,
+                )
+            else:
+                print(
+                    f"    [principal_inference] match inferred={_inferred}",
+                    flush=True,
+                )
+            return None
+    except Exception as _inf_e:
+        print(f"    [principal_inference] error={_inf_e}", flush=True)
+        return None
+
+
 def get_principal_feedback(violation: str) -> str:
     """Return human-readable feedback for a principal violation."""
     return _FEEDBACK.get(
