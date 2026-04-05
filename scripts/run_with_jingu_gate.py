@@ -566,6 +566,7 @@ def _step_cp_update_and_verdict(
                 check_principal_gate as _check_pg,
                 get_principal_feedback as _get_pg_feedback,
             )
+            from control.reasoning_state import set_principal_violation as _set_pv
             _pg_violation = _check_pg(_pr, str(_cp_s.phase))
             if _pg_violation:
                 _pg_feedback = _get_pg_feedback(_pg_violation)
@@ -583,6 +584,31 @@ def _step_cp_update_and_verdict(
                     f" repair_target={_repair_phase or 'none'}",
                     flush=True,
                 )
+                # ── cognition-aware control: principal violation → cp_state → decide_next ──
+                # Write violation into cp_state. decide_next priority 2.5 fires
+                # VerdictRedirect(repair_target), routing the agent back before it
+                # can continue execution in a phase whose principals were not satisfied.
+                if cp_state_holder is not None:
+                    cp_state_holder[0] = _set_pv(cp_state_holder[0], _pg_violation)
+                    _cp_s = cp_state_holder[0]
+                else:
+                    state.cp_state = _set_pv(state.cp_state, _pg_violation)
+                    _cp_s = state.cp_state
+                _pv_verdict = decide_next(_cp_s)
+                print(
+                    f"    [principal_gate] cognition_verdict={_pv_verdict.type}"
+                    f" to={getattr(_pv_verdict, 'to', '')}",
+                    flush=True,
+                )
+                if isinstance(_pv_verdict, VerdictRedirect):
+                    agent_self.messages.append({
+                        "role": "user",
+                        "content": (
+                            f"[Cognition gate: {_pg_violation}] "
+                            f"{_pg_feedback} "
+                            f"Return to phase {_pv_verdict.to} before proceeding."
+                        ),
+                    })
             else:
                 print(f"    [principal_gate] phase={_pr.phase} violation=none", flush=True)
         except Exception as _pg_exc:

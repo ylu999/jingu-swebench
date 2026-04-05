@@ -18,6 +18,14 @@ Design constraints (from architectural review):
   - REDIRECT is an unconditional override (not gated on existing control_action)
   - actionability = pre-execution readiness (patch non-empty), NOT post-verify success
   - verify-level signals (task_success) must be applied in a SEPARATE update call
+
+v0.4 — cognition-aware control (principal_violation):
+  - principal_violation: str field on ReasoningState — set by phase boundary check
+  - decide_next priority 2.5: principal_violation → REDIRECT(repair_target) before stagnation
+  - Violation is cleared (reset to "") at every step via patch_principal_violation()
+  - Separation: step-level signals (update_reasoning_state) never set principal_violation;
+    only phase-boundary principal check sets it (set_principal_violation()).
+    This preserves I3/I5 and the pure-function contract of update_reasoning_state.
 """
 from __future__ import annotations
 
@@ -70,6 +78,10 @@ class ReasoningState:
     """
     Accumulated reasoning state across steps in one attempt.
     phase is runtime-owned — NEVER modified by update_reasoning_state (I5).
+
+    principal_violation: set at phase boundaries by set_principal_violation().
+    NOT set by update_reasoning_state (step-level pure function contract preserved).
+    Cleared to "" at every step start via patch_principal_violation("").
     """
     phase:                Phase
     step_index:           int   = 0
@@ -82,6 +94,8 @@ class ReasoningState:
     env_noise:            bool  = False
     pattern_matched:      bool  = False
     task_success:         bool  = False
+    # Cognition correctness gate — set at phase boundary, cleared each step
+    principal_violation:  str   = ""   # e.g. "missing_causal_grounding"; "" = clean
 
 def initial_reasoning_state(phase: Phase) -> ReasoningState:
     """Create a fresh state at attempt start. Mirror of initialReasoningState()."""
@@ -130,7 +144,24 @@ def update_reasoning_state(
         env_noise            = signals.env_noise,
         pattern_matched      = signals.pattern_matched,
         task_success         = signals.task_success,
+        # principal_violation cleared each step (phase-boundary field, not a signal)
+        principal_violation  = "",
     )
+
+
+def set_principal_violation(state: ReasoningState, violation: str) -> ReasoningState:
+    """
+    Set principal_violation on an existing ReasoningState (phase-boundary operation).
+
+    Called AFTER update_reasoning_state, at VerdictAdvance time, when principal_gate
+    detects a violation. Returns a new frozen state with only principal_violation changed.
+
+    Design: separate from update_reasoning_state to preserve the pure-function contract
+    (update_reasoning_state never sets principal_violation; principal_gate never touches
+    step-level signals). The caller decides when to call decide_next again.
+    """
+    import dataclasses as _dc
+    return _dc.replace(state, principal_violation=violation)
 
 # ── ControlVerdict ────────────────────────────────────────────────────────────
 
@@ -173,12 +204,18 @@ def decide_next(state: ReasoningState) -> ControlVerdict:
     Pure function. Produces a ControlVerdict from current ReasoningState.
     Mirror of decideNext() in controller/phase_controller.ts.
 
-    Priority order (same as TS):
-      1. task_success → STOP(task_success) regardless of phase
-      2. env_noise    → REDIRECT(ANALYZE)  [unconditional — architectural constraint]
-      3. stagnation   → ADVANCE or STOP(no_signal) depending on phase
-      4. phase gates  → ADVANCE if phase-specific condition met
-      5. default      → CONTINUE
+    Priority order:
+      1.   task_success         → STOP(task_success) regardless of phase
+      2.   env_noise            → REDIRECT(ANALYZE)  [unconditional — architectural constraint]
+      2.5  principal_violation  → REDIRECT(repair_target) [cognition correctness gate]
+      3.   stagnation           → ADVANCE or STOP(no_signal) depending on phase
+      4.   phase gates          → ADVANCE if phase-specific condition met
+      5.   default              → CONTINUE
+
+    principal_violation (2.5): fires when phase-boundary principal check fails.
+    Redirects to the repair target for the violated phase (from PHASE_VIOLATION_REDIRECT).
+    Lower priority than env_noise (env issues dominate over cognition quality).
+    Higher priority than stagnation (cognition violation is a harder signal).
     """
     # 1. terminal success
     if state.task_success:
@@ -187,6 +224,20 @@ def decide_next(state: ReasoningState) -> ControlVerdict:
     # 2. env_noise — unconditional redirect (not gated on anything else)
     if state.env_noise:
         return VerdictRedirect(to="ANALYZE", reason="env_noise detected")
+
+    # 2.5. principal_violation — cognition correctness gate
+    if state.principal_violation:
+        # Repair target: PHASE_VIOLATION_REDIRECT maps violating phase → repair phase.
+        # Fallback: ANALYZE (always valid repair target).
+        try:
+            from principal_gate import PHASE_VIOLATION_REDIRECT as _pvr
+            _repair = _pvr.get(state.phase, "ANALYZE")
+        except Exception:
+            _repair = "ANALYZE"
+        return VerdictRedirect(
+            to=_repair,  # type: ignore[arg-type]
+            reason=f"principal_violation:{state.principal_violation}",
+        )
 
     # 3. stagnation
     if state.no_progress_steps >= NO_PROGRESS_THRESHOLD:
