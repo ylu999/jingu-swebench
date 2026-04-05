@@ -197,9 +197,10 @@ def evaluate_admission(phase_record, phase: str, next_phase: str = "") -> Admiss
     Full admission check for a PhaseRecord at phase boundary.
 
     Checks (in order):
-      1. required principals — missing → RETRYABLE
-      2. required fields     — missing → RETRYABLE
-      3. allowed_next        — forbidden transition → REJECTED (only if next_phase provided)
+      1. required principals  — missing → RETRYABLE
+      2. forbidden principals — declared → REJECTED (fake principal / phase boundary violation)
+      3. required fields      — missing → RETRYABLE
+      4. allowed_next         — forbidden transition → REJECTED (only if next_phase provided)
 
     Returns AdmissionResult(ADMITTED / RETRYABLE / REJECTED, reasons).
     Exception-safe: any error returns ADMITTED (no crash, no false stop).
@@ -220,7 +221,17 @@ def evaluate_admission(phase_record, phase: str, next_phase: str = "") -> Admiss
             if req not in declared:
                 retryable.append(f"missing_required_principal:{req}")
 
-        # 2. required fields (RETRYABLE)
+        # 2. forbidden principals (REJECTED — fake principal / phase boundary violation)
+        try:
+            from subtype_contracts import get_forbidden_principals as _get_fp
+            forbidden = _get_fp(phase)
+        except Exception:
+            forbidden = []
+        for fp in forbidden:
+            if fp in declared:
+                rejected.append(f"forbidden_principal:{fp}")
+
+        # 3. required fields (RETRYABLE)
         try:
             from subtype_contracts import get_required_fields as _get_rf
             req_fields = _get_rf(phase)
@@ -231,7 +242,7 @@ def evaluate_admission(phase_record, phase: str, next_phase: str = "") -> Admiss
             if not val:  # None, [], "", 0 all count as missing
                 retryable.append(f"missing_required_field:{field_name}")
 
-        # 3. allowed_next transition check (REJECTED — boundary error)
+        # 4. allowed_next transition check (REJECTED — boundary error)
         if next_phase:
             try:
                 from subtype_contracts import get_allowed_next as _get_an
