@@ -97,12 +97,19 @@ _EVIDENCE_REF_RE = _re.compile(
     r"(?:[a-zA-Z0-9_\-./]+\.py(?::[\d]+)?)",  # file.py or file.py:123
 )
 
-_PHASE_SUBTYPE_MAP: dict[str, str] = {
-    "OBSERVE":  "observation",
-    "ANALYZE":  "root_cause_analysis",
-    "EXECUTE":  "patch_writing",
-    "JUDGE":    "verification",
-}
+# Load subtype names from canonical source (subtype_contracts._PHASE_TO_SUBTYPE).
+# This ensures declaration_extractor and evaluate_admission use the same subtype strings,
+# so PhaseRecord.subtype matches the keys in SUBTYPE_CONTRACTS.
+# Fallback: static map if subtype_contracts is unavailable (no crash).
+try:
+    from subtype_contracts import _PHASE_TO_SUBTYPE as _PHASE_SUBTYPE_MAP  # type: ignore[assignment]
+except Exception:
+    _PHASE_SUBTYPE_MAP: dict[str, str] = {
+        "OBSERVE":  "observation",
+        "ANALYZE":  "analysis.root_cause",
+        "EXECUTE":  "execution.code_patch",
+        "JUDGE":    "judge.verification",
+    }
 
 
 def _extract_principals_from_message(agent_message: str) -> list[str]:
