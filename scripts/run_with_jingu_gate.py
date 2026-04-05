@@ -573,13 +573,15 @@ def _install_step_monitor(
                     pass
             except Exception as _pi_exc:
                 print(f"    [principal_inference] check error={_pi_exc}", flush=True)
-            # Telemetry: write inference results into jingu_body (best-effort)
+            # Telemetry: write inference results into jingu_body (best-effort, p195)
             try:
-                from principal_inference import infer_principals, diff_principals
-                _inferred = infer_principals(_pr)
+                from principal_inference import run_inference, diff_principals
+                from subtype_contracts import _PHASE_TO_SUBTYPE as _pi_phase_map
+                _pi_subtype = _pi_phase_map.get(str(_cp_s.phase).upper(), "")
+                _inf_rich = run_inference(_pr, _pi_subtype)
                 _inf_diff = diff_principals(
                     getattr(_pr, "principals", []) or [],
-                    _inferred,
+                    _inf_rich,
                     phase=str(_cp_s.phase),
                 )
             except Exception:
@@ -2025,24 +2027,42 @@ def run_agent(
             jingu_body["verify_history"] = _monitor.verify_history
             # p190: per-phase records — one entry per VerdictAdvance during this attempt
             jingu_body["phase_records"] = [r.as_dict() for r in _monitor.phase_records]
-            # p194: principal inference telemetry — declared vs inferred diff summary
+            # p195: principal inference telemetry — rich result with signals/explanation
             try:
-                from principal_inference import infer_principals, diff_principals
+                from principal_inference import run_inference, diff_principals
+                from subtype_contracts import _PHASE_TO_SUBTYPE
                 _pi_telemetry = []
                 for _telem_pr in _monitor.phase_records:
-                    _telem_inferred = infer_principals(_telem_pr)
+                    _telem_phase = str(getattr(_telem_pr, "phase", ""))
+                    _telem_subtype = _PHASE_TO_SUBTYPE.get(_telem_phase.upper(), "")
+                    _telem_rich = run_inference(_telem_pr, _telem_subtype)
                     _telem_diff = diff_principals(
                         getattr(_telem_pr, "principals", []) or [],
-                        _telem_inferred,
-                        phase=str(getattr(_telem_pr, "phase", "")),
+                        _telem_rich,
+                        phase=_telem_phase,
                     )
+                    _telem_details = {
+                        p: {
+                            "score": round(r.score, 2),
+                            "signals": r.signals,
+                            "explanation": r.explanation,
+                        }
+                        for p, r in _telem_rich.details.items()
+                    }
                     _pi_telemetry.append({
-                        "phase": str(getattr(_telem_pr, "phase", "")),
+                        "phase": _telem_phase,
+                        "subtype": _telem_subtype,
                         "declared": list(getattr(_telem_pr, "principals", []) or []),
-                        "inferred": _telem_inferred,
-                        "missing_required": _telem_diff.get("missing_required", []),
-                        "missing_expected": _telem_diff.get("missing_expected", []),
-                        "fake": _telem_diff.get("fake", []),
+                        "inferred": {
+                            "present": _telem_rich.present,
+                            "absent": _telem_rich.absent,
+                        },
+                        "details": _telem_details,
+                        "diff": {
+                            "missing_required": _telem_diff.get("missing_required", []),
+                            "missing_expected": _telem_diff.get("missing_expected", []),
+                            "fake": _telem_diff.get("fake", []),
+                        },
                     })
                 jingu_body["principal_inference"] = _pi_telemetry
             except Exception:

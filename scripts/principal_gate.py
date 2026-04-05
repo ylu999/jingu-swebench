@@ -96,7 +96,7 @@ def check_principal_gate(phase_record, phase: str) -> str | None:
 
 def check_principal_inference(phase_record, phase: str) -> str | None:
     """
-    p194: System-inferred principal check (three-way diff).
+    p195: System-inferred principal check (three-way diff) using rich inference result.
 
     Infers principals from PhaseRecord behavior and diffs against declared principals.
     Returns a violation string or None.
@@ -113,36 +113,43 @@ def check_principal_inference(phase_record, phase: str) -> str | None:
         phase: Phase name string (e.g. 'ANALYZE', 'EXECUTE', 'JUDGE')
     """
     try:
-        from principal_inference import infer_principals, diff_principals
-        _inferred = infer_principals(phase_record)
+        from principal_inference import run_inference, diff_principals, InferredPrincipalResult
+        from subtype_contracts import _PHASE_TO_SUBTYPE
+        _subtype = _PHASE_TO_SUBTYPE.get(phase.upper(), "")
+        _rich_result = run_inference(phase_record, _subtype)
         _diff = diff_principals(
             getattr(phase_record, "principals", []) or [],
-            _inferred,
+            _rich_result,
             phase=phase,
         )
         if _diff["fake"]:
             print(
-                f"    [principal_inference] fake={_diff['fake']} inferred={_inferred}",
+                f"    [principal_inference] fake={_diff['fake']} inferred={_rich_result.present}",
                 flush=True,
             )
             return f"fake_principal:{','.join(_diff['fake'])}"
         elif _diff["missing_required"]:
             print(
                 f"    [principal_inference] missing_required={_diff['missing_required']}"
-                f" inferred={_inferred}",
+                f" inferred={_rich_result.present}",
                 flush=True,
             )
             return f"missing_required:{','.join(_diff['missing_required'])}"
         else:
             if _diff["missing_expected"]:
+                _details = {
+                    p: _rich_result.details.get(p)
+                    for p in _diff["missing_expected"]
+                    if p in _rich_result.details
+                }
                 print(
                     f"    [principal_inference] missing_expected={_diff['missing_expected']}"
-                    f" inferred={_inferred}",
+                    f" signals={_details}",
                     flush=True,
                 )
             else:
                 print(
-                    f"    [principal_inference] match inferred={_inferred}",
+                    f"    [principal_inference] match inferred={_rich_result.present}",
                     flush=True,
                 )
             return None

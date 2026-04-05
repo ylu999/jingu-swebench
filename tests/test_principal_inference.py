@@ -1,10 +1,13 @@
 """
-test_principal_inference.py — Tests for principal_inference.py (p194)
+test_principal_inference.py — Tests for principal_inference.py (p194 + p195)
 
 Tests cover:
-  - infer_principals: 4 deterministic rules
-  - diff_principals: three-way split (missing_required / missing_expected / fake)
-  - V3 stub: build_retry_hints returns []
+  - infer_principals: 4 deterministic rules (p194)
+  - diff_principals: three-way split (missing_required / missing_expected / fake) (p194)
+  - V3 stub: build_retry_hints returns [] (p194)
+  - Rule registry: register_rule, get_rules, run_inference (p195)
+  - InferenceResult: signals, explanation fields (p195)
+  - Backward-compat: diff_principals accepts InferredPrincipalResult (p195)
 """
 
 import sys
@@ -19,6 +22,12 @@ from principal_inference import (
     build_retry_hints,
     RetryHintInput,
     RepairHint,
+    register_rule,
+    get_rules,
+    run_inference,
+    InferenceRule,
+    InferenceResult,
+    InferredPrincipalResult,
 )
 
 
@@ -224,3 +233,150 @@ def test_v3_stub_return_type():
     assert isinstance(result, list)
     for item in result:
         assert isinstance(item, RepairHint)
+
+
+# ── p195: Rule registry tests ─────────────────────────────────────────────────
+
+def test_register_rule_and_get_rules():
+    """register_rule adds to registry; get_rules returns it."""
+    before = len(get_rules())
+    new_rule = InferenceRule(
+        principal="test_principal_xyz",
+        infer=lambda r: (0.9, ["test_signal"], "test explanation"),
+        applies_to=None,
+        threshold=0.7,
+    )
+    register_rule(new_rule)
+    after = get_rules()
+    assert len(after) == before + 1
+    assert any(r.principal == "test_principal_xyz" for r in after), (
+        f"Expected test_principal_xyz in registry, got {[r.principal for r in after]}"
+    )
+
+
+def test_rule_applies_to_filter():
+    """A rule with applies_to=['execution.code_patch'] does NOT fire for analysis.root_cause subtype."""
+    rec = FakePhaseRecord(
+        phase="EXECUTE",
+        evidence_refs=["ref1"],
+        from_steps=[1],
+        content="small patch\n" * 5,
+    )
+    # run_inference with analysis.root_cause subtype — minimal_change should not appear
+    result = run_inference(rec, "analysis.root_cause")
+    assert "minimal_change" not in result.present, (
+        f"minimal_change should not fire for analysis.root_cause, got {result.present}"
+    )
+
+
+def test_inference_result_has_signals():
+    """run_inference result.details for causal_grounding has non-empty signals list."""
+    rec = FakePhaseRecord(
+        phase="ANALYZE",
+        evidence_refs=["ref1"],
+        content="The bug occurs because the state machine transitions incorrectly.",
+        from_steps=[1],
+    )
+    result = run_inference(rec, "analysis.root_cause")
+    assert "causal_grounding" in result.details, (
+        f"Expected causal_grounding in details, got {list(result.details.keys())}"
+    )
+    ir = result.details["causal_grounding"]
+    assert isinstance(ir.signals, list), f"Expected list, got {type(ir.signals)}"
+    assert len(ir.signals) > 0, f"Expected non-empty signals, got {ir.signals}"
+
+
+def test_inference_result_has_explanation():
+    """run_inference result.details for causal_grounding has non-empty explanation string."""
+    rec = FakePhaseRecord(
+        phase="ANALYZE",
+        evidence_refs=["ref1"],
+        content="This fails because the validator skips None values.",
+        from_steps=[1],
+    )
+    result = run_inference(rec, "analysis.root_cause")
+    assert "causal_grounding" in result.details
+    ir = result.details["causal_grounding"]
+    assert isinstance(ir.explanation, str), f"Expected str, got {type(ir.explanation)}"
+    assert len(ir.explanation) > 0, f"Expected non-empty explanation, got {repr(ir.explanation)}"
+
+
+def test_causal_grounding_score_above_threshold():
+    """evidence_refs + causal keyword + from_steps => causal_grounding score >= 0.7."""
+    rec = FakePhaseRecord(
+        phase="ANALYZE",
+        evidence_refs=["ref1", "ref2"],
+        content="The failure occurs because the index is off by one.",
+        from_steps=[1, 2],
+    )
+    result = run_inference(rec, "analysis.root_cause")
+    assert "causal_grounding" in result.details
+    ir = result.details["causal_grounding"]
+    assert ir.score >= 0.7, f"Expected score >= 0.7, got {ir.score}"
+    assert "causal_grounding" in result.present, (
+        f"Expected causal_grounding in present, got {result.present}"
+    )
+
+
+def test_minimal_change_large_patch():
+    """Content with 40+ lines => minimal_change NOT present in run_inference result."""
+    large_content = "\n".join(["line"] * 40)  # 39 newlines
+    rec = FakePhaseRecord(phase="EXECUTE", content=large_content)
+    result = run_inference(rec, "execution.code_patch")
+    assert "minimal_change" not in result.present, (
+        f"minimal_change should not be present for large patch, got {result.present}"
+    )
+    assert "minimal_change" in result.absent, (
+        f"minimal_change should be in absent for large patch, got {result.absent}"
+    )
+
+
+def test_diff_with_rich_result():
+    """diff_principals accepts InferredPrincipalResult and produces same output as list[str]."""
+    rec = FakePhaseRecord(
+        phase="ANALYZE",
+        evidence_refs=["ref1"],
+        content="The failure is because the validator skips None.",
+        from_steps=[1],
+    )
+    rich_result = run_inference(rec, "analysis.root_cause")
+    # Get list[str] version via infer_principals
+    list_result = infer_principals(rec)
+
+    diff_rich = diff_principals(
+        declared=["causal_grounding"],
+        inferred=rich_result,
+        phase="",
+    )
+    diff_list = diff_principals(
+        declared=["causal_grounding"],
+        inferred=list_result,
+        phase="",
+    )
+    assert diff_rich["fake"] == diff_list["fake"], (
+        f"fake mismatch: rich={diff_rich['fake']} list={diff_list['fake']}"
+    )
+    assert diff_rich["missing_required"] == diff_list["missing_required"], (
+        f"missing_required mismatch"
+    )
+
+
+def test_new_rule_without_engine_change():
+    """Registering a new rule makes run_inference return the new principal without engine changes."""
+    new_principal = "test_custom_principal_p195"
+    custom_rule = InferenceRule(
+        principal=new_principal,
+        infer=lambda r: (0.9, ["custom_signal"], "Custom rule fired"),
+        applies_to=None,
+        threshold=0.7,
+    )
+    register_rule(custom_rule)
+
+    rec = FakePhaseRecord(phase="ANALYZE", content="some content")
+    result = run_inference(rec, "analysis.root_cause")
+    assert new_principal in result.present, (
+        f"Expected {new_principal} in present after register_rule, got {result.present}"
+    )
+    assert new_principal in result.details, (
+        f"Expected {new_principal} in details, got {list(result.details.keys())}"
+    )
