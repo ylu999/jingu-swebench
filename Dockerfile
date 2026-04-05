@@ -60,6 +60,7 @@ COPY scripts/run_with_jingu_gate.py \
      scripts/principal_gate.py \
      scripts/principal_inference.py \
      scripts/phase_record.py \
+     scripts/in_loop_judge.py \
      /app/scripts/
 # B1-CP: reasoning control plane Python module
 COPY scripts/control/ /app/scripts/control/
