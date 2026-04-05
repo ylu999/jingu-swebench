@@ -59,6 +59,7 @@ COPY scripts/run_with_jingu_gate.py \
      scripts/phase_prompt.py \
      scripts/principal_gate.py \
      scripts/principal_inference.py \
+     scripts/phase_record.py \
      /app/scripts/
 # B1-CP: reasoning control plane Python module
 COPY scripts/control/ /app/scripts/control/
