@@ -95,6 +95,24 @@ def format_cognition_feedback(result: CognitionResult) -> str:
     return "\n".join(lines)
 
 
+def check_cognition_at_judge(declaration: dict, patch_signals: list[str]) -> tuple[bool, str]:
+    """
+    JUDGE phase entry gate wrapper.
+
+    Called before controlled_verify when cp_state.phase == 'JUDGE'.
+    Returns (pass: bool, feedback_if_fail: str).
+
+    Pass  → caller continues to controlled_verify.
+    Fail  → caller injects feedback as pending_redirect_hint, skips controlled_verify.
+
+    Empty declaration → always pass (opt-in gate: no FIX_TYPE means no check).
+    """
+    result = check_cognition(declaration, patch_signals)
+    if result["valid"]:
+        return True, ""
+    return False, format_cognition_feedback(result)
+
+
 if __name__ == "__main__":
     # Smoke tests — CDP v1 vocabulary
 
