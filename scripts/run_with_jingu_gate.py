@@ -700,6 +700,11 @@ def _install_step_monitor(
     ProgressTrackingAgent.step = _monitored_step
     # p186: register state so run_with_jingu can read early_stop_verdict after run_agent returns
     _STEP_MONITOR_STATES[(instance_id, attempt)] = state
+    # P9 fix: store orig_step so run_agent can restore after attempt completes.
+    # Without this, attempt=2 installs monitored_step_2 with _orig_step=monitored_step_1,
+    # and attempt=2's steps double-fire through the stale attempt=1 state, printing
+    # ghost cp-step lines with attempt=1 labels after [jingu] FAILED.
+    state._orig_step = _orig_step
     return state
 
 
@@ -2130,6 +2135,13 @@ def run_agent(
         traceback.print_exc()
     finally:
         _DA.run = _orig_run  # always restore
+        # P9 fix: restore ProgressTrackingAgent.step to its pre-install state so
+        # the next attempt installs a fresh monitor on top of the real original step,
+        # not on top of the previous attempt's monitor. Without this, attempt N's
+        # monitored_step becomes attempt N+1's _orig_step, causing every step in
+        # attempt N+1 to double-fire through the stale attempt N StepMonitorState.
+        from minisweagent.run.benchmarks.swebench import ProgressTrackingAgent as _PTA
+        _PTA.step = _monitor._orig_step
     t_llm.stop()
 
     # Parse traj for usage + submission
