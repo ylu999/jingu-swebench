@@ -578,13 +578,19 @@ def _step_cp_update_and_verdict(
                 _pg_violation = _admission.reasons[0] if _admission.reasons else "admission_violation"
                 _pg_feedback = _get_pg_feedback(_pg_violation)
                 try:
-                    from subtype_contracts import get_repair_target as _get_repair_target
+                    from subtype_contracts import (
+                        get_repair_target as _get_repair_target,
+                        build_phase_principal_guidance as _build_pg_guidance,
+                    )
                     _repair_phase = _get_repair_target(str(_cp_s.phase))
+                    _pg_guidance = _build_pg_guidance(str(_cp_s.phase))
                 except Exception:
                     _repair_phase = ""
+                    _pg_guidance = ""
                 _repair_suffix = f" Repair phase: {_repair_phase}." if _repair_phase else ""
+                _guidance_suffix = f" {_pg_guidance}" if _pg_guidance else ""
                 state.pending_redirect_hint = (
-                    f"[{_admission.status}:{_pg_violation}] {_pg_feedback}{_repair_suffix}"
+                    f"[{_admission.status}:{_pg_violation}] {_pg_feedback}{_repair_suffix}{_guidance_suffix}"
                 )
                 # ── cognition-aware control: admission result → cp_state → verdict ──
                 if cp_state_holder is not None:
@@ -632,6 +638,7 @@ def _step_cp_update_and_verdict(
                             "content": (
                                 f"[Cognition gate RETRYABLE: {_pg_violation}] "
                                 f"{_pg_feedback} "
+                                f"{_pg_guidance} "
                                 f"Return to phase {_pv_verdict.to} before proceeding."
                             ),
                         })
