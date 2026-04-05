@@ -110,6 +110,8 @@ def print_activation_proof(identity: dict) -> None:
     print(f"[init] no_progress_threshold={_NPT}")
     # p189: stage-aware prompt injection — activation proof (RT4)
     print(f"[init] phase_injection_enabled=True")
+    # p191: in-loop judge — activation proof (RT4)
+    print(f"[init] in_loop_judge_enabled=True")
 
 # ── Traj watcher: real-time per-step log ───────────────────────────────────────
 
@@ -1771,6 +1773,46 @@ def run_agent(
                     flush=True,
                 )
                 _skip_controlled_verify = True
+
+        # p191: in-loop judge — patch format + semantic weakening checks
+        # Runs after cognition gate, before controlled_verify.
+        # Hard checks (block): patch_non_empty, patch_format, no_semantic_weakening.
+        # Soft check (warn only): changed_file_relevant.
+        # Exception-safe: judge failure never crashes main flow.
+        if not _skip_controlled_verify:
+            try:
+                from in_loop_judge import run_in_loop_judge as _run_ilj
+                _judge = _run_ilj(submitted)
+                print(
+                    f"    [in_loop_judge] "
+                    f"patch_non_empty={'pass' if _judge.patch_non_empty else 'fail'} "
+                    f"patch_format={'pass' if _judge.patch_format else 'fail'} "
+                    f"semantic_weakening={'pass' if _judge.no_semantic_weakening else 'fail'} "
+                    f"changed_file_relevant={'pass' if _judge.changed_file_relevant else 'warn'}",
+                    flush=True,
+                )
+                if not _judge.all_pass:
+                    # Hard check failures — block and redirect
+                    if not _judge.patch_non_empty:
+                        _monitor.early_stop_verdict = VerdictStop(reason="empty_patch")
+                    elif not _judge.patch_format:
+                        _monitor.pending_redirect_hint = "[REDIRECT:EXECUTE] patch_format_error"
+                    elif not _judge.no_semantic_weakening:
+                        _monitor.pending_redirect_hint = "[REDIRECT:ANALYZE] semantic_weakening_detected"
+                    _skip_controlled_verify = True
+                    print(
+                        f"    [in_loop_judge] skipping controlled_verify (hard check failed)",
+                        flush=True,
+                    )
+                elif not _judge.changed_file_relevant:
+                    # Soft check — warn only, do not block
+                    print(
+                        f"    [in_loop_judge] warn: changed_file_relevant=fail "
+                        f"(soft check — controlled_verify continues)",
+                        flush=True,
+                    )
+            except Exception as _ilj_exc:
+                print(f"    [in_loop_judge] error (non-fatal): {_ilj_exc}", flush=True)
 
         if _skip_controlled_verify:
             return result
