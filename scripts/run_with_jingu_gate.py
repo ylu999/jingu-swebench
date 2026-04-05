@@ -112,6 +112,45 @@ def print_activation_proof(identity: dict) -> None:
     print(f"[init] phase_injection_enabled=True")
     # p191: in-loop judge — activation proof (RT4)
     print(f"[init] in_loop_judge_enabled=True")
+    # p192: unified verify prerequisite gate — activation proof (RT4)
+    print(f"[init] verify_gate_enabled=True")
+    # p188: principal enforcement with phase routing — activation proof (RT4)
+    print(f"[init] principal_gate_enabled=True")
+
+# ── Verify prerequisite gate (p192) ────────────────────────────────────────────
+
+def _verify_prerequisites(cognition_result: str | None = None, judge_result=None) -> tuple[bool, str]:
+    """
+    Unified prerequisite check before controlled_verify.
+    Returns (all_pass, reason_if_fail).
+
+    Checks (in order):
+    1. cognition gate result (from p187) — if already checked, use cached result
+    2. in-loop judge result (from p191) — if already checked, use cached result
+
+    Exception-safe: any unexpected error returns (True, "") — conservative fallback
+    allows controlled_verify to run.
+    """
+    try:
+        # Check cognition gate result
+        if cognition_result is not None and cognition_result == "fail":
+            return False, "cognition_fail"
+
+        # Check in-loop judge result
+        if judge_result is not None and not judge_result.all_pass:
+            if not judge_result.patch_non_empty:
+                return False, "empty_patch"
+            elif not judge_result.patch_format:
+                return False, "patch_format_error"
+            elif not judge_result.no_semantic_weakening:
+                return False, "semantic_weakening"
+            else:
+                return False, "judge_fail"
+
+        return True, ""
+    except Exception:
+        # Conservative fallback: allow controlled_verify to run on unexpected errors
+        return True, ""
 
 # ── Traj watcher: real-time per-step log ───────────────────────────────────────
 
@@ -472,6 +511,29 @@ def _install_step_monitor(
                 )
             except Exception as _pr_exc:
                 print(f"    [phase_record] error (non-fatal): {_pr_exc}", flush=True)
+            # p188: principal gate — check required principals for completed phase
+            try:
+                from principal_gate import (
+                    check_principal_gate as _check_pg,
+                    get_principal_feedback as _get_pg_feedback,
+                )
+                _pg_violation = _check_pg(_pr, str(_cp_s.phase))
+                if _pg_violation:
+                    _pg_feedback = _get_pg_feedback(_pg_violation)
+                    state.pending_redirect_hint = (
+                        f"[PRINCIPAL_VIOLATION:{_pg_violation}] {_pg_feedback}"
+                    )
+                    print(
+                        f"    [principal_gate] phase={_pr.phase} violation={_pg_violation}",
+                        flush=True,
+                    )
+                else:
+                    print(
+                        f"    [principal_gate] phase={_pr.phase} violation=none",
+                        flush=True,
+                    )
+            except Exception as _pg_exc:
+                print(f"    [principal_gate] error={_pg_exc}", flush=True)
         # VerdictContinue: no action needed
 
         # ── p189: phase-aware prompt injection ───────────────────────────────
@@ -1751,7 +1813,7 @@ def run_agent(
         # Fires when cp_state.phase == "JUDGE" (EXECUTE->JUDGE advance by verdict routing).
         # Pass  → continue to controlled_verify as normal.
         # Fail  → inject feedback as pending_redirect_hint, skip controlled_verify.
-        _skip_controlled_verify = False
+        _cg_result_str: str | None = None
         if cp_state_holder is not None and cp_state_holder[0].phase == "JUDGE":
             _cg_decl = {}
             try:
@@ -1763,8 +1825,8 @@ def run_agent(
             _cg_signals = extract_patch_signals(submitted) if submitted else []
             from cognition_check import check_cognition_at_judge as _cg_judge
             _cg_pass, _cg_feedback = _cg_judge(_cg_decl, _cg_signals)
-            _cg_result = "pass" if _cg_pass else "fail"
-            print(f"    [cognition_gate] phase=JUDGE result={_cg_result}", flush=True)
+            _cg_result_str = "pass" if _cg_pass else "fail"
+            print(f"    [cognition_gate] phase=JUDGE result={_cg_result_str}", flush=True)
             if not _cg_pass:
                 # Inject feedback as redirect hint — agent receives it on next attempt
                 _monitor.pending_redirect_hint = f"[COGNITION_FAIL] {_cg_feedback}"
@@ -1772,49 +1834,60 @@ def run_agent(
                     f"    [cognition_gate] skipping controlled_verify — feedback injected",
                     flush=True,
                 )
-                _skip_controlled_verify = True
 
         # p191: in-loop judge — patch format + semantic weakening checks
         # Runs after cognition gate, before controlled_verify.
         # Hard checks (block): patch_non_empty, patch_format, no_semantic_weakening.
         # Soft check (warn only): changed_file_relevant.
         # Exception-safe: judge failure never crashes main flow.
-        if not _skip_controlled_verify:
-            try:
-                from in_loop_judge import run_in_loop_judge as _run_ilj
-                _judge = _run_ilj(submitted)
+        _judge_result = None
+        try:
+            from in_loop_judge import run_in_loop_judge as _run_ilj
+            _judge_result = _run_ilj(submitted)
+            print(
+                f"    [in_loop_judge] "
+                f"patch_non_empty={'pass' if _judge_result.patch_non_empty else 'fail'} "
+                f"patch_format={'pass' if _judge_result.patch_format else 'fail'} "
+                f"semantic_weakening={'pass' if _judge_result.no_semantic_weakening else 'fail'} "
+                f"changed_file_relevant={'pass' if _judge_result.changed_file_relevant else 'warn'}",
+                flush=True,
+            )
+            if _judge_result.all_pass and not _judge_result.changed_file_relevant:
+                # Soft check — warn only, do not block
                 print(
-                    f"    [in_loop_judge] "
-                    f"patch_non_empty={'pass' if _judge.patch_non_empty else 'fail'} "
-                    f"patch_format={'pass' if _judge.patch_format else 'fail'} "
-                    f"semantic_weakening={'pass' if _judge.no_semantic_weakening else 'fail'} "
-                    f"changed_file_relevant={'pass' if _judge.changed_file_relevant else 'warn'}",
+                    f"    [in_loop_judge] warn: changed_file_relevant=fail "
+                    f"(soft check — controlled_verify continues)",
                     flush=True,
                 )
-                if not _judge.all_pass:
-                    # Hard check failures — block and redirect
-                    if not _judge.patch_non_empty:
-                        _monitor.early_stop_verdict = VerdictStop(reason="empty_patch")
-                    elif not _judge.patch_format:
-                        _monitor.pending_redirect_hint = "[REDIRECT:EXECUTE] patch_format_error"
-                    elif not _judge.no_semantic_weakening:
-                        _monitor.pending_redirect_hint = "[REDIRECT:ANALYZE] semantic_weakening_detected"
-                    _skip_controlled_verify = True
-                    print(
-                        f"    [in_loop_judge] skipping controlled_verify (hard check failed)",
-                        flush=True,
-                    )
-                elif not _judge.changed_file_relevant:
-                    # Soft check — warn only, do not block
-                    print(
-                        f"    [in_loop_judge] warn: changed_file_relevant=fail "
-                        f"(soft check — controlled_verify continues)",
-                        flush=True,
-                    )
-            except Exception as _ilj_exc:
-                print(f"    [in_loop_judge] error (non-fatal): {_ilj_exc}", flush=True)
+            if not _judge_result.all_pass:
+                # Hard check failures — set redirect hints (controlled_verify gated below)
+                if not _judge_result.patch_non_empty:
+                    _monitor.early_stop_verdict = VerdictStop(reason="empty_patch")
+                elif not _judge_result.patch_format:
+                    _monitor.pending_redirect_hint = "[REDIRECT:EXECUTE] patch_format_error"
+                elif not _judge_result.no_semantic_weakening:
+                    _monitor.pending_redirect_hint = "[REDIRECT:ANALYZE] semantic_weakening_detected"
+                print(
+                    f"    [in_loop_judge] skipping controlled_verify (hard check failed)",
+                    flush=True,
+                )
+        except Exception as _ilj_exc:
+            print(f"    [in_loop_judge] error (non-fatal): {_ilj_exc}", flush=True)
 
-        if _skip_controlled_verify:
+        # p192: unified prerequisite gate — aggregates cognition + judge results
+        _prereq_pass, _prereq_reason = _verify_prerequisites(
+            cognition_result=_cg_result_str,
+            judge_result=_judge_result,
+        )
+        print(
+            f"    [verify_gate] prerequisite={'pass' if _prereq_pass else f'fail({_prereq_reason})'} "
+            f"controlled_verify={'run' if _prereq_pass else 'skipped'}",
+            flush=True,
+        )
+
+        if not _prereq_pass:
+            _monitor._verify_skipped = True
+            _monitor._verify_skip_reason = _prereq_reason
             return result
 
         t_cv0 = time.monotonic()
@@ -1902,6 +1975,12 @@ def run_agent(
             jingu_body["verify_history"] = _monitor.verify_history
             # p190: per-phase records — one entry per VerdictAdvance during this attempt
             jingu_body["phase_records"] = [r.as_dict() for r in _monitor.phase_records]
+            # p192: verify_skipped — distinct from controlled_verify fail
+            # Only set when prereq gate blocked controlled_verify from running.
+            if getattr(_monitor, "_verify_skipped", False):
+                jingu_body["verify_skipped"] = True
+                jingu_body["verify_skip_reason"] = getattr(_monitor, "_verify_skip_reason", "unknown")
+                jingu_body["controlled_verify_result"] = "skipped"
             # Write jingu_body back into traj.json so gate_runner.js can read it
             traj["jingu_body"] = jingu_body
             traj_path.write_text(json.dumps(traj, indent=2))
