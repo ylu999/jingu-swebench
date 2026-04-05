@@ -1528,14 +1528,32 @@ def run_agent(
             "read the existing code more carefully — the solution is always a code change, not an environment change."
         )
 
-    # B4: declaration protocol — agent must declare fix type and principals
-    # before submitting. Extraction runs in cognition gate post-submission.
-    # Format is a hard protocol: two lines, controlled vocabulary, no prose.
+    # B4: phase-structured reasoning protocol — injects 4-phase structure into
+    # agent reasoning loop (Phase 1 activation: prompt-only injection).
     # Vocabulary: CDP v1 taxonomy (p170) — 9 types + 12 principal atoms.
+    # Key change vs prior version: FIX_TYPE is derived from ANALYSIS findings,
+    # not pre-suggested. Removed "almost always execution" bias.
     extra_parts.append(
-        "DECLARATION PROTOCOL (required before every submission):\n"
+        "REASONING PROTOCOL (follow these phases as you work):\n\n"
+        "## PHASE 1 — ANALYSIS\n"
+        "Before writing any code, output:\n"
+        "  ANALYSIS: <what the bug/issue actually is, based on reading the code and tests>\n"
+        "  ROOT_CAUSE: <the specific line or logic that causes the failure>\n"
+        "  HYPOTHESIS: <why that line/logic is wrong>\n\n"
+        "## PHASE 2 — DECISION\n"
+        "After analysis, output:\n"
+        "  DECISION: <which type of fix this requires — choose one:\n"
+        "    - execution: implement the fix directly (root cause is clear, solution is a code patch)\n"
+        "    - diagnosis: the root cause is unclear, need more investigation first\n"
+        "    - analysis: the issue is a design/logic problem requiring deeper understanding\n"
+        "    - validation: need to verify existing behavior before changing anything>\n"
+        "  SCOPE: <which files/functions will be changed>\n\n"
+        "## PHASE 3 — EXECUTION\n"
+        "Implement the fix. After writing the patch:\n"
+        "  EXECUTION: <what was changed and why it fixes the root cause>\n\n"
+        "## PHASE 4 — SUBMISSION DECLARATION\n"
         "Before calling submit, output these two lines exactly:\n\n"
-        "  FIX_TYPE: <one of: understanding | observation | analysis | diagnosis | decision | design | planning | execution | validation>\n"
+        "  FIX_TYPE: <must match your DECISION above — one of: understanding | observation | analysis | diagnosis | decision | design | planning | execution | validation>\n"
         "  PRINCIPALS: <space-separated list — must satisfy the contract for your chosen type>\n\n"
         "Type contracts (required and forbidden principals per type):\n"
         "  execution:   required=[scope_control, minimal_change]  forbidden=[causality, hypothesis_testing]\n"
@@ -1548,14 +1566,10 @@ def run_agent(
         "  design:      required=[constraint_awareness, completeness]   forbidden=[execution_first]\n"
         "  planning:    required=[completeness, consistency_check] forbidden=[execution_first, minimal_change]\n\n"
         "Rules:\n"
-        "  - FIX_TYPE must be exactly one value from the list above\n"
+        "  - FIX_TYPE must match the type you chose in DECISION (Phase 2)\n"
         "  - PRINCIPALS must include ALL required principals for your chosen type\n"
         "  - PRINCIPALS must NOT include any forbidden principal for your chosen type\n"
-        "  - Do not include a forbidden principal even if it seems semantically related\n"
-        "  - For SWE-bench: you are almost always submitting a code fix, so FIX_TYPE=execution\n"
-        "Example (execution — the most common case for SWE-bench):\n"
-        "  FIX_TYPE: execution\n"
-        "  PRINCIPALS: scope_control minimal_change"
+        "  - Choose FIX_TYPE based on what you actually did, not what seems most common"
     )
 
     fail_to_pass = instance.get("FAIL_TO_PASS", [])
