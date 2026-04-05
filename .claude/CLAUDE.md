@@ -13,19 +13,23 @@
 **跑 case 前的强制检查顺序（缺一不可）：**
 1. 代码改动已 commit + push
 2. `python scripts/ops.py build`（git pull + docker build + ECR push）
-3. **Scale up ASG**（`DesiredCapacity=2` 并行，或 `=1` 单批）— build 后 ASG=0，不 scale up 没有 EC2
+3. **Scale up ASG**（`DesiredCapacity=1`）
 4. 确认 ECS agent connected
-5. Launch
-6. 跑完立即 scale down（`DesiredCapacity=0`）
+5. **⛔ Smoke test 1 instance** — 确认新行为出现在 log，向用户汇报结果
+6. **等用户明确批准** batch launch
+7. Launch batch（加 `--confirmed` flag）
+8. 跑完立即 scale down（`DesiredCapacity=0`）
 
 ```
 STOP — 先读 .claude/smoke-test-runbook.md
+STOP — 未经用户批准，不得 launch 超过 3 个 instance
 ```
 
 不读 runbook 直接操作 = 必然犯错。历史案例：
 - 手动 SSM build 没 push ECR → ECS 用旧镜像 → fix 不生效，无报错
 - instance IDs 拼成单个字符串 → ValueError，batch 0 秒 exit=1
 - 用 `ops.py logs` → stream name 写错，无限 hang
+- **未 smoke test 直接 launch 30 instances → 浪费资源，修复未验证**（2026-04-05）
 
 ---
 

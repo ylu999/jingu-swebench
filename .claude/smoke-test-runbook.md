@@ -1,157 +1,389 @@
-# Smoke Test Runbook
+# Jingu SWE-bench Runbook
 
-## 标准工作流
+唯一的操作手册。包含 build、launch、monitor、结果分析、实验对比。
+
+---
+
+## ⛔ BATCH GUARD — 最高优先级规则（Claude 必须遵守）
+
+**跑 batch 是昂贵操作，必须严格按以下顺序，缺一步不能继续：**
+
+### Step 1 — Smoke Test（强制，不可跳过）
+
+每次 build 新镜像后，**必须先只跑 1 个 instance** 验证行为符合预期：
 
 ```bash
-# 1. 改代码 → commit → push
+python scripts/ops.py smoke \
+  --batch-name smoke-$(date +%Y%m%d-%H%M) \
+  --instance-ids django__django-10097 \
+  --mode jingu --max-attempts 2
+```
+
+验证内容（看 log 确认）：
+- `[preflight] ALL CHECKS PASSED` — 容器启动正常
+- `[init] strategy_log_path=...` — 路径正确
+- 目标 fix（如 `[principal_gate]`、`[cognition_check]`）的日志确实出现
+- 没有 `Traceback` / `ModuleNotFoundError`
+
+### Step 2 — 向用户汇报，等待批准（强制）
+
+Smoke test 跑完后，Claude **必须**：
+1. 向用户展示关键 log 片段（preflight、gate 触发情况）
+2. 说明 smoke test 通过/失败的结论
+3. **明确请求用户批准**才能 launch 大 batch
+
+```
+Claude: "Smoke test 通过。[preflight] ALL CHECKS PASSED，[principal_gate] 触发了 X 次。
+         可以 launch batch-p11（30 instances）吗？"
+```
+
+**不得在用户未明确批准的情况下自行 launch 大 batch。**
+
+### Step 3 — Launch Batch（需要 --confirmed flag）
+
+用户批准后，`ops.py run/smoke` 超过 3 个 instance 时 **必须加 `--confirmed` flag**：
+
+```bash
+python scripts/ops.py smoke \
+  --batch-name batch-p11-v2-contract \
+  --instance-ids django__django-10097 django__django-10554 ... \
+  --mode jingu --max-attempts 2 --confirmed
+```
+
+`--confirmed` 是 code-level guard，没有这个 flag，命令会报错退出。
+
+---
+
+## CRITICAL: Build 流程（必读，违反必出错）
+
+### 唯一正确的 build 命令
+
+```bash
+python scripts/ops.py build
+```
+
+**这条命令做三件事，缺一不可：**
+1. Scale up ASG → 启动一台 EC2
+2. EC2 上：`git pull` → `npm install`（如需）→ `docker build`
+3. **`docker push` 到 ECR** → ECS 任务才能拿到新镜像
+4. Scale down ASG
+
+**禁止手动 SSM build：** 手动在 EC2 上 `docker build` 而不 `docker push` → ECS 用的仍是 ECR 旧镜像 → 代码改动不生效，且不报任何错误。这是历史上犯过的错误，不要再重复。
+
+### Build 完成的验证
+
+`ops.py build` 输出最后一行：
+```
+[ops] ECR latest: pushed=<timestamp> digest=sha256:...
+```
+`pushed` 时间戳必须 > 你的 `git push` 时间。如果时间对不上，build 没生效。
+
+### 标准工作流
+
+```bash
+# 1. 改代码
 git add ... && git commit -m "..." && git push
 
-# 2. Build 镜像（约 10 分钟）
+# 2. Build + push 到 ECR（约 10 分钟，自动 scale up → build → scale down）
 python scripts/ops.py build
 
-# 3. 启动 smoke test（自动尾随日志到结束）
-# Verified（默认）
-./scripts/smoke-test.sh b5-smoke-$(date +%Y%m%d) django__django-11039 django__django-12470 django__django-10914
+# 3. Scale up EC2（build 完后 ASG=0，跑 case 前必须手动 scale up）
+#    baseline + jingu 并行 → 需要 2 台；只跑一批 → 1 台
+python3 -c "
+import boto3
+asg = boto3.client('autoscaling', region_name='us-west-2')
+asg.set_desired_capacity(AutoScalingGroupName='jingu-swebench-ecs-asg', DesiredCapacity=2)
+print('ASG desired=2, waiting for instances...')
+"
+# 等 ECS agent 连上（约 60s），确认：
+python3 -c "
+import boto3
+ecs = boto3.client('ecs', region_name='us-west-2')
+arns = ecs.list_container_instances(cluster='jingu-swebench')['containerInstanceArns']
+cis = ecs.describe_container_instances(cluster='jingu-swebench', containerInstances=arns)['containerInstances'] if arns else []
+for ci in cis:
+    rem = {r['name']: r['integerValue'] for r in ci['remainingResources']}
+    print(ci['ec2InstanceId'], 'connected='+str(ci['agentConnected']), 'cpu_free='+str(rem.get('CPU',0)))
+print(f'{len(cis)} instance(s) registered')
+"
 
-# Lite（历史 calibration 实例）
-DATASET=Lite ./scripts/smoke-test.sh b3-smoke-$(date +%Y%m%d) django__django-11039 django__django-12470 django__django-10914
+# 4. Launch（见下方 Launch 章节）
 
-# 4. 对已跑完的任务查看日志
-./scripts/logs.sh <task-id>
-./scripts/logs.sh <task-id> '\[control-plane\]'
-./scripts/logs.sh <task-id> 'cp-step|control-plane|STOPPING|verdict'
+# 5. 跑完后 scale down（节省费用）
+python3 -c "
+import boto3
+asg = boto3.client('autoscaling', region_name='us-west-2')
+asg.set_desired_capacity(AutoScalingGroupName='jingu-swebench-ecs-asg', DesiredCapacity=0)
+print('ASG desired=0')
+"
+```
+
+**Scale 规则：**
+- `ops.py build` 会自动 scale up → down，build 后 ASG=0
+- 跑 case 前必须手动 scale up（build 不等于 case 环境就绪）
+- baseline + jingu 并行 → `DesiredCapacity=2`；只跑一批 → `DesiredCapacity=1`
+- 跑完立即 scale down，EC2 按小时计费
+
+---
+
+## Scale Up（Launch 前必做）
+
+```python
+import boto3, time
+
+# Scale up
+asg = boto3.client('autoscaling', region_name='us-west-2')
+n = 2  # baseline + jingu 并行用 2；只跑一批用 1
+asg.set_desired_capacity(AutoScalingGroupName='jingu-swebench-ecs-asg', DesiredCapacity=n)
+print(f'ASG desired={n}')
+
+# 等 ECS agent 连上（约 60s）
+time.sleep(60)
+ecs = boto3.client('ecs', region_name='us-west-2')
+arns = ecs.list_container_instances(cluster='jingu-swebench')['containerInstanceArns']
+cis = ecs.describe_container_instances(cluster='jingu-swebench', containerInstances=arns)['containerInstances'] if arns else []
+for ci in cis:
+    rem = {r['name']: r['integerValue'] for r in ci['remainingResources']}
+    print(ci['ec2InstanceId'], 'connected='+str(ci['agentConnected']), 'cpu_free='+str(rem.get('CPU', 0)))
+if not all(ci['agentConnected'] for ci in cis):
+    print('WARNING: some agents not connected yet, wait another 30s and re-check')
+```
+
+## Scale Down（跑完立即执行）
+
+```python
+import boto3
+asg = boto3.client('autoscaling', region_name='us-west-2')
+asg.set_desired_capacity(AutoScalingGroupName='jingu-swebench-ecs-asg', DesiredCapacity=0)
+print('ASG desired=0')
 ```
 
 ---
 
-## Scripts
+## Launch
 
-### `scripts/tail-logs.py` — 实时 tail（首选）
+### 环境变量
 
-任何正在跑或刚启动的 task，直接 tail：
+| 变量 | 默认值 | 可选值 |
+|------|--------|--------|
+| `DATASET` | `Verified` | `Lite` / `Verified` |
+| `MODE` | `jingu` | `jingu` / `baseline` |
+| `MAX_ATTEMPTS` | `2` | 任意正整数 |
+| `WORKERS` | 实例数 | 任意正整数 |
+
+### 启动命令
 
 ```bash
-# 基础用法：去噪，全量显示
+# 单实例 smoke（验证新镜像是否生效）
+MAX_ATTEMPTS=1 ./scripts/smoke-test.sh smoke-$(date +%Y%m%d) django__django-11039
+
+# baseline 模式
+DATASET=Verified MODE=baseline MAX_ATTEMPTS=1 \
+  ./scripts/smoke-test.sh exp-baseline-$(date +%Y%m%d) \
+  django__django-11039 django__django-12470
+
+# jingu 模式
+DATASET=Verified MODE=jingu MAX_ATTEMPTS=1 \
+  ./scripts/smoke-test.sh exp-jingu-$(date +%Y%m%d) \
+  django__django-11039 django__django-12470
+```
+
+`smoke-test.sh` 自动 tail 到 task STOPPED，无需手动干预，无超时。
+
+### baseline 和 jingu 可以同时跑
+
+两台 c5.9xlarge 各跑一个，互不干扰。在两个终端分别启动即可。
+
+---
+
+## 12-Instance 对比实验（3-way: Official vs Baseline vs Jingu）
+
+### Instance Set
+
+```
+# Resolved by official (8)
+django__django-11095
+django__django-10097
+django__django-13028
+django__django-11433
+sympy__sympy-19346
+sympy__sympy-13372
+sphinx-doc__sphinx-7757
+sphinx-doc__sphinx-7910
+
+# Unresolved by official (4)
+sphinx-doc__sphinx-10435
+django__django-11820
+django__django-12308
+django__django-15695
+```
+
+Official reference: `~/Downloads/claude-4-6-opus-mini-v2.csv` (378/500 resolved)
+
+### Launch（两个终端并行）
+
+**Terminal 1 — baseline:**
+```bash
+cd ~/jingu/repo/jingu-swebench
+DATASET=Verified MODE=baseline MAX_ATTEMPTS=1 WORKERS=12 \
+  ./scripts/smoke-test.sh exp-baseline-12-$(date +%Y%m%d) \
+  django__django-11095 django__django-10097 django__django-13028 django__django-11433 \
+  sympy__sympy-19346 sympy__sympy-13372 \
+  sphinx-doc__sphinx-7757 sphinx-doc__sphinx-7910 \
+  sphinx-doc__sphinx-10435 django__django-11820 django__django-12308 django__django-15695
+```
+
+**Terminal 2 — jingu:**
+```bash
+cd ~/jingu/repo/jingu-swebench
+DATASET=Verified MODE=jingu MAX_ATTEMPTS=1 WORKERS=12 \
+  ./scripts/smoke-test.sh exp-jingu-12-$(date +%Y%m%d) \
+  django__django-11095 django__django-10097 django__django-13028 django__django-11433 \
+  sympy__sympy-19346 sympy__sympy-13372 \
+  sphinx-doc__sphinx-7757 sphinx-doc__sphinx-7910 \
+  sphinx-doc__sphinx-10435 django__django-11820 django__django-12308 django__django-15695
+```
+
+---
+
+## Live Monitor
+
+`smoke-test.sh` 已经内置 tail，不需要额外 monitor。
+
+task 已在跑时，用 `tail-logs.py`：
+
+```bash
+# LLM 每个 step 实时输出（snippet 前 80 字符）+ 关键信号
+python scripts/tail-logs.py <task-id> \
+  --filter '\[step|\[jingu\]|\[control-plane\]|\[cp-step\]|ACCEPTED|FAILED|ERROR|Traceback'
+
+# 只看 LLM step（每步说了什么）
+python scripts/tail-logs.py <task-id> --filter '\[step'
+
+# 全量（去 dockerd 噪音）— 最详细
 python scripts/tail-logs.py <task-id>
 
-# 只看关键信号（启动 + CP + 报错）
-python scripts/tail-logs.py <task-id> \
-  --filter '\[entrypoint\]|\[preflight\]|\[init\]|\[jingu\]|ERROR|FAILED|\[control-plane\]|\[cp-step\]'
-
-# 只看 control-plane verdict
-python scripts/tail-logs.py <task-id> --filter '\[control-plane\]'
-
-# 所有行（含 dockerd 噪音）
-python scripts/tail-logs.py <task-id> --all
-
-# 调整 poll 间隔（默认 5s）
-python scripts/tail-logs.py <task-id> --interval 10
+# 查状态（不 tail）
+python scripts/ops.py status --task-id <task-id>
 ```
 
-**行为**：
-- log stream 未出现 → 等待（最多 3 min），task STOPPED 即 early-fail exit
-- task STOPPED + stream 耗尽 → 自动退出（不需要 Ctrl-C）
-- ERROR/Traceback 等行自动加 ⚠️ 标记
-- 可 Ctrl-C 随时中断
+**LLM step 输出格式：**
+```
+    [step 12] $0.14  I need to look at the test file to understand what's expected...
+    [step 13] $0.18  Let me check the implementation in models.py...
+```
+每行：step 编号、累计花费、LLM 当前 step 说的前 80 字符。实时 flush，无延迟。
 
-### `scripts/smoke-test.sh` — 一键启动+尾随
+**禁止用 `ops.py logs`** — stream name 历史上写错，会无限 hang。
 
-- 启动 ECS 任务
-- 等 task 到 RUNNING（最多 3 分钟），STOPPED 即 early-fail
-- 等 log stream 出现（最多 2 分钟），STOPPED 即 early-fail
-- 实时打印日志（过滤 dockerd/containerd 噪音）
-- Task STOPPED + 无新日志 → 自动退出
-- 打印 final status + control-plane summary
+---
+
+## 读结果
+
+### 从 S3 下载
 
 ```bash
-./scripts/smoke-test.sh <batch-name> <instance-id> [instance-id ...]
-
-# 可选环境变量（默认值）
-MAX_ATTEMPTS=1  DATASET=Verified  MODE=jingu  WORKERS=<实例数>
-
-# 示例
-MAX_ATTEMPTS=1 ./scripts/smoke-test.sh b5-smoke-$(date +%Y%m%d) django__django-11039
-DATASET=Lite ./scripts/smoke-test.sh b3-quick django__django-11039 django__django-12470
-DATASET=Verified MODE=baseline MAX_ATTEMPTS=1 ./scripts/smoke-test.sh exp-baseline-v1 django__django-11099
+aws s3 sync s3://jingu-swebench-results/<batch-name>/ /tmp/<batch-name>/
+python3 -c "
+import json
+r = json.load(open('/tmp/<batch-name>/run_report.json'))
+print(json.dumps({k: v for k, v in r.items() if k != 'instances'}, indent=2))
+"
 ```
 
-### `scripts/logs.sh` — 事后查日志
+### 3-way 对比表
 
-对已完成（或仍在跑）的任务，fetch 全量日志并过滤。
+```python
+import json, csv
 
-```bash
-./scripts/logs.sh <task-id>                            # 全量（去除 dockerd 噪音）
-./scripts/logs.sh <task-id> '\[control-plane\]'        # 只看 verdict
-./scripts/logs.sh <task-id> 'cp-step|control-plane'    # cp-step + verdict
-./scripts/logs.sh <task-id> 'STOPPING|task_success'    # 只看成功/停止
-```
+with open('/Users/ysl/Downloads/claude-4-6-opus-mini-v2.csv') as f:
+    official = {r['metadata.instance_id']: r for r in csv.DictReader(f)}
 
-### `scripts/ops.py` — 底层工具
+INSTANCES = [
+    'django__django-11095', 'django__django-10097', 'django__django-13028', 'django__django-11433',
+    'sympy__sympy-19346', 'sympy__sympy-13372',
+    'sphinx-doc__sphinx-7757', 'sphinx-doc__sphinx-7910',
+    'sphinx-doc__sphinx-10435', 'django__django-11820', 'django__django-12308', 'django__django-15695',
+]
 
-```bash
-python scripts/ops.py build                    # rebuild + push 镜像
-python scripts/ops.py status --task-id <id>   # 快速看 task 状态
-python scripts/ops.py run ...                  # 手动启动（不尾随日志）
+# 替换为实际 batch 名（date +%Y%m%d 部分）
+DATE = 'YYYYMMDD'
+BASELINE_DIR = f'/tmp/exp-baseline-12-{DATE}'
+JINGU_DIR    = f'/tmp/exp-jingu-12-{DATE}'
+
+def load_resolved(d):
+    try:
+        r = json.load(open(f'{d}/run_report.json'))
+        return set(r.get('eval_results', {}).get('resolved_ids', []))
+    except:
+        return set()
+
+b_res = load_resolved(BASELINE_DIR)
+j_res = load_resolved(JINGU_DIR)
+
+print(f"{'Instance':<45} Official  Baseline  Jingu")
+print('-' * 75)
+for iid in INSTANCES:
+    off = 'Y' if official.get(iid, {}).get('metadata.scores.resolved') == '1' else 'N'
+    bas = 'Y' if iid in b_res else 'N'
+    jin = 'Y' if iid in j_res else 'N'
+    print(f'{iid:<45} {off:<9} {bas:<9} {jin}')
+
+print()
+print(f"Official: {sum(1 for i in INSTANCES if official.get(i,{}).get('metadata.scores.resolved')=='1')}/12")
+print(f"Baseline: {len(b_res & set(INSTANCES))}/12")
+print(f"Jingu:    {len(j_res & set(INSTANCES))}/12")
 ```
 
 ---
 
-## CloudWatch 关键事实
+## Early Failure 快速诊断
+
+| 症状 | 根因 | 动作 |
+|------|------|------|
+| `smoke-test.sh` 报 "task already STOPPED" | 容器 crash | `python scripts/ops.py status --task-id <id>` 看 exit code |
+| task 5s exit=1 | entrypoint crash / ModuleNotFoundError | `python scripts/tail-logs.py <id> --all` 看 traceback |
+| `ModuleNotFoundError: No module named 'X'` | 新 script 没加进 Dockerfile COPY，或 build 没用 `ops.py build` | 检查 Dockerfile COPY 清单，重新 `ops.py build` |
+| sympy/sphinx 报 `'accepted'` KeyError | onboarding-fail 返回 dict 缺 accepted key（已在 commit 21adb7c 修复） | 确认用的是修复后的镜像（`ops.py build` 时间 > commit 21adb7c 时间） |
+| 代码改了但行为没变 | 手动 SSM build 没 push 到 ECR | 必须用 `python scripts/ops.py build`，不要手动 build |
+| `RESOURCE:CPU` | 没有空闲 c5.9xlarge | 检查 ECS agent 状态，必要时重启 |
+| ECS agent 断连 | agent 进程挂了 | `boto3 ssm.send_command(['sudo systemctl restart ecs'])` |
+| instance IDs not found | dataset 传错（Lite vs Verified）| 确认命令里有 `DATASET=Verified` |
+| task RUNNING 无 `[jingu]` 日志 | dataset 下载慢 | 等 2-3 分钟再查 |
+
+---
+
+## Dockerfile COPY 清单（截至 commit 21adb7c）
+
+```dockerfile
+COPY scripts/run_with_jingu_gate.py \
+     scripts/jingu_gate_bridge.py \
+     scripts/retry_controller.py \
+     scripts/strategy_logger.py \
+     scripts/aggregate_strategies.py \
+     scripts/preflight.py \
+     scripts/patch_reviewer.py \
+     scripts/patch_signals.py \
+     scripts/declaration_extractor.py \
+     scripts/cognition_check.py \
+     scripts/gate_runner.js \
+     scripts/patch_admission_policy.js \
+     /app/scripts/
+COPY scripts/control/ /app/scripts/control/
+```
+
+新增 script 必须同时加入这个清单，否则容器里 `ModuleNotFoundError`。
+
+---
+
+## 基础信息
 
 | 项目 | 值 |
 |------|-----|
-| Log Group | `/ecs/jingu-swebench` |
-| Log Stream | `runner/runner/<task-id>` |
 | ECS Cluster | `jingu-swebench` |
 | ECR | `235494812052.dkr.ecr.us-west-2.amazonaws.com/jingu-swebench:latest` |
-
-**注意**：`ops.py logs` 命令历史上 stream name 写错（`ecs/runner/` 而不是 `runner/runner/`），
-已修复。不要直接用旧的 `ops.py logs`，用 `logs.sh` 替代。
-
----
-
-## Early Failure 判断
-
-| 症状 | 原因 | 动作 |
-|------|------|------|
-| `smoke-test.sh` 报 "task already STOPPED" | 容器 crash，没跑起来 | `python scripts/ops.py status --task-id <id>` 看 exit code + reason |
-| Log stream 2 分钟后仍不存在 | dockerd 启动失败 / entrypoint crash | CloudWatch 控制台直接搜 task-id |
-| Task RUNNING 但无 `[jingu]` 日志 | 依赖下载慢 / dataset 下载慢 | 等 2-3 分钟再查 |
-| `[jingu] ERROR` 出现 | 代码问题 | 看 traceback，修代码 |
-
----
-
-## Control-Plane 关键日志格式
-
-```
-# 每个 agent step（有信号才打印）
-[cp-step] instance=django__django-11039 attempt=1 signals=['patch'] no_progress:0 step:31 env_noise:False actionability:1 weak_progress:True
-
-# 每个 attempt boundary（verify 后）
-[control-plane] instance=django-11039 attempt=1 state=phase:OBSERVE step:254 no_progress:1 task_success:True
-[control-plane] instance=django-11039 attempt=1 verdict=VerdictStop(type='STOP', reason='task_success')
-[control-plane] instance=django-11039 STOPPING — reason=task_success
-```
-
-**B3.2 验证标准**：整个 attempt 过程中 `no_progress` 应保持 0，只在 verify boundary 才增加。
-若 `no_progress` 在 step 阶段快速递增（每步+1），说明 `update_stagnation=False` 没生效。
-
----
-
-## 历史失败案例
-
-### 2026-04-04: ops.py logs 一直 hang
-
-**症状**：`python scripts/ops.py logs --task-id ...` 跑了 30 分钟没输出，task 早已 STOPPED。
-
-**根因**：
-1. Stream name 写错：`ecs/runner/<id>` → 实际是 `runner/runner/<id>`，导致一直触发 `ResourceNotFoundException`
-2. `while True` 循环里只打印 "waiting" 但不检查 task 是否已经 STOPPED
-3. Claude 用 `TaskOutput(block=true, timeout=300000)` 等待，但 Bash 命令根本没退出
-
-**修复**：
-- `ops.py cmd_logs`：stream name 改为 `runner/runner/{task_id}`，加 2 分钟超时，加 task STOPPED 检测
-- 新增 `scripts/smoke-test.sh`：完整生命周期管理，task STOPPED 即退出
-- 新增 `scripts/logs.sh`：事后查日志，不会 hang
-
-**教训**：不要用 `while True + sleep` 等待外部 API，总要有超时和 early exit 条件。
+| Log Group | `/ecs/jingu-swebench` |
+| Log Stream | `runner/runner/<task-id>` |
+| Region | `us-west-2` |
+| EC2 type | `c5.9xlarge`（36 vCPU，72 GB RAM）|
+| ASG | `jingu-swebench-ecs-asg` |

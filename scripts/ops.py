@@ -189,7 +189,17 @@ def cmd_build(args) -> None:
 
 # ── run ────────────────────────────────────────────────────────────────────────
 
+BATCH_GUARD_THRESHOLD = 3  # more than this many instances requires --confirmed
+
 def cmd_run(args) -> None:
+    # Batch guard: more than BATCH_GUARD_THRESHOLD instances requires explicit --confirmed flag.
+    # This prevents accidental large batch launches without user approval.
+    if len(args.instance_ids) > BATCH_GUARD_THRESHOLD and not args.confirmed:
+        print(f"[ops] ERROR: {len(args.instance_ids)} instances > {BATCH_GUARD_THRESHOLD} (batch guard)")
+        print(f"[ops] Rule: smoke test 1 instance first, get user approval, then add --confirmed to launch batch.")
+        print(f"[ops] To proceed after user approval: add --confirmed to your command.")
+        sys.exit(1)
+
     ecs = boto3.client("ecs", region_name=REGION)
 
     instance_ids_str = " ".join(args.instance_ids)
@@ -575,6 +585,13 @@ def cmd_smoke(args) -> None:
     batch_name = args.batch_name
     instance_ids = args.instance_ids
 
+    # Batch guard: more than BATCH_GUARD_THRESHOLD instances requires explicit --confirmed flag.
+    if len(instance_ids) > BATCH_GUARD_THRESHOLD and not args.confirmed:
+        print(f"[smoke] ERROR: {len(instance_ids)} instances > {BATCH_GUARD_THRESHOLD} (batch guard)", flush=True)
+        print(f"[smoke] Rule: smoke test 1 instance first, get user approval, then add --confirmed to launch batch.", flush=True)
+        print(f"[smoke] To proceed after user approval: add --confirmed to your command.", flush=True)
+        sys.exit(1)
+
     # Check for already-running tasks — warn user before launching duplicate
     running = _get_running_tasks()
     if running:
@@ -712,6 +729,8 @@ def main():
     p_run.add_argument("--workers", type=int, default=3)
     p_run.add_argument("--dataset", default="Verified", choices=["Lite", "Verified"])
     p_run.add_argument("--s3-upload", action="store_true", default=True)
+    p_run.add_argument("--confirmed", action="store_true",
+                       help=f"Required when launching more than {BATCH_GUARD_THRESHOLD} instances (batch guard)")
 
     # smoke — launch + live tail, OR attach to existing task
     p_smoke = sub.add_parser(
@@ -732,6 +751,8 @@ def main():
                          help="Regex filter (overrides default). E.g. 'cp-step|control-plane|pee'")
     p_smoke.add_argument("--all", "-a", action="store_true",
                          help="Show all lines including noise (no filter)")
+    p_smoke.add_argument("--confirmed", action="store_true",
+                         help=f"Required when launching more than {BATCH_GUARD_THRESHOLD} instances (batch guard)")
 
     # list-tasks — show currently running/pending ECS tasks
     sub.add_parser("list-tasks", help="List currently RUNNING/PENDING ECS tasks")
