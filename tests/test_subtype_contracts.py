@@ -18,6 +18,7 @@ import pytest
 from subtype_contracts import (
     SUBTYPE_CONTRACTS,
     get_required_principals,
+    get_expected_principals,
     get_repair_target,
     build_phase_principal_guidance,
 )
@@ -213,6 +214,96 @@ def test_phase_prompt_judge_contains_invariant_preservation():
     """PHASE_GUIDANCE['JUDGE'] contains 'invariant_preservation'."""
     guidance = PHASE_GUIDANCE.get("JUDGE", "")
     assert "invariant_preservation" in guidance
+
+
+# ── Tests: expected_principals (soft / quality signal) ───────────────────────
+
+def test_analyze_contract_has_expected_principals():
+    """analysis.root_cause expected_principals includes evidence_linkage (soft signal)."""
+    contract = SUBTYPE_CONTRACTS["analysis.root_cause"]
+    assert "expected_principals" in contract
+    assert "evidence_linkage" in contract["expected_principals"]
+
+
+def test_execute_contract_has_expected_principals():
+    """execution.code_patch expected_principals includes action_grounding (soft signal)."""
+    contract = SUBTYPE_CONTRACTS["execution.code_patch"]
+    assert "expected_principals" in contract
+    assert "action_grounding" in contract["expected_principals"]
+
+
+def test_get_expected_principals_analyze():
+    """ANALYZE expected principals includes evidence_linkage."""
+    expected = get_expected_principals("ANALYZE")
+    assert "evidence_linkage" in expected, f"expected evidence_linkage in {expected}"
+
+
+def test_get_expected_principals_execute():
+    """EXECUTE expected principals includes action_grounding."""
+    expected = get_expected_principals("EXECUTE")
+    assert "action_grounding" in expected
+
+
+def test_get_expected_principals_observe():
+    """OBSERVE has no expected principals (no contract)."""
+    expected = get_expected_principals("OBSERVE")
+    assert expected == []
+
+
+def test_get_expected_principals_unknown():
+    """Unknown phase returns [] (no crash)."""
+    expected = get_expected_principals("NONEXISTENT")
+    assert expected == []
+
+
+def test_required_and_expected_are_disjoint_analyze():
+    """required_principals and expected_principals must not overlap for ANALYZE."""
+    required = set(get_required_principals("ANALYZE"))
+    expected = set(get_expected_principals("ANALYZE"))
+    overlap = required & expected
+    assert not overlap, f"required and expected overlap: {overlap}"
+
+
+def test_required_and_expected_are_disjoint_execute():
+    """required_principals and expected_principals must not overlap for EXECUTE."""
+    required = set(get_required_principals("EXECUTE"))
+    expected = set(get_expected_principals("EXECUTE"))
+    overlap = required & expected
+    assert not overlap, f"required and expected overlap: {overlap}"
+
+
+# ── Tests: guidance MUST/SHOULD structure ────────────────────────────────────
+
+def test_guidance_analyze_has_must():
+    """ANALYZE guidance contains 'MUST' for required principal."""
+    guidance = build_phase_principal_guidance("ANALYZE")
+    assert "MUST" in guidance, f"guidance should contain MUST: {guidance!r}"
+    assert "causal_grounding" in guidance
+
+
+def test_guidance_analyze_has_should():
+    """ANALYZE guidance contains 'SHOULD' for expected principals."""
+    guidance = build_phase_principal_guidance("ANALYZE")
+    assert "SHOULD" in guidance, f"guidance should contain SHOULD: {guidance!r}"
+    assert "evidence_linkage" in guidance
+
+
+def test_guidance_execute_has_must_and_should():
+    """EXECUTE guidance contains MUST for minimal_change and SHOULD for action_grounding."""
+    guidance = build_phase_principal_guidance("EXECUTE")
+    assert "MUST" in guidance
+    assert "minimal_change" in guidance
+    assert "SHOULD" in guidance
+    assert "action_grounding" in guidance
+
+
+def test_guidance_judge_has_must_no_should():
+    """JUDGE guidance has MUST (no expected principals defined)."""
+    guidance = build_phase_principal_guidance("JUDGE")
+    assert "MUST" in guidance
+    assert "invariant_preservation" in guidance
+    # judge.verification has empty expected_principals, so no SHOULD line
+    assert "SHOULD" not in guidance
 
 
 # ── Tests: cross-system consistency ──────────────────────────────────────────
