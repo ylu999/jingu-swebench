@@ -697,15 +697,10 @@ def _install_step_monitor(
 
         return result
 
-    ProgressTrackingAgent.step = _monitored_step
-    # p186: register state so run_with_jingu can read early_stop_verdict after run_agent returns
-    _STEP_MONITOR_STATES[(instance_id, attempt)] = state
-    # P9 fix: store orig_step so run_agent can restore after attempt completes.
-    # Without this, attempt=2 installs monitored_step_2 with _orig_step=monitored_step_1,
-    # and attempt=2's steps double-fire through the stale attempt=1 state, printing
-    # ghost cp-step lines with attempt=1 labels after [jingu] FAILED.
-    state._orig_step = _orig_step
-    return state
+    # Return (state, ScopedPatch) — caller uses ScopedPatch as a context manager.
+    # ScopedPatch.__exit__ restores ProgressTrackingAgent.step unconditionally,
+    # which eliminates the P9 class of bug (monitor chain stacking across attempts).
+    return state, ScopedPatch(ProgressTrackingAgent, "step", _monitored_step)
 
 
 def _extract_current_patch_from_messages(messages: list[dict]) -> str:
@@ -1578,9 +1573,40 @@ class Timer:
 
 _timing_root: Timer | None = None
 _instance_timers: dict[str, Timer] = {}  # iid -> Timer
-# p186: registry mapping (instance_id, attempt) → StepMonitorState.
-# Allows run_with_jingu to read early_stop_verdict after run_agent() returns.
-_STEP_MONITOR_STATES: dict[tuple, "StepMonitorState"] = {}
+
+
+class ScopedPatch:
+    """
+    Scoped monkey patch — replaces an attribute on an object for the duration of a
+    `with` block, then restores the original value unconditionally on exit.
+
+    Stacks safely: multiple ScopedPatch instances on the same obj/attr will each
+    save and restore the value they saw on entry, so nesting works correctly and
+    no "chain stacking" (P9 class bug) is possible.
+
+    Usage:
+        with ScopedPatch(ProgressTrackingAgent, "step", monitored_step):
+            run_agent(...)
+        # ProgressTrackingAgent.step is now the original value again.
+    """
+
+    def __init__(self, obj, attr: str, new_value):
+        self._obj = obj
+        self._attr = attr
+        self._new_value = new_value
+        self._orig = None          # set in __enter__
+        self._entered = False
+
+    def __enter__(self):
+        self._orig = getattr(self._obj, self._attr)
+        setattr(self._obj, self._attr, self._new_value)
+        self._entered = True
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        if self._entered:
+            setattr(self._obj, self._attr, self._orig)
+        return False   # do not suppress exceptions
 
 # ── Model Usage Tracker ───────────────────────────────────────────────────────
 
@@ -2010,13 +2036,15 @@ def run_agent(
     # Install step monitor: logs steps + triggers inner-loop verify on patch writes
     # B2-CP: cp_state_holder (from run_with_jingu) passed through so step signals
     # update the cross-attempt cp_state directly.
-    _monitor = _install_step_monitor(instance_id, attempt, instance, cp_state_holder=cp_state_holder, mode=mode)
+    # _install_step_monitor now returns (state, ScopedPatch) — the ScopedPatch is used
+    # as a context manager below to guarantee ProgressTrackingAgent.step is restored.
+    _monitor, _step_patch = _install_step_monitor(instance_id, attempt, instance, cp_state_holder=cp_state_holder, mode=mode)
 
     # Hook DefaultAgent.run() to:
     # 1. Inject container_id into _monitor as soon as container is started
     # 2. Run a final controlled_verify BEFORE env cleanup (end-of-attempt signal)
     from minisweagent.agents.default import DefaultAgent as _DA
-    _orig_run = _DA.run
+    _orig_run = _DA.run   # captured here; ScopedPatch restores it on __exit__
 
     def _verifying_run(self_agent, *args, **kwargs):
         # Inject container_id so step monitor can start verifying mid-run
@@ -2125,23 +2153,16 @@ def run_agent(
         _monitor.record_verify(-1, cv_result)
         return result
 
-    _DA.run = _verifying_run
-
     t_llm = Timer("LLM agent loop (Bedrock)", parent=t_agent)
-    try:
-        process_instance(instance, attempt_dir, config, progress)
-    except Exception as e:
-        print(f"    [agent] ERROR: {e}")
-        traceback.print_exc()
-    finally:
-        _DA.run = _orig_run  # always restore
-        # P9 fix: restore ProgressTrackingAgent.step to its pre-install state so
-        # the next attempt installs a fresh monitor on top of the real original step,
-        # not on top of the previous attempt's monitor. Without this, attempt N's
-        # monitored_step becomes attempt N+1's _orig_step, causing every step in
-        # attempt N+1 to double-fire through the stale attempt N StepMonitorState.
-        from minisweagent.run.benchmarks.swebench import ProgressTrackingAgent as _PTA
-        _PTA.step = _monitor._orig_step
+    # Both patches are scoped: ScopedPatch.__exit__ restores unconditionally on any exit path.
+    # _step_patch covers ProgressTrackingAgent.step (P9 fix — no monitor chain stacking).
+    # _run_patch covers DefaultAgent.run (equivalent to the old _DA.run = _orig_run restore).
+    with _step_patch, ScopedPatch(_DA, "run", _verifying_run):
+        try:
+            process_instance(instance, attempt_dir, config, progress)
+        except Exception as e:
+            print(f"    [agent] ERROR: {e}")
+            traceback.print_exc()
     t_llm.stop()
 
     # Parse traj for usage + submission
@@ -2296,7 +2317,7 @@ def run_agent(
     if sub_from_traj_diff:
         return sub_from_traj_diff, exit_status, jingu_body
 
-    return None, exit_status, jingu_body
+    return None, exit_status, jingu_body, _monitor
 
 # ── Main loop ─────────────────────────────────────────────────────────────────
 
@@ -2357,23 +2378,18 @@ def run_with_jingu(instance_id: str, output_dir: Path, max_attempts: int = 3,
                 "Check build_execution_feedback() and ensure tests_ran signal is captured."
             )
 
-        patch, agent_exit, jingu_body = run_agent(instance, output_dir, attempt,
-                                                  previous_failure=last_failure, parent_timer=t_inst,
-                                                  mode=mode, cp_state_holder=cp_state_holder)
+        patch, agent_exit, jingu_body, _attempt_monitor = run_agent(
+            instance, output_dir, attempt,
+            previous_failure=last_failure, parent_timer=t_inst,
+            mode=mode, cp_state_holder=cp_state_holder)
 
         # p186: check early_stop_verdict set by _monitored_step during the attempt.
-        # VerdictStop(no_signal) replaces the steps_since_last_signal >= threshold path:
-        #   decide_next() fires no_signal when no_progress_steps >= NO_PROGRESS_THRESHOLD.
+        # run_agent now returns _attempt_monitor directly — no global registry needed.
+        # VerdictStop(no_signal) replaces the steps_since_last_signal >= threshold path.
         # VerdictStop(task_success) fires when task_success signal received.
         # Both cases break the attempt loop immediately — no gate, no retry needed.
-        _monitor_ref = None
-        # _install_step_monitor returns state; we need to reach it.
-        # The state is captured in the _monitored_step closure inside run_agent.
-        # We surface it via a module-level dict keyed by (instance_id, attempt).
-        _early_stop_key = (instance_id, attempt)
-        _early_stop_state = _STEP_MONITOR_STATES.get(_early_stop_key)
-        if _early_stop_state is not None and _early_stop_state.early_stop_verdict is not None:
-            _esv = _early_stop_state.early_stop_verdict
+        if _attempt_monitor is not None and _attempt_monitor.early_stop_verdict is not None:
+            _esv = _attempt_monitor.early_stop_verdict
             print(
                 f"  [cp] early_stop instance={instance_id} attempt={attempt}"
                 f" reason={_esv.reason} — verdict-driven attempt termination",
