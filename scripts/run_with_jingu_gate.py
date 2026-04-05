@@ -614,6 +614,19 @@ def _step_cp_update_and_verdict(
                         flush=True,
                     )
                     if isinstance(_pv_verdict, VerdictRedirect):
+                        # Update cp_state phase to redirect target so subsequent
+                        # decide_next() and evaluate_admission() use the correct phase.
+                        import dataclasses as _dc_ret
+                        if cp_state_holder is not None:
+                            cp_state_holder[0] = _dc_ret.replace(
+                                cp_state_holder[0], phase=_pv_verdict.to
+                            )
+                            _cp_s = cp_state_holder[0]
+                        else:
+                            state.cp_state = _dc_ret.replace(
+                                state.cp_state, phase=_pv_verdict.to
+                            )
+                            _cp_s = state.cp_state
                         agent_self.messages.append({
                             "role": "user",
                             "content": (
