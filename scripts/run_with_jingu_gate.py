@@ -1080,14 +1080,22 @@ def run_controlled_verify(
                 "output_tail": "", "error": f"docker cp failed: {cp_result.stderr[:200]}",
             }
 
-        # Step 2: reset to clean state before applying patch.
-        # Agent may have directly modified files in the container via bash tool
-        # (agentic mode allows this). git apply will fail with exit_code=128 if
-        # the same files are already modified. git stash drops those changes so
-        # we can apply the patch cleanly from the original base_commit state.
+        # Step 2: reset to clean base_commit state before applying patch.
+        # The patch is "git diff {base_commit}" — all changes since base.
+        # To apply it cleanly we need to be at exactly base_commit.
+        # Strategy: stash everything (including untracked), hard reset to
+        # base_commit, apply patch, run tests, then restore original state.
+        # Note: reset affects the container's working tree while agent is running.
+        # The stash pop at the end restores agent's files after verify completes.
+        _base_c = instance.get("base_commit", "HEAD")
         _sp.run(
             ["docker", "exec", "-w", "/testbed", container_id,
              "bash", "-c", "git stash --include-untracked -q 2>/dev/null || true"],
+            capture_output=True, text=True, timeout=15,
+        )
+        _sp.run(
+            ["docker", "exec", "-w", "/testbed", container_id,
+             "bash", "-c", f"git reset --hard {_base_c} -q 2>/dev/null || true"],
             capture_output=True, text=True, timeout=15,
         )
 
@@ -1098,6 +1106,12 @@ def run_controlled_verify(
             capture_output=True, text=True, timeout=30,
         )
         if apply_result.returncode != 0:
+            # Restore agent's working state before returning error
+            _sp.run(
+                ["docker", "exec", "-w", "/testbed", container_id,
+                 "bash", "-c", f"git reset --hard {_base_c} -q 2>/dev/null; git stash pop -q 2>/dev/null || true"],
+                capture_output=True, text=True, timeout=15,
+            )
             return {
                 "verification_kind": "controlled_error",
                 "tests_passed": 0, "tests_failed": len(fail_to_pass),
@@ -1121,10 +1135,10 @@ def run_controlled_verify(
         passed, failed = _parse_test_output_counts(output)
         elapsed_ms = round((time.monotonic() - t0) * 1000, 1)
 
-        # Rollback patch so container is clean for next attempt (if any)
+        # Rollback: reset to base_commit then restore agent's working state via stash pop
         _sp.run(
             ["docker", "exec", "-w", "/testbed", container_id,
-             "bash", "-c", "git apply -R /tmp/jingu_verify.patch 2>/dev/null || git checkout . 2>/dev/null"],
+             "bash", "-c", f"git reset --hard {_base_c} -q 2>/dev/null; git stash pop -q 2>/dev/null || true"],
             capture_output=True, text=True, timeout=15,
         )
 
