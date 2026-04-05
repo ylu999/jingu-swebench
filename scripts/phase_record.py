@@ -25,6 +25,7 @@ class PhaseRecord:
     principals: list[str]               # principal atoms declared for this phase
     claims: list[str]                   # explicit claims the agent made (initial version: [])
     evidence_refs: list[str]            # file:line or test name references found in agent output
+    from_steps: list[int]               # step indices this record was derived from (for gate provenance)
     content: str                        # raw agent output for this phase (truncated to 500 chars)
 
     def as_dict(self) -> dict:
@@ -35,5 +36,6 @@ class PhaseRecord:
             "principals": self.principals,
             "claims": self.claims,
             "evidence_refs": self.evidence_refs,
+            "from_steps": self.from_steps,
             "content_preview": self.content[:100],
         }

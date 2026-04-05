@@ -141,7 +141,7 @@ def _extract_evidence_refs(agent_message: str) -> list[str]:
     return result
 
 
-def extract_phase_record(agent_message: str, phase: str):
+def extract_phase_record(agent_message: str, phase: str, from_steps: list[int] | None = None):
     """Extract a PhaseRecord from the last agent message for the given phase.
 
     Parsing strategy (structure-first, surface fallback):
@@ -149,6 +149,7 @@ def extract_phase_record(agent_message: str, phase: str):
     - principals:    extracted from PRINCIPALS: line in agent message
     - claims:        [] in initial version (p191 will utilize PhaseRecord for semantic check)
     - evidence_refs: file:line patterns found in agent message
+    - from_steps:    step indices this record derives from (for gate provenance); default []
     - content:       agent_message[:500] (truncated raw content)
 
     Returns a PhaseRecord. Never raises — caller wraps in try/except.
@@ -166,5 +167,6 @@ def extract_phase_record(agent_message: str, phase: str):
         principals=principals,
         claims=[],           # p191 will populate claims from structured analysis
         evidence_refs=evidence_refs,
+        from_steps=from_steps if from_steps is not None else [],
         content=(agent_message or "")[:500],
     )
