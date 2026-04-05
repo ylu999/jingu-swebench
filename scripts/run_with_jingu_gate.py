@@ -411,13 +411,15 @@ def _install_step_monitor(
                 # same after the first write → verify never re-triggered.
                 # We still fetch git diff to pass as patch_text to run_controlled_verify.
                 import subprocess as _sp_iv
-                # P4 fix: use "git diff HEAD" to capture both staged and unstaged changes.
-                # "git diff" alone only shows unstaged changes — if the agent already ran
-                # "git add", the staged diff is invisible and patch_text is empty →
-                # run_controlled_verify immediately returns controlled_error(elapsed=0ms).
+                # P5 fix: use "git diff {base_commit}" to capture ALL changes since the
+                # original base commit — staged, unstaged, and committed.
+                # "git diff" misses staged changes; "git diff HEAD" misses new untracked
+                # files and changes committed mid-run. base_commit is the ground truth
+                # starting point for SWE-bench evaluation.
+                _base_commit = state.instance.get("base_commit", "HEAD")
                 _git_diff_result = _sp_iv.run(
                     ["docker", "exec", "-w", "/testbed", cid,
-                     "git", "diff", "HEAD"],
+                     "git", "diff", _base_commit],
                     capture_output=True, text=True, timeout=10,
                 )
                 current_patch = _git_diff_result.stdout.strip() if _git_diff_result.returncode == 0 else ""
@@ -1035,6 +1037,14 @@ def run_controlled_verify(
     t0 = time.monotonic()
 
     fail_to_pass = instance.get("FAIL_TO_PASS", [])
+    # SWE-bench dataset stores FAIL_TO_PASS as a JSON-encoded string, not a list.
+    # Parse it here so len() and iteration work correctly.
+    if isinstance(fail_to_pass, str):
+        import json as _json
+        try:
+            fail_to_pass = _json.loads(fail_to_pass)
+        except Exception:
+            fail_to_pass = []
     if not fail_to_pass:
         return {
             "verification_kind": "controlled_no_tests",
