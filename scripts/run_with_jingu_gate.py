@@ -46,7 +46,7 @@ from preflight import run_preflight
 from control.reasoning_state import (
     initial_reasoning_state, update_reasoning_state, decide_next,
     normalize_signals, ReasoningState,
-    VerdictStop, VerdictRedirect,
+    VerdictStop, VerdictRedirect, VerdictAdvance, VerdictContinue,
 )
 from control.swe_signal_adapter import extract_verify_signals, extract_step_signals, extract_weak_progress
 
@@ -104,6 +104,10 @@ def print_activation_proof(identity: dict) -> None:
     print(f"[init] declaration_protocol=enabled")
     print(f"[init] strategy_log_path={STRATEGY_LOG_PATH or 'disabled'}")
     print(f"[init] strategy_table_path={STRATEGY_TABLE_PATH or 'disabled'}")
+    # p186: verdict-driven attempt control — activation proof (RT4)
+    from control.reasoning_state import NO_PROGRESS_THRESHOLD as _NPT
+    print(f"[init] verdict_routing_enabled=True")
+    print(f"[init] no_progress_threshold={_NPT}")
 
 # ── Traj watcher: real-time per-step log ───────────────────────────────────────
 
@@ -136,6 +140,13 @@ class StepMonitorState:
         # B5: state needed to detect semantic boundary events
         self._prev_verify_history_len: int = 0     # inner-verify count before current step
         self._prev_patch_non_empty: bool = False   # patch state before current step
+        # p186: verdict-driven attempt control
+        # early_stop_verdict: set by _monitored_step when decide_next returns VerdictStop;
+        #   run_with_jingu checks this after run_agent() returns to break the attempt loop.
+        self.early_stop_verdict = None             # VerdictStop if set, else None
+        # pending_redirect_hint: set by _monitored_step when decide_next returns VerdictRedirect;
+        #   injected as a user message at the start of the next agent step.
+        self.pending_redirect_hint: str = ""       # hint to inject into next step
 
     def update_cp_with_step_signals(
         self,
@@ -403,9 +414,50 @@ def _install_step_monitor(
                 flush=True,
             )
 
+        # ── p186: verdict-driven attempt control ─────────────────────────────
+        # Call decide_next() on every step so control plane can act in real time.
+        # VerdictStop  → set early_stop_verdict; run_with_jingu breaks attempt loop
+        # VerdictRedirect → set pending_redirect_hint; injected as user message next step
+        # VerdictAdvance  → phase transition telemetry only (observable, no other action)
+        # VerdictContinue → no-op
+        _step_verdict = decide_next(_cp_s)
+        _verdict_to_log = f"step={_cp_s.step_index} verdict={_step_verdict.type}"
+        if hasattr(_step_verdict, "to") and _step_verdict.to is not None:
+            _verdict_to_log += f" to={_step_verdict.to}"
+        if hasattr(_step_verdict, "reason") and _step_verdict.reason:
+            _verdict_to_log += f" reason={_step_verdict.reason}"
+        print(f"    [cp] {_verdict_to_log}", flush=True)
+
+        if isinstance(_step_verdict, VerdictStop):
+            # Early stop: set flag — run_with_jingu will break the attempt loop
+            state.early_stop_verdict = _step_verdict
+        elif isinstance(_step_verdict, VerdictRedirect):
+            # Mid-attempt redirect: inject correction hint into next step's context
+            state.pending_redirect_hint = (
+                f"[REDIRECT:{_step_verdict.to}] {_step_verdict.reason}"
+            )
+            # Also inject immediately as a user message so agent sees it on next step
+            self.messages.append({
+                "role": "user",
+                "content": (
+                    f"[Control-plane redirect: {_step_verdict.reason}] "
+                    f"Re-examine your environment assumptions. "
+                    f"Transition to phase {_step_verdict.to} before patching."
+                ),
+            })
+        elif isinstance(_step_verdict, VerdictAdvance):
+            # Phase transition telemetry — log only, no behavioral change at step level
+            print(
+                f"    [cp] phase_advance from={_cp_s.phase} to={_step_verdict.to}",
+                flush=True,
+            )
+        # VerdictContinue: no action needed
+
         return result
 
     ProgressTrackingAgent.step = _monitored_step
+    # p186: register state so run_with_jingu can read early_stop_verdict after run_agent returns
+    _STEP_MONITOR_STATES[(instance_id, attempt)] = state
     return state
 
 
@@ -1212,6 +1264,9 @@ class Timer:
 
 _timing_root: Timer | None = None
 _instance_timers: dict[str, Timer] = {}  # iid -> Timer
+# p186: registry mapping (instance_id, attempt) → StepMonitorState.
+# Allows run_with_jingu to read early_stop_verdict after run_agent() returns.
+_STEP_MONITOR_STATES: dict[tuple, "StepMonitorState"] = {}
 
 # ── Model Usage Tracker ───────────────────────────────────────────────────────
 
@@ -1839,6 +1894,35 @@ def run_with_jingu(instance_id: str, output_dir: Path, max_attempts: int = 3,
         patch, agent_exit, jingu_body = run_agent(instance, output_dir, attempt,
                                                   previous_failure=last_failure, parent_timer=t_inst,
                                                   mode=mode, cp_state_holder=cp_state_holder)
+
+        # p186: check early_stop_verdict set by _monitored_step during the attempt.
+        # VerdictStop(no_signal) replaces the steps_since_last_signal >= threshold path:
+        #   decide_next() fires no_signal when no_progress_steps >= NO_PROGRESS_THRESHOLD.
+        # VerdictStop(task_success) fires when task_success signal received.
+        # Both cases break the attempt loop immediately — no gate, no retry needed.
+        _monitor_ref = None
+        # _install_step_monitor returns state; we need to reach it.
+        # The state is captured in the _monitored_step closure inside run_agent.
+        # We surface it via a module-level dict keyed by (instance_id, attempt).
+        _early_stop_key = (instance_id, attempt)
+        _early_stop_state = _STEP_MONITOR_STATES.get(_early_stop_key)
+        if _early_stop_state is not None and _early_stop_state.early_stop_verdict is not None:
+            _esv = _early_stop_state.early_stop_verdict
+            print(
+                f"  [cp] early_stop instance={instance_id} attempt={attempt}"
+                f" reason={_esv.reason} — verdict-driven attempt termination",
+                flush=True,
+            )
+            if _esv.reason == "no_signal":
+                # Equivalent to steps_since_last_signal >= NO_SIGNAL_THRESHOLD path.
+                # Preserve last_failure for NBR compliance if more attempts remain.
+                last_failure = (
+                    "Previous attempt stopped early: no progress signal detected "
+                    "(control-plane verdict=STOP no_signal). "
+                    "Change your approach entirely — avoid repeated reads without writing code."
+                )
+            # For task_success: controlled_verify confirmed pass, no retry needed.
+            break
 
         # p179: record test counts for this attempt (used later for tests_delta)
         _test_counts_by_attempt[attempt] = extract_test_counts(jingu_body)
