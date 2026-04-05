@@ -87,3 +87,84 @@ PRINCIPALS: evidence_based minimal_change causality
     # No declaration
     assert extract_declaration("some output without declaration") == {}
     print("PASS no-declaration returns empty dict")
+
+
+# ── Per-phase record extraction ────────────────────────────────────────────────
+
+import re as _re
+
+_EVIDENCE_REF_RE = _re.compile(
+    r"(?:[a-zA-Z0-9_\-./]+\.py(?::[\d]+)?)",  # file.py or file.py:123
+)
+
+_PHASE_SUBTYPE_MAP: dict[str, str] = {
+    "OBSERVE":  "observation",
+    "ANALYZE":  "root_cause_analysis",
+    "EXECUTE":  "patch_writing",
+    "JUDGE":    "verification",
+}
+
+
+def _extract_principals_from_message(agent_message: str) -> list[str]:
+    """Extract PRINCIPALS: declaration from anywhere in agent message.
+
+    Searches the full message (not just tail) so phase-level declarations
+    are captured even when they appear early in the agent's reasoning.
+    Returns [] if no PRINCIPALS line found.
+    """
+    if not agent_message:
+        return []
+    m = _PRINCIPALS_RE.search(agent_message)
+    if not m:
+        return []
+    raw = m.group(1).strip()
+    return [p.strip().lower() for p in _re.split(r"[,\s]+", raw) if p.strip()]
+
+
+def _extract_evidence_refs(agent_message: str) -> list[str]:
+    """Extract file:line reference strings from agent message.
+
+    Looks for patterns like 'django/db/models.py:45' or 'tests/test_foo.py'.
+    Returns up to 10 unique matches to keep the record compact.
+    """
+    if not agent_message:
+        return []
+    matches = _EVIDENCE_REF_RE.findall(agent_message)
+    seen: set[str] = set()
+    result: list[str] = []
+    for m in matches:
+        if m not in seen:
+            seen.add(m)
+            result.append(m)
+        if len(result) >= 10:
+            break
+    return result
+
+
+def extract_phase_record(agent_message: str, phase: str):
+    """Extract a PhaseRecord from the last agent message for the given phase.
+
+    Parsing strategy (structure-first, surface fallback):
+    - subtype:       mapped from phase name (OBSERVE -> observation, etc.)
+    - principals:    extracted from PRINCIPALS: line in agent message
+    - claims:        [] in initial version (p191 will utilize PhaseRecord for semantic check)
+    - evidence_refs: file:line patterns found in agent message
+    - content:       agent_message[:500] (truncated raw content)
+
+    Returns a PhaseRecord. Never raises — caller wraps in try/except.
+    """
+    from phase_record import PhaseRecord
+
+    phase_upper = (phase or "").upper()
+    subtype = _PHASE_SUBTYPE_MAP.get(phase_upper, "unknown")
+    principals = _extract_principals_from_message(agent_message)
+    evidence_refs = _extract_evidence_refs(agent_message)
+
+    return PhaseRecord(
+        phase=phase_upper or phase,
+        subtype=subtype,
+        principals=principals,
+        claims=[],           # p191 will populate claims from structured analysis
+        evidence_refs=evidence_refs,
+        content=(agent_message or "")[:500],
+    )

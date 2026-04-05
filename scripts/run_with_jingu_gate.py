@@ -149,6 +149,9 @@ class StepMonitorState:
         # pending_redirect_hint: set by _monitored_step when decide_next returns VerdictRedirect;
         #   injected as a user message at the start of the next agent step.
         self.pending_redirect_hint: str = ""       # hint to inject into next step
+        # p190: per-phase records — one PhaseRecord appended on each VerdictAdvance.
+        # Written into jingu_body["phase_records"] at attempt end.
+        self.phase_records: list = []              # list[PhaseRecord]
 
     def update_cp_with_step_signals(
         self,
@@ -453,6 +456,20 @@ def _install_step_monitor(
                 f"    [cp] phase_advance from={_cp_s.phase} to={_step_verdict.to}",
                 flush=True,
             )
+            # p190: collect PhaseRecord for the phase that just completed.
+            # _latest_assistant_text is already captured above (line ~294).
+            # Wrapped in try/except: collection failure must not crash main flow.
+            try:
+                from declaration_extractor import extract_phase_record as _extract_pr
+                _pr = _extract_pr(_latest_assistant_text, str(_cp_s.phase))
+                state.phase_records.append(_pr)
+                print(
+                    f"    [phase_record] phase={_pr.phase} subtype={_pr.subtype}"
+                    f" principals={_pr.principals}",
+                    flush=True,
+                )
+            except Exception as _pr_exc:
+                print(f"    [phase_record] error (non-fatal): {_pr_exc}", flush=True)
         # VerdictContinue: no action needed
 
         # ── p189: phase-aware prompt injection ───────────────────────────────
@@ -1841,6 +1858,8 @@ def run_agent(
                 jingu_body["test_results"]["controlled_exit_code"] = _final_cv["exit_code"]
             # Store full verify_history for observability
             jingu_body["verify_history"] = _monitor.verify_history
+            # p190: per-phase records — one entry per VerdictAdvance during this attempt
+            jingu_body["phase_records"] = [r.as_dict() for r in _monitor.phase_records]
             # Write jingu_body back into traj.json so gate_runner.js can read it
             traj["jingu_body"] = jingu_body
             traj_path.write_text(json.dumps(traj, indent=2))
