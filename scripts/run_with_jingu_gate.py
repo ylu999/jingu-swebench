@@ -326,6 +326,323 @@ class StepMonitorState:
 # ║  They depend on history. They do NOT belong in Jingu governance.            ║
 # ╚══════════════════════════════════════════════════════════════════════════════╝
 
+def _step_observe(agent_self, *, step_n: int, mode: str) -> tuple[str, str, bool]:
+    """
+    Section 1: pure observation — extract text, run cognition parse, detect env mutation.
+
+    Returns (latest_assistant_text, snippet, env_error_detected).
+    Side-effects: appends cognition violation feedback as user message (non-fatal).
+    """
+    latest_assistant_text = ""
+    snippet = ""
+    for msg in reversed(agent_self.messages):
+        if msg.get("role") == "assistant":
+            content = msg.get("content", "")
+            if isinstance(content, list):
+                for c in content:
+                    if isinstance(c, dict) and c.get("type") == "text":
+                        content = c["text"]
+                        break
+            if isinstance(content, str):
+                latest_assistant_text = content
+                snippet = content.replace("\n", " ")[:80]
+            break
+    print(f"    [step {step_n}] ${agent_self.cost:.2f}  {snippet}", flush=True)
+
+    # Cognition record parse + violation feedback
+    if mode == "jingu" and latest_assistant_text:
+        try:
+            from cognition_schema import check_step_cognition, format_violation_feedback
+            _cog_record, _cog_violations = check_step_cognition(latest_assistant_text, step_n=step_n)
+            if _cog_record is not None:
+                _principal_str = " ".join(_cog_record.principals) if _cog_record.principals else "(none)"
+                print(
+                    f"    [cognition] step={step_n} phase={_cog_record.phase}"
+                    f" principals=[{_principal_str}]"
+                    f" evidence={len(_cog_record.evidence_refs)}"
+                    f" violations={len(_cog_violations)}",
+                    flush=True,
+                )
+                if _cog_violations:
+                    _feedback = format_violation_feedback(_cog_violations, _cog_record)
+                    print(f"    [cognition] VIOLATION — injecting feedback", flush=True)
+                    agent_self.messages.append({"role": "user", "content": _feedback})
+        except Exception as _cog_exc:
+            print(f"    [cognition] parse error (non-fatal): {_cog_exc}", flush=True)
+
+    # Env mutation detection
+    env_error_detected = False
+    for msg in reversed(agent_self.messages):
+        if msg.get("role") == "assistant":
+            has_mut, trigger = _msg_has_env_mutation(msg)
+            if has_mut:
+                env_error_detected = True
+                print(
+                    f"    [env-mutation] ENVIRONMENT_MUTATION_IN_AGENT_LOOP "
+                    f"step={step_n} trigger={trigger!r} — "
+                    f"agent is doing env work (pip/conda/setup.py). "
+                    f"This belongs to infrastructure, not agent reasoning.",
+                    flush=True,
+                )
+            break
+
+    return latest_assistant_text, snippet, env_error_detected
+
+
+def _step_verify_if_needed(
+    agent_self,
+    *,
+    state: "StepMonitorState",
+    verify_debounce_s: float,
+) -> bool:
+    """
+    Section 2: patch signal detection + conditional inner-verify dispatch.
+
+    Returns step_patch_non_empty (True if agent has a real, non-empty patch).
+    Side-effects: may launch a background threading.Thread for inner-verify.
+    """
+    import threading as _thr
+    import subprocess as _sp_iv
+
+    step_patch_non_empty = False
+    for msg in reversed(agent_self.messages):
+        if msg.get("role") == "assistant":
+            if not _msg_has_signal(msg):
+                break
+            step_patch_non_empty = True
+            cid = state.container_id
+            if not cid:
+                break
+            now = time.monotonic()
+            with state._lock:
+                too_soon = (now - state.last_verify_time) < verify_debounce_s
+                in_flight = state.verify_in_flight
+            if too_soon or in_flight:
+                break
+            _base_commit = state.instance.get("base_commit", "HEAD")
+            _git_diff_result = _sp_iv.run(
+                ["docker", "exec", "-w", "/testbed", cid, "git", "diff", _base_commit],
+                capture_output=True, text=True, timeout=10,
+            )
+            current_patch = (
+                _git_diff_result.stdout.strip()
+                if _git_diff_result.returncode == 0
+                else ""
+            )
+            if not current_patch:
+                step_patch_non_empty = False
+                break
+            with state._lock:
+                state.last_verified_patch = current_patch
+                state.last_verify_time = now
+                state.verify_in_flight = True
+
+            step_n = agent_self.n_calls
+            print(
+                f"    [inner-verify] triggering verify at step={step_n} "
+                f"(patch changed, container={cid[:12]}...)",
+                flush=True,
+            )
+
+            def _run_verify(patch=current_patch, container=cid, step=step_n):
+                try:
+                    cv_result = run_controlled_verify(
+                        patch, state.instance, container, timeout_s=45
+                    )
+                    state.record_verify(step, cv_result)
+                except Exception as exc:
+                    print(f"    [inner-verify] ERROR: {exc}", flush=True)
+                finally:
+                    with state._lock:
+                        state.verify_in_flight = False
+
+            _thr.Thread(target=_run_verify, daemon=True).start()
+            break
+
+    return step_patch_non_empty
+
+
+def _step_cp_update_and_verdict(
+    agent_self,
+    *,
+    state: "StepMonitorState",
+    cp_state_holder: "list | None",
+    env_error_detected: bool,
+    step_patch_non_empty: bool,
+    latest_assistant_text: str,
+) -> None:
+    """
+    Section 3: control-plane state update + verdict decision + verdict actions.
+
+    Side-effects:
+    - Updates cp_state / cp_state_holder[0] via update_cp_with_step_signals
+    - Sets state.early_stop_verdict + agent n_calls on VerdictStop
+    - Sets state.pending_redirect_hint on VerdictRedirect
+    - Advances cp_state phase + appends phase_records on VerdictAdvance
+    - Logs per-step cp telemetry
+    """
+    _pee, _pee_reason = state.update_cp_with_step_signals(
+        env_error_detected=env_error_detected,
+        patch_non_empty=step_patch_non_empty,
+        cp_state_holder=cp_state_holder,
+    )
+    _cp_s = cp_state_holder[0] if cp_state_holder is not None else state.cp_state
+    _step_signals_present = bool(env_error_detected or step_patch_non_empty)
+    _weak_progress = extract_weak_progress(
+        env_error_detected=env_error_detected,
+        patch_non_empty=step_patch_non_empty,
+        latest_tests_passed=state.latest_tests_passed(),
+    )
+    if _step_signals_present or _weak_progress:
+        _pee_str = f"True({_pee_reason})" if _pee else "False"
+        print(
+            f"    [cp-step] instance={state.instance_id} attempt={state.attempt}"
+            f" signals={[k for k,v in [('env',env_error_detected),('patch',step_patch_non_empty)] if v]}"
+            f" no_progress:{_cp_s.no_progress_steps} step:{_cp_s.step_index}"
+            f" env_noise:{_cp_s.env_noise} actionability:{_cp_s.actionability}"
+            f" weak_progress:{_weak_progress} pee:{_pee_str}",
+            flush=True,
+        )
+
+    _step_verdict = decide_next(_cp_s)
+    _verdict_to_log = f"step={_cp_s.step_index} verdict={_step_verdict.type}"
+    if hasattr(_step_verdict, "to") and _step_verdict.to is not None:
+        _verdict_to_log += f" to={_step_verdict.to}"
+    if hasattr(_step_verdict, "reason") and _step_verdict.reason:
+        _verdict_to_log += f" reason={_step_verdict.reason}"
+    print(f"    [cp] {_verdict_to_log}", flush=True)
+
+    if isinstance(_step_verdict, VerdictStop):
+        state.early_stop_verdict = _step_verdict
+        _sl = getattr(getattr(agent_self, "config", None), "step_limit", 0)
+        if _sl > 0:
+            agent_self.n_calls = _sl
+            print(
+                f"    [cp] VerdictStop enforcement: n_calls set to step_limit={_sl}"
+                f" — agent will stop after this step",
+                flush=True,
+            )
+
+    elif isinstance(_step_verdict, VerdictRedirect):
+        state.pending_redirect_hint = f"[REDIRECT:{_step_verdict.to}] {_step_verdict.reason}"
+        agent_self.messages.append({
+            "role": "user",
+            "content": (
+                f"[Control-plane redirect: {_step_verdict.reason}] "
+                f"Re-examine your environment assumptions. "
+                f"Transition to phase {_step_verdict.to} before patching."
+            ),
+        })
+
+    elif isinstance(_step_verdict, VerdictAdvance):
+        _old_phase = _cp_s.phase
+        if _step_verdict.to is not None:
+            import dataclasses as _dc_adv
+            if cp_state_holder is not None:
+                cp_state_holder[0] = _dc_adv.replace(cp_state_holder[0], phase=_step_verdict.to)
+                _cp_s = cp_state_holder[0]
+            else:
+                state.cp_state = _dc_adv.replace(state.cp_state, phase=_step_verdict.to)
+                _cp_s = state.cp_state
+        print(f"    [cp] phase_advance from={_old_phase} to={_step_verdict.to}", flush=True)
+
+        _pr = None
+        try:
+            from declaration_extractor import extract_phase_record as _extract_pr
+            _pr = _extract_pr(latest_assistant_text, str(_cp_s.phase))
+            state.phase_records.append(_pr)
+            print(
+                f"    [phase_record] phase={_pr.phase} subtype={_pr.subtype}"
+                f" principals={_pr.principals}",
+                flush=True,
+            )
+        except Exception as _pr_exc:
+            print(f"    [phase_record] error (non-fatal): {_pr_exc}", flush=True)
+
+        try:
+            if _pr is None:
+                raise RuntimeError("phase_record unavailable, skipping principal gate")
+            from principal_gate import (
+                check_principal_gate as _check_pg,
+                get_principal_feedback as _get_pg_feedback,
+            )
+            _pg_violation = _check_pg(_pr, str(_cp_s.phase))
+            if _pg_violation:
+                _pg_feedback = _get_pg_feedback(_pg_violation)
+                try:
+                    from subtype_contracts import get_repair_target as _get_repair_target
+                    _repair_phase = _get_repair_target(str(_cp_s.phase))
+                except Exception:
+                    _repair_phase = ""
+                _repair_suffix = f" Repair phase: {_repair_phase}." if _repair_phase else ""
+                state.pending_redirect_hint = (
+                    f"[PRINCIPAL_VIOLATION:{_pg_violation}] {_pg_feedback}{_repair_suffix}"
+                )
+                print(
+                    f"    [principal_gate] phase={_pr.phase} violation={_pg_violation}"
+                    f" repair_target={_repair_phase or 'none'}",
+                    flush=True,
+                )
+            else:
+                print(f"    [principal_gate] phase={_pr.phase} violation=none", flush=True)
+        except Exception as _pg_exc:
+            print(f"    [principal_gate] error={_pg_exc}", flush=True)
+
+        try:
+            if _pr is None:
+                raise RuntimeError("phase_record unavailable, skipping inference check")
+            from principal_gate import check_principal_inference as _check_pi
+            _inf_violation = _check_pi(_pr, str(_cp_s.phase))
+            if _inf_violation and "fake_principal" in _inf_violation:
+                try:
+                    from subtype_contracts import get_repair_target as _get_repair_target
+                    _inf_repair = _get_repair_target(str(_cp_s.phase))
+                except Exception:
+                    _inf_repair = ""
+                state.pending_redirect_hint = (
+                    f"[PRINCIPAL_MISMATCH:{_inf_violation}] "
+                    f"Your declared principals are not supported by your reasoning. "
+                    f"Strengthen your reasoning before declaring these principals. "
+                    f"Redirect to {_inf_repair or 'previous phase'} phase."
+                )
+            elif _inf_violation and "missing_required" in _inf_violation:
+                pass  # logged by principal_gate above; inference perspective is telemetry only
+        except Exception as _pi_exc:
+            print(f"    [principal_inference] check error={_pi_exc}", flush=True)
+
+        try:
+            if _pr is None:
+                raise RuntimeError("phase_record unavailable, skipping telemetry")
+            from principal_inference import run_inference, diff_principals
+            from subtype_contracts import _PHASE_TO_SUBTYPE as _pi_phase_map
+            _pi_subtype = _pi_phase_map.get(str(_cp_s.phase).upper(), "")
+            _inf_rich = run_inference(_pr, _pi_subtype)
+            diff_principals(
+                getattr(_pr, "principals", []) or [],
+                _inf_rich,
+                phase=str(_cp_s.phase),
+            )
+        except Exception:
+            pass
+
+
+def _step_inject_phase(agent_self, *, cp_state_holder: "list | None", state: "StepMonitorState") -> None:
+    """
+    Section p189: inject current phase as a user message prefix.
+    Exception-safe — injection failure must not crash main flow.
+    """
+    try:
+        from phase_prompt import build_phase_prefix as _build_phase_prefix
+        _cp_s = cp_state_holder[0] if cp_state_holder is not None else state.cp_state
+        _phase_str = str(_cp_s.phase)
+        _phase_prefix = _build_phase_prefix(_phase_str)
+        if _phase_prefix:
+            agent_self.messages.append({"role": "user", "content": _phase_prefix.rstrip("\n")})
+            print(f"    [phase_injection] phase={_phase_str} injected=true", flush=True)
+    except Exception as _phase_exc:
+        print(f"    [phase_injection] error (non-fatal): {_phase_exc}", flush=True)
+
+
 def _install_step_monitor(
     instance_id: str,
     attempt: int,
@@ -358,342 +675,23 @@ def _install_step_monitor(
     def _monitored_step(self):
         result = _orig_step(self)
 
-        # ── 1. Log step (existing behavior) ──────────────────────────────────
-        snippet = ""
-        _latest_assistant_text = ""
-        for msg in reversed(self.messages):
-            if msg.get("role") == "assistant":
-                content = msg.get("content", "")
-                if isinstance(content, list):
-                    for c in content:
-                        if isinstance(c, dict) and c.get("type") == "text":
-                            content = c["text"]
-                            break
-                if isinstance(content, str):
-                    _latest_assistant_text = content
-                    snippet = content.replace("\n", " ")[:80]
-                break
-        print(f"    [step {self.n_calls}] ${self.cost:.2f}  {snippet}", flush=True)
-
-        # ── 1c. Phase 2: in-loop cognition record parse + validate ────────────
-        if mode == "jingu" and _latest_assistant_text:
-            try:
-                from cognition_schema import check_step_cognition, format_violation_feedback
-                _cog_record, _cog_violations = check_step_cognition(
-                    _latest_assistant_text, step_n=self.n_calls
-                )
-                if _cog_record is not None:
-                    _principal_str = " ".join(_cog_record.principals) if _cog_record.principals else "(none)"
-                    print(
-                        f"    [cognition] step={self.n_calls} phase={_cog_record.phase}"
-                        f" principals=[{_principal_str}]"
-                        f" evidence={len(_cog_record.evidence_refs)}"
-                        f" violations={len(_cog_violations)}",
-                        flush=True,
-                    )
-                    if _cog_violations:
-                        _feedback = format_violation_feedback(_cog_violations, _cog_record)
-                        print(f"    [cognition] VIOLATION — injecting feedback", flush=True)
-                        # Inject violation feedback as a user message so agent
-                        # sees it on next step and must correct before proceeding
-                        self.messages.append({
-                            "role": "user",
-                            "content": _feedback,
-                        })
-            except Exception as _cog_exc:
-                print(f"    [cognition] parse error (non-fatal): {_cog_exc}", flush=True)
-
-        # ── 1b. Detect env mutation (ENVIRONMENT_NOT_AGENT_WORK) ─────────────
-        _step_env_error = False
-        for msg in reversed(self.messages):
-            if msg.get("role") == "assistant":
-                has_mut, trigger = _msg_has_env_mutation(msg)
-                if has_mut:
-                    _step_env_error = True
-                    print(
-                        f"    [env-mutation] ENVIRONMENT_MUTATION_IN_AGENT_LOOP "
-                        f"step={self.n_calls} trigger={trigger!r} — "
-                        f"agent is doing env work (pip/conda/setup.py). "
-                        f"This belongs to infrastructure, not agent reasoning.",
-                        flush=True
-                    )
-                break
-
-        # ── 2. Check for patch write signal ──────────────────────────────────
-        # Look at the most recent assistant message for write signals
-        _step_patch_non_empty = False
-        for msg in reversed(self.messages):
-            if msg.get("role") == "assistant":
-                if not _msg_has_signal(msg):
-                    break  # latest assistant msg, no signal — skip verify
-                _step_patch_non_empty = True
-                # Signal detected — check debounce conditions
-                cid = state.container_id
-                if not cid:
-                    break  # container not yet started (early steps)
-                now = time.monotonic()
-                with state._lock:
-                    too_soon = (now - state.last_verify_time) < VERIFY_DEBOUNCE_S
-                    in_flight = state.verify_in_flight
-                if too_soon or in_flight:
-                    break  # debounced
-                # P1 fix (v2): signal-event driven — trigger verify whenever patch
-                # signal is present and debounce passes, regardless of patch content.
-                # The original content-diff approach (patch_changed) was wrong because
-                # agent writes files directly via editor/bash, so git diff stays the
-                # same after the first write → verify never re-triggered.
-                # We still fetch git diff to pass as patch_text to run_controlled_verify.
-                import subprocess as _sp_iv
-                # P5 fix: use "git diff {base_commit}" to capture ALL changes since the
-                # original base commit — staged, unstaged, and committed.
-                # "git diff" misses staged changes; "git diff HEAD" misses new untracked
-                # files and changes committed mid-run. base_commit is the ground truth
-                # starting point for SWE-bench evaluation.
-                _base_commit = state.instance.get("base_commit", "HEAD")
-                _git_diff_result = _sp_iv.run(
-                    ["docker", "exec", "-w", "/testbed", cid,
-                     "git", "diff", _base_commit],
-                    capture_output=True, text=True, timeout=10,
-                )
-                current_patch = _git_diff_result.stdout.strip() if _git_diff_result.returncode == 0 else ""
-                # P7 fix: _msg_has_signal detects str_replace_editor for both
-                # view and write operations. Guard here: if git diff base_commit
-                # is empty, no real file change happened — skip inner-verify.
-                # P8 fix: also reset _step_patch_non_empty to False so that
-                # patch_first_write pee is NOT triggered by a false _msg_has_signal
-                # (view ops). Without this, _prev_patch_non_empty gets latched True
-                # on a phantom signal, blocking all future pee events and freezing
-                # no_progress_steps at 1 — VerdictStop never fires.
-                if not current_patch:
-                    _step_patch_non_empty = False
-                    break
-                with state._lock:
-                    state.last_verified_patch = current_patch
-                    state.last_verify_time = now
-                    state.verify_in_flight = True
-
-                step_n = self.n_calls
-                print(f"    [inner-verify] triggering verify at step={step_n} "
-                      f"(patch changed, container={cid[:12]}...)", flush=True)
-
-                def _run_verify(patch=current_patch, container=cid, step=step_n):
-                    try:
-                        cv_result = run_controlled_verify(
-                            patch, state.instance, container, timeout_s=45
-                        )
-                        state.record_verify(step, cv_result)
-                    except Exception as exc:
-                        print(f"    [inner-verify] ERROR: {exc}", flush=True)
-                    finally:
-                        with state._lock:
-                            state.verify_in_flight = False
-
-                t = threading.Thread(target=_run_verify, daemon=True)
-                t.start()
-                break
-
-        # ── 3. B3-CP: update control-plane state with step-level signals ──────
-        # B3.2: step-level does NOT advance no_progress_steps (gated to verify window).
-        # B3.3: weak_progress_seen captured for log-only observability (no stagnation effect).
-        # task_success is NEVER set here (CORR1).
-        _pee, _pee_reason = state.update_cp_with_step_signals(
-            env_error_detected=_step_env_error,
-            patch_non_empty=_step_patch_non_empty,
+        # Thin orchestrator: delegates to the four section functions above.
+        # Each section is independently testable and has explicit parameter contracts.
+        _latest_assistant_text, _snippet, _env_error = _step_observe(
+            self, step_n=self.n_calls, mode=mode
+        )
+        _patch_non_empty = _step_verify_if_needed(
+            self, state=state, verify_debounce_s=VERIFY_DEBOUNCE_S
+        )
+        _step_cp_update_and_verdict(
+            self,
+            state=state,
             cp_state_holder=cp_state_holder,
+            env_error_detected=_env_error,
+            step_patch_non_empty=_patch_non_empty,
+            latest_assistant_text=_latest_assistant_text,
         )
-        # B3.1+B3.3+B5: emit per-step log with instance/attempt context
-        _cp_s = cp_state_holder[0] if cp_state_holder is not None else state.cp_state
-        _step_signals_present = bool(_step_env_error or _step_patch_non_empty)
-        _weak_progress = extract_weak_progress(
-            env_error_detected=_step_env_error,
-            patch_non_empty=_step_patch_non_empty,
-            latest_tests_passed=state.latest_tests_passed(),
-        )
-        if _step_signals_present or _weak_progress:
-            _pee_str = f"True({_pee_reason})" if _pee else "False"
-            print(
-                f"    [cp-step] instance={state.instance_id} attempt={state.attempt}"
-                f" signals={[k for k,v in [('env',_step_env_error),('patch',_step_patch_non_empty)] if v]}"
-                f" no_progress:{_cp_s.no_progress_steps} step:{_cp_s.step_index}"
-                f" env_noise:{_cp_s.env_noise} actionability:{_cp_s.actionability}"
-                f" weak_progress:{_weak_progress} pee:{_pee_str}",
-                flush=True,
-            )
-
-        # ── p186: verdict-driven attempt control ─────────────────────────────
-        # Call decide_next() on every step so control plane can act in real time.
-        # VerdictStop  → set early_stop_verdict; run_with_jingu breaks attempt loop
-        # VerdictRedirect → set pending_redirect_hint; injected as user message next step
-        # VerdictAdvance  → phase transition telemetry only (observable, no other action)
-        # VerdictContinue → no-op
-        _step_verdict = decide_next(_cp_s)
-        _verdict_to_log = f"step={_cp_s.step_index} verdict={_step_verdict.type}"
-        if hasattr(_step_verdict, "to") and _step_verdict.to is not None:
-            _verdict_to_log += f" to={_step_verdict.to}"
-        if hasattr(_step_verdict, "reason") and _step_verdict.reason:
-            _verdict_to_log += f" reason={_step_verdict.reason}"
-        print(f"    [cp] {_verdict_to_log}", flush=True)
-
-        if isinstance(_step_verdict, VerdictStop):
-            # Early stop: set flag — run_with_jingu will break the attempt loop
-            state.early_stop_verdict = _step_verdict
-            # P3 fix: actually terminate the agent step loop now, not just set a flag.
-            # default.py:105 raises LimitsExceeded when n_calls >= step_limit.
-            # Setting n_calls = step_limit causes termination on the NEXT step start,
-            # so the current step still completes normally (patch is still extractable).
-            _sl = getattr(getattr(self, "config", None), "step_limit", 0)
-            if _sl > 0:
-                self.n_calls = _sl
-                print(
-                    f"    [cp] VerdictStop enforcement: n_calls set to step_limit={_sl}"
-                    f" — agent will stop after this step",
-                    flush=True,
-                )
-        elif isinstance(_step_verdict, VerdictRedirect):
-            # Mid-attempt redirect: inject correction hint into next step's context
-            state.pending_redirect_hint = (
-                f"[REDIRECT:{_step_verdict.to}] {_step_verdict.reason}"
-            )
-            # Also inject immediately as a user message so agent sees it on next step
-            self.messages.append({
-                "role": "user",
-                "content": (
-                    f"[Control-plane redirect: {_step_verdict.reason}] "
-                    f"Re-examine your environment assumptions. "
-                    f"Transition to phase {_step_verdict.to} before patching."
-                ),
-            })
-        elif isinstance(_step_verdict, VerdictAdvance):
-            # P2 fix: actually advance the phase in cp_state so decide_next sees
-            # the new phase on subsequent steps. Without this, phase stays OBSERVE
-            # forever and no downstream features (phase_record, principal_gate, etc.)
-            # are ever reached.
-            _old_phase = _cp_s.phase
-            if _step_verdict.to is not None:
-                import dataclasses as _dc_adv
-                if cp_state_holder is not None:
-                    cp_state_holder[0] = _dc_adv.replace(cp_state_holder[0], phase=_step_verdict.to)
-                    _cp_s = cp_state_holder[0]
-                else:
-                    state.cp_state = _dc_adv.replace(state.cp_state, phase=_step_verdict.to)
-                    _cp_s = state.cp_state
-            print(
-                f"    [cp] phase_advance from={_old_phase} to={_step_verdict.to}",
-                flush=True,
-            )
-            # p190: collect PhaseRecord for the phase that just completed.
-            # _latest_assistant_text is already captured above (line ~294).
-            # Wrapped in try/except: collection failure must not crash main flow.
-            _pr = None
-            try:
-                from declaration_extractor import extract_phase_record as _extract_pr
-                _pr = _extract_pr(_latest_assistant_text, str(_cp_s.phase))
-                state.phase_records.append(_pr)
-                print(
-                    f"    [phase_record] phase={_pr.phase} subtype={_pr.subtype}"
-                    f" principals={_pr.principals}",
-                    flush=True,
-                )
-            except Exception as _pr_exc:
-                print(f"    [phase_record] error (non-fatal): {_pr_exc}", flush=True)
-            # p188: principal gate — check required principals for completed phase
-            try:
-                if _pr is None:
-                    raise RuntimeError("phase_record unavailable, skipping principal gate")
-                from principal_gate import (
-                    check_principal_gate as _check_pg,
-                    get_principal_feedback as _get_pg_feedback,
-                )
-                _pg_violation = _check_pg(_pr, str(_cp_s.phase))
-                if _pg_violation:
-                    _pg_feedback = _get_pg_feedback(_pg_violation)
-                    # p193: add repair_target phase to hint so agent knows where to go
-                    try:
-                        from subtype_contracts import get_repair_target as _get_repair_target
-                        _repair_phase = _get_repair_target(str(_cp_s.phase))
-                    except Exception:
-                        _repair_phase = ""
-                    _repair_suffix = (
-                        f" Repair phase: {_repair_phase}." if _repair_phase else ""
-                    )
-                    state.pending_redirect_hint = (
-                        f"[PRINCIPAL_VIOLATION:{_pg_violation}] {_pg_feedback}"
-                        f"{_repair_suffix}"
-                    )
-                    print(
-                        f"    [principal_gate] phase={_pr.phase} violation={_pg_violation}"
-                        f" repair_target={_repair_phase or 'none'}",
-                        flush=True,
-                    )
-                else:
-                    print(
-                        f"    [principal_gate] phase={_pr.phase} violation=none",
-                        flush=True,
-                    )
-            except Exception as _pg_exc:
-                print(f"    [principal_gate] error={_pg_exc}", flush=True)
-            # p194: inference check — three-way diff (fake / missing_required / missing_expected)
-            # Exception-safe: any failure here must not crash main flow.
-            _inf_violation: str | None = None
-            _inferred: list = []
-            _inf_diff: dict = {}
-            try:
-                if _pr is None:
-                    raise RuntimeError("phase_record unavailable, skipping inference check")
-                from principal_gate import check_principal_inference as _check_pi
-                _inf_violation = _check_pi(_pr, str(_cp_s.phase))
-                if _inf_violation and "fake_principal" in _inf_violation:
-                    try:
-                        from subtype_contracts import get_repair_target as _get_repair_target
-                        _inf_repair = _get_repair_target(str(_cp_s.phase))
-                    except Exception:
-                        _inf_repair = ""
-                    state.pending_redirect_hint = (
-                        f"[PRINCIPAL_MISMATCH:{_inf_violation}] "
-                        f"Your declared principals are not supported by your reasoning. "
-                        f"Strengthen your reasoning before declaring these principals. "
-                        f"Redirect to {_inf_repair or 'previous phase'} phase."
-                    )
-                elif _inf_violation and "missing_required" in _inf_violation:
-                    # Hard reject for missing_required — already handled by principal_gate,
-                    # but log the inference perspective for telemetry clarity
-                    pass
-            except Exception as _pi_exc:
-                print(f"    [principal_inference] check error={_pi_exc}", flush=True)
-            # Telemetry: write inference results into jingu_body (best-effort, p195)
-            try:
-                if _pr is None:
-                    raise RuntimeError("phase_record unavailable, skipping telemetry")
-                from principal_inference import run_inference, diff_principals
-                from subtype_contracts import _PHASE_TO_SUBTYPE as _pi_phase_map
-                _pi_subtype = _pi_phase_map.get(str(_cp_s.phase).upper(), "")
-                _inf_rich = run_inference(_pr, _pi_subtype)
-                _inf_diff = diff_principals(
-                    getattr(_pr, "principals", []) or [],
-                    _inf_rich,
-                    phase=str(_cp_s.phase),
-                )
-            except Exception:
-                pass
-        # VerdictContinue: no action needed
-
-        # ── p189: phase-aware prompt injection ───────────────────────────────
-        # Inject current phase as a user message prefix so agent knows which
-        # phase it is in and adjusts behavior accordingly (Option B: user msg).
-        # Injected every step so phase context is always fresh.
-        # Phase is a plain string in ReasoningState — no .value needed.
-        try:
-            from phase_prompt import build_phase_prefix as _build_phase_prefix
-            _phase_str = str(_cp_s.phase)
-            _phase_prefix = _build_phase_prefix(_phase_str)
-            if _phase_prefix:
-                self.messages.append({
-                    "role": "user",
-                    "content": _phase_prefix.rstrip("\n"),
-                })
-                print(f"    [phase_injection] phase={_phase_str} injected=true", flush=True)
-        except Exception as _phase_exc:
-            print(f"    [phase_injection] error (non-fatal): {_phase_exc}", flush=True)
+        _step_inject_phase(self, cp_state_holder=cp_state_holder, state=state)
 
         return result
 
