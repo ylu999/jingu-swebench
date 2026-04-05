@@ -563,12 +563,19 @@ def _step_cp_update_and_verdict(
             if _pr is None:
                 raise RuntimeError("phase_record unavailable, skipping principal gate")
             from principal_gate import (
-                check_principal_gate as _check_pg,
+                evaluate_admission as _eval_admission,
                 get_principal_feedback as _get_pg_feedback,
             )
             from control.reasoning_state import set_principal_violation as _set_pv
-            _pg_violation = _check_pg(_pr, str(_cp_s.phase))
-            if _pg_violation:
+            _admission = _eval_admission(_pr, str(_cp_s.phase))
+            print(
+                f"    [principal_gate] phase={_pr.phase} admission={_admission.status}"
+                f" reasons={_admission.reasons}",
+                flush=True,
+            )
+            if _admission.status in ("RETRYABLE", "REJECTED"):
+                # Pick a representative violation code for cp_state / feedback
+                _pg_violation = _admission.reasons[0] if _admission.reasons else "admission_violation"
                 _pg_feedback = _get_pg_feedback(_pg_violation)
                 try:
                     from subtype_contracts import get_repair_target as _get_repair_target
@@ -577,40 +584,44 @@ def _step_cp_update_and_verdict(
                     _repair_phase = ""
                 _repair_suffix = f" Repair phase: {_repair_phase}." if _repair_phase else ""
                 state.pending_redirect_hint = (
-                    f"[PRINCIPAL_VIOLATION:{_pg_violation}] {_pg_feedback}{_repair_suffix}"
+                    f"[{_admission.status}:{_pg_violation}] {_pg_feedback}{_repair_suffix}"
                 )
-                print(
-                    f"    [principal_gate] phase={_pr.phase} violation={_pg_violation}"
-                    f" repair_target={_repair_phase or 'none'}",
-                    flush=True,
-                )
-                # ── cognition-aware control: principal violation → cp_state → decide_next ──
-                # Write violation into cp_state. decide_next priority 2.5 fires
-                # VerdictRedirect(repair_target), routing the agent back before it
-                # can continue execution in a phase whose principals were not satisfied.
+                # ── cognition-aware control: admission result → cp_state → verdict ──
                 if cp_state_holder is not None:
                     cp_state_holder[0] = _set_pv(cp_state_holder[0], _pg_violation)
                     _cp_s = cp_state_holder[0]
                 else:
                     state.cp_state = _set_pv(state.cp_state, _pg_violation)
                     _cp_s = state.cp_state
-                _pv_verdict = decide_next(_cp_s)
-                print(
-                    f"    [principal_gate] cognition_verdict={_pv_verdict.type}"
-                    f" to={getattr(_pv_verdict, 'to', '')}",
-                    flush=True,
-                )
-                if isinstance(_pv_verdict, VerdictRedirect):
-                    agent_self.messages.append({
-                        "role": "user",
-                        "content": (
-                            f"[Cognition gate: {_pg_violation}] "
-                            f"{_pg_feedback} "
-                            f"Return to phase {_pv_verdict.to} before proceeding."
-                        ),
-                    })
-            else:
-                print(f"    [principal_gate] phase={_pr.phase} violation=none", flush=True)
+
+                if _admission.status == "REJECTED":
+                    # Phase boundary error — stop attempt, do not redirect
+                    state.early_stop_verdict = VerdictStop(reason="no_signal")
+                    _sl = getattr(getattr(agent_self, "config", None), "step_limit", 0)
+                    if _sl > 0:
+                        agent_self.n_calls = _sl
+                    print(
+                        f"    [principal_gate] REJECTED → VerdictStop"
+                        f" reasons={_admission.reasons}",
+                        flush=True,
+                    )
+                else:
+                    # RETRYABLE — right phase, incomplete output; redirect to repair
+                    _pv_verdict = decide_next(_cp_s)
+                    print(
+                        f"    [principal_gate] RETRYABLE → cognition_verdict={_pv_verdict.type}"
+                        f" to={getattr(_pv_verdict, 'to', '')}",
+                        flush=True,
+                    )
+                    if isinstance(_pv_verdict, VerdictRedirect):
+                        agent_self.messages.append({
+                            "role": "user",
+                            "content": (
+                                f"[Cognition gate RETRYABLE: {_pg_violation}] "
+                                f"{_pg_feedback} "
+                                f"Return to phase {_pv_verdict.to} before proceeding."
+                            ),
+                        })
         except Exception as _pg_exc:
             print(f"    [principal_gate] error={_pg_exc}", flush=True)
 

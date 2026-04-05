@@ -164,3 +164,89 @@ def get_principal_feedback(violation: str) -> str:
         violation,
         f"Principal violation: {violation}. Declare required principals for this phase.",
     )
+
+
+# ── AdmissionResult (v0.4) ────────────────────────────────────────────────────
+
+class AdmissionResult:
+    """
+    Verdict from evaluate_admission().
+
+    status:
+      ADMITTED   — all contracts satisfied; phase may proceed / transition
+      RETRYABLE  — missing material (principal or field); redirect to repair phase
+      REJECTED   — phase boundary error (forbidden transition / structural mismatch);
+                   do not redirect, stop attempt
+
+    Taxonomy rule:
+      RETRYABLE: right phase, incomplete output — agent can fix in-loop
+      REJECTED:  wrong phase position or boundary violation — no in-loop fix possible
+    """
+    __slots__ = ("status", "reasons")
+
+    def __init__(self, status: str, reasons: list[str]) -> None:
+        self.status = status    # "ADMITTED" | "RETRYABLE" | "REJECTED"
+        self.reasons = reasons  # violation codes
+
+    def __repr__(self) -> str:
+        return f"AdmissionResult({self.status}, {self.reasons})"
+
+
+def evaluate_admission(phase_record, phase: str, next_phase: str = "") -> AdmissionResult:
+    """
+    Full admission check for a PhaseRecord at phase boundary.
+
+    Checks (in order):
+      1. required principals — missing → RETRYABLE
+      2. required fields     — missing → RETRYABLE
+      3. allowed_next        — forbidden transition → REJECTED (only if next_phase provided)
+
+    Returns AdmissionResult(ADMITTED / RETRYABLE / REJECTED, reasons).
+    Exception-safe: any error returns ADMITTED (no crash, no false stop).
+
+    Args:
+        phase_record: PhaseRecord or object with .principals / field attributes
+        phase:        current phase name (e.g. "ANALYZE")
+        next_phase:   proposed next phase (e.g. "EXECUTE"); "" = skip transition check
+    """
+    try:
+        retryable: list[str] = []
+        rejected: list[str] = []
+
+        # 1. required principals (RETRYABLE)
+        required = PHASE_REQUIRED_PRINCIPALS.get(phase.upper(), [])
+        declared = [p.lower() for p in (getattr(phase_record, "principals", None) or [])]
+        for req in required:
+            if req not in declared:
+                retryable.append(f"missing_required_principal:{req}")
+
+        # 2. required fields (RETRYABLE)
+        try:
+            from subtype_contracts import get_required_fields as _get_rf
+            req_fields = _get_rf(phase)
+        except Exception:
+            req_fields = []
+        for field_name in req_fields:
+            val = getattr(phase_record, field_name, None)
+            if not val:  # None, [], "", 0 all count as missing
+                retryable.append(f"missing_required_field:{field_name}")
+
+        # 3. allowed_next transition check (REJECTED — boundary error)
+        if next_phase:
+            try:
+                from subtype_contracts import get_allowed_next as _get_an
+                allowed = _get_an(phase)
+            except Exception:
+                allowed = []
+            if allowed and next_phase.upper() not in [p.upper() for p in allowed]:
+                rejected.append(f"forbidden_transition:{phase}->{next_phase}")
+
+        if rejected:
+            return AdmissionResult("REJECTED", rejected + retryable)
+        if retryable:
+            return AdmissionResult("RETRYABLE", retryable)
+        return AdmissionResult("ADMITTED", [])
+
+    except Exception as _e:
+        # Safety: never crash the caller; treat as admitted on unexpected error
+        return AdmissionResult("ADMITTED", [f"admission_check_error:{_e}"])
