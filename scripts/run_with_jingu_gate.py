@@ -520,11 +520,22 @@ def _install_step_monitor(
                 _pg_violation = _check_pg(_pr, str(_cp_s.phase))
                 if _pg_violation:
                     _pg_feedback = _get_pg_feedback(_pg_violation)
+                    # p193: add repair_target phase to hint so agent knows where to go
+                    try:
+                        from subtype_contracts import get_repair_target as _get_repair_target
+                        _repair_phase = _get_repair_target(str(_cp_s.phase))
+                    except Exception:
+                        _repair_phase = ""
+                    _repair_suffix = (
+                        f" Repair phase: {_repair_phase}." if _repair_phase else ""
+                    )
                     state.pending_redirect_hint = (
                         f"[PRINCIPAL_VIOLATION:{_pg_violation}] {_pg_feedback}"
+                        f"{_repair_suffix}"
                     )
                     print(
-                        f"    [principal_gate] phase={_pr.phase} violation={_pg_violation}",
+                        f"    [principal_gate] phase={_pr.phase} violation={_pg_violation}"
+                        f" repair_target={_repair_phase or 'none'}",
                         flush=True,
                     )
                 else:

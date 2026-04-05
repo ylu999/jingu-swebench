@@ -7,10 +7,51 @@ so the agent knows which phase it is in and adjusts its behavior accordingly.
 
 Phase guidance is injected as a user message prefix (Option B — safer than
 modifying system prompt since mini-SWE-agent may not support dynamic system prompts).
+
+ANALYZE/EXECUTE/JUDGE guidance is derived from subtype_contracts.py (p193)
+so prompt vocabulary stays in sync with principal_gate.py enforcement.
 """
+
+# Load canonical guidance from subtype_contracts (p193).
+# Exception-safe: if import fails, fallback to static strings below.
+try:
+    from subtype_contracts import build_phase_principal_guidance as _build_pg
+    _ANALYZE_GUIDANCE = _build_pg("ANALYZE") or (
+        "Form hypotheses. Identify root cause with causal evidence. Do NOT fix yet. "
+        "You MUST declare PRINCIPALS: causal_grounding. "
+        "Output: your diagnosis and why."
+    )
+    _EXECUTE_GUIDANCE = _build_pg("EXECUTE") or (
+        "Write the minimal fix targeting the root cause identified in ANALYZE/DECIDE. "
+        "You MUST declare PRINCIPALS: minimal_change. "
+        "Output: the patch and why it addresses the root cause."
+    )
+    _JUDGE_GUIDANCE = _build_pg("JUDGE") or (
+        "Verify your fix. Run tests. Check invariants. "
+        "You MUST declare PRINCIPALS: invariant_preservation. "
+        "Output: FIX_TYPE declaration + evidence that tests pass."
+    )
+except Exception:
+    # Fallback: static strings with correct vocabulary
+    _ANALYZE_GUIDANCE = (
+        "Form hypotheses. Identify root cause with causal evidence. Do NOT fix yet. "
+        "You MUST declare PRINCIPALS: causal_grounding. "
+        "Output: your diagnosis and why."
+    )
+    _EXECUTE_GUIDANCE = (
+        "Write the minimal fix targeting the root cause identified in ANALYZE/DECIDE. "
+        "You MUST declare PRINCIPALS: minimal_change. "
+        "Output: the patch and why it addresses the root cause."
+    )
+    _JUDGE_GUIDANCE = (
+        "Verify your fix. Run tests. Check invariants. "
+        "You MUST declare PRINCIPALS: invariant_preservation. "
+        "Output: FIX_TYPE declaration + evidence that tests pass."
+    )
 
 # Phase guidance — one entry per phase in control/reasoning_state.py Phase Literal.
 # Each value is the guidance text appended after "[Phase: X]".
+# ANALYZE/EXECUTE/JUDGE are derived from SUBTYPE_CONTRACTS (p193) for vocab alignment.
 PHASE_GUIDANCE: dict[str, str] = {
     "UNDERSTAND": (
         "Read the issue description and test failures carefully. "
@@ -20,22 +61,13 @@ PHASE_GUIDANCE: dict[str, str] = {
         "Focus on gathering evidence. Read files, run tests, understand the failing case. "
         "Do NOT write code yet. Output: what you found and what it implies."
     ),
-    "ANALYZE": (
-        "Form hypotheses. Identify root cause. Do NOT fix yet. "
-        "Output: your diagnosis and why."
-    ),
+    "ANALYZE": _ANALYZE_GUIDANCE,
     "DECIDE": (
         "Choose the best fix strategy based on your analysis. "
         "Output: which approach you will take and why."
     ),
-    "EXECUTE": (
-        "Write the minimal fix targeting the root cause identified in ANALYZE/DECIDE. "
-        "Output: the patch and why it addresses the root cause."
-    ),
-    "JUDGE": (
-        "Verify your fix. Run tests. Check invariants. "
-        "Output: FIX_TYPE declaration + evidence that tests pass."
-    ),
+    "EXECUTE": _EXECUTE_GUIDANCE,
+    "JUDGE": _JUDGE_GUIDANCE,
 }
 
 

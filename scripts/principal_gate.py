@@ -10,20 +10,50 @@ The main flow is always wrapped in try/except to ensure robustness.
 
 from __future__ import annotations
 
-# Minimum required principals per phase
-PHASE_REQUIRED_PRINCIPALS: dict[str, list[str]] = {
-    "OBSERVE":  [],                      # no enforcement in observation phase
-    "ANALYZE":  ["causal_grounding"],    # must declare causal analysis
-    "EXECUTE":  ["minimal_change"],      # must declare scope discipline
-    "JUDGE":    ["invariant_preservation"],  # must declare invariant checked
-}
+# Load required principals from canonical source (subtype_contracts, p193).
+# Exception-safe: if import fails, fallback to static dict (no crash).
+try:
+    from subtype_contracts import (
+        get_required_principals as _get_rp,
+        get_repair_target as _get_rt,
+        SUBTYPE_CONTRACTS as _SC,
+    )
+    # Build PHASE_REQUIRED_PRINCIPALS from contracts for backward compatibility
+    # (test_principal_gate.py imports this dict directly).
+    PHASE_REQUIRED_PRINCIPALS: dict[str, list[str]] = {
+        "OBSERVE":  _get_rp("OBSERVE"),
+        "ANALYZE":  _get_rp("ANALYZE"),
+        "EXECUTE":  _get_rp("EXECUTE"),
+        "JUDGE":    _get_rp("JUDGE"),
+    }
+    # Build PHASE_VIOLATION_REDIRECT from contracts
+    PHASE_VIOLATION_REDIRECT: dict[str, str] = {
+        phase: _get_rt(phase)
+        for phase in ["ANALYZE", "EXECUTE", "JUDGE"]
+        if _get_rt(phase)
+    }
+    # Export get_required_principals for callers who prefer the function API
+    def get_required_principals(phase: str) -> list[str]:
+        """Return required principals for phase from SUBTYPE_CONTRACTS."""
+        return _get_rp(phase)
 
-# Redirect target when violation detected
-PHASE_VIOLATION_REDIRECT: dict[str, str] = {
-    "ANALYZE":  "OBSERVE",   # missing causal_grounding -> back to observation
-    "EXECUTE":  "ANALYZE",   # missing minimal_change -> back to analysis
-    "JUDGE":    "EXECUTE",   # missing invariant_preservation -> back to execution
-}
+except Exception:
+    # Fallback: static dicts (ensures no crash if subtype_contracts unavailable)
+    PHASE_REQUIRED_PRINCIPALS = {
+        "OBSERVE":  [],
+        "ANALYZE":  ["causal_grounding"],
+        "EXECUTE":  ["minimal_change"],
+        "JUDGE":    ["invariant_preservation"],
+    }
+    PHASE_VIOLATION_REDIRECT = {
+        "ANALYZE":  "OBSERVE",
+        "EXECUTE":  "ANALYZE",
+        "JUDGE":    "EXECUTE",
+    }
+
+    def get_required_principals(phase: str) -> list[str]:
+        """Return required principals for phase (fallback static version)."""
+        return PHASE_REQUIRED_PRINCIPALS.get(phase.upper(), [])
 
 # Human-readable feedback for each violation
 _FEEDBACK: dict[str, str] = {
