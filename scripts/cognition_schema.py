@@ -101,10 +101,17 @@ def _extract_field(text: str, key: str) -> str:
 
 
 def _extract_list_field(text: str, key: str) -> list[str]:
-    """Extract comma or space-separated list from KEY: val1 val2"""
+    """Extract comma or space-separated list from KEY: val1 val2.
+    For short token lists (principals, action types).
+    For long prose fields (evidence, claims), use _extract_field directly.
+    """
     raw = _extract_field(text, key)
     if not raw:
         return []
+    # If raw looks like prose (> 5 words, no commas), treat as single item
+    words = raw.split()
+    if len(words) > 5 and "," not in raw:
+        return [raw.strip()]
     # Split on commas, spaces, or pipes
     items = re.split(r"[,\s|]+", raw)
     return [i.strip().lower() for i in items if i.strip() and i.strip() not in ("-", "none", "n/a")]
