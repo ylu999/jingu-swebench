@@ -52,6 +52,7 @@ COPY scripts/run_with_jingu_gate.py \
      scripts/patch_signals.py \
      scripts/declaration_extractor.py \
      scripts/cognition_check.py \
+     scripts/cognition_schema.py \
      scripts/gate_runner.js \
      scripts/patch_admission_policy.js \
      /app/scripts/

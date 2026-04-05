@@ -267,6 +267,7 @@ def _install_step_monitor(
 
         # ── 1. Log step (existing behavior) ──────────────────────────────────
         snippet = ""
+        _latest_assistant_text = ""
         for msg in reversed(self.messages):
             if msg.get("role") == "assistant":
                 content = msg.get("content", "")
@@ -276,9 +277,38 @@ def _install_step_monitor(
                             content = c["text"]
                             break
                 if isinstance(content, str):
+                    _latest_assistant_text = content
                     snippet = content.replace("\n", " ")[:80]
                 break
         print(f"    [step {self.n_calls}] ${self.cost:.2f}  {snippet}", flush=True)
+
+        # ── 1c. Phase 2: in-loop cognition record parse + validate ────────────
+        if mode == "jingu" and _latest_assistant_text:
+            try:
+                from cognition_schema import check_step_cognition, format_violation_feedback
+                _cog_record, _cog_violations = check_step_cognition(
+                    _latest_assistant_text, step_n=self.n_calls
+                )
+                if _cog_record is not None:
+                    _principal_str = " ".join(_cog_record.principals) if _cog_record.principals else "(none)"
+                    print(
+                        f"    [cognition] step={self.n_calls} phase={_cog_record.phase}"
+                        f" principals=[{_principal_str}]"
+                        f" evidence={len(_cog_record.evidence_refs)}"
+                        f" violations={len(_cog_violations)}",
+                        flush=True,
+                    )
+                    if _cog_violations:
+                        _feedback = format_violation_feedback(_cog_violations, _cog_record)
+                        print(f"    [cognition] VIOLATION — injecting feedback", flush=True)
+                        # Inject violation feedback as a user message so agent
+                        # sees it on next step and must correct before proceeding
+                        self.messages.append({
+                            "role": "user",
+                            "content": _feedback,
+                        })
+            except Exception as _cog_exc:
+                print(f"    [cognition] parse error (non-fatal): {_cog_exc}", flush=True)
 
         # ── 1b. Detect env mutation (ENVIRONMENT_NOT_AGENT_WORK) ─────────────
         _step_env_error = False
