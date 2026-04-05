@@ -404,10 +404,12 @@ def _install_step_monitor(
                     in_flight = state.verify_in_flight
                 if too_soon or in_flight:
                     break  # debounced
-                # P1 fix: get current patch via git diff from container,
-                # not from agent messages (which don't contain diff content).
-                # Agent writes files directly via editor/bash — git diff is the
-                # only reliable way to capture what changed.
+                # P1 fix (v2): signal-event driven — trigger verify whenever patch
+                # signal is present and debounce passes, regardless of patch content.
+                # The original content-diff approach (patch_changed) was wrong because
+                # agent writes files directly via editor/bash, so git diff stays the
+                # same after the first write → verify never re-triggered.
+                # We still fetch git diff to pass as patch_text to run_controlled_verify.
                 import subprocess as _sp_iv
                 _git_diff_result = _sp_iv.run(
                     ["docker", "exec", "-w", "/testbed", cid,
@@ -416,9 +418,6 @@ def _install_step_monitor(
                 )
                 current_patch = _git_diff_result.stdout.strip() if _git_diff_result.returncode == 0 else ""
                 with state._lock:
-                    patch_changed = current_patch != state.last_verified_patch
-                    if not patch_changed:
-                        break
                     state.last_verified_patch = current_patch
                     state.last_verify_time = now
                     state.verify_in_flight = True
