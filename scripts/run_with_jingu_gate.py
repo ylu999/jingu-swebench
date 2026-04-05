@@ -239,6 +239,7 @@ def _install_step_monitor(
     attempt: int,
     instance: dict,
     cp_state_holder: list | None = None,
+    mode: str = "baseline",
 ) -> StepMonitorState:
     """
     Replace step logger with a step monitor that:
@@ -1625,7 +1626,7 @@ def run_agent(
     # Install step monitor: logs steps + triggers inner-loop verify on patch writes
     # B2-CP: cp_state_holder (from run_with_jingu) passed through so step signals
     # update the cross-attempt cp_state directly.
-    _monitor = _install_step_monitor(instance_id, attempt, instance, cp_state_holder=cp_state_holder)
+    _monitor = _install_step_monitor(instance_id, attempt, instance, cp_state_holder=cp_state_holder, mode=mode)
 
     # Hook DefaultAgent.run() to:
     # 1. Inject container_id into _monitor as soon as container is started
