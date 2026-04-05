@@ -2007,8 +2007,8 @@ def run_agent(
     parent_timer: Timer | None = None,
     mode: str = "jingu",
     cp_state_holder: list | None = None,
-) -> tuple[str | None, str | None, dict | None]:
-    """Run mini-SWE-agent on one instance. Returns (submission patch or None, exit_status, jingu_body or None)."""
+) -> tuple[str | None, str | None, dict | None, object | None]:
+    """Run mini-SWE-agent on one instance. Returns (submission patch or None, exit_status, jingu_body or None, monitor or None)."""
     from minisweagent.run.benchmarks.swebench import process_instance
     from minisweagent.config import get_config_from_spec
     from minisweagent.utils.serialize import recursive_merge
@@ -2396,13 +2396,13 @@ def run_agent(
         if instance_id in preds:
             sub = preds[instance_id].get("model_patch", "")
             if sub:
-                return sub, exit_status, jingu_body
+                return sub, exit_status, jingu_body, _monitor
 
     if sub_from_traj:
-        return sub_from_traj, exit_status, jingu_body
+        return sub_from_traj, exit_status, jingu_body, _monitor
 
     if sub_from_traj_diff:
-        return sub_from_traj_diff, exit_status, jingu_body
+        return sub_from_traj_diff, exit_status, jingu_body, _monitor
 
     return None, exit_status, jingu_body, _monitor
 
