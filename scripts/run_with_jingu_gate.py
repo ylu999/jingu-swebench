@@ -426,7 +426,13 @@ def _install_step_monitor(
                 # P7 fix: _msg_has_signal detects str_replace_editor for both
                 # view and write operations. Guard here: if git diff base_commit
                 # is empty, no real file change happened — skip inner-verify.
+                # P8 fix: also reset _step_patch_non_empty to False so that
+                # patch_first_write pee is NOT triggered by a false _msg_has_signal
+                # (view ops). Without this, _prev_patch_non_empty gets latched True
+                # on a phantom signal, blocking all future pee events and freezing
+                # no_progress_steps at 1 — VerdictStop never fires.
                 if not current_patch:
+                    _step_patch_non_empty = False
                     break
                 with state._lock:
                     state.last_verified_patch = current_patch
