@@ -18,6 +18,7 @@ class Declaration(TypedDict, total=False):
 
 _FIX_TYPE_RE = re.compile(r"FIX_TYPE:\s*([a-z_]+)", re.IGNORECASE)
 _PRINCIPALS_RE = re.compile(r"PRINCIPALS:\s*([^\n]+)", re.IGNORECASE)
+_PHASE_RE = re.compile(r"PHASE:\s*([a-z_]+)", re.IGNORECASE)
 
 
 def extract_declaration(agent_output: str) -> Declaration:
@@ -112,6 +113,20 @@ except Exception:
     }
 
 
+def _extract_phase_from_message(agent_message: str) -> str | None:
+    """Extract PHASE: declaration from agent message.
+
+    Returns the agent-declared phase (uppercased) if found, else None.
+    This is the source of truth for _pr.phase — cp_state.phase is only a fallback.
+    """
+    if not agent_message:
+        return None
+    m = _PHASE_RE.search(agent_message)
+    if not m:
+        return None
+    return m.group(1).strip().upper()
+
+
 def _extract_principals_from_message(agent_message: str) -> list[str]:
     """Extract PRINCIPALS: declaration from anywhere in agent message.
 
@@ -163,7 +178,12 @@ def extract_phase_record(agent_message: str, phase: str, from_steps: list[int] |
     """
     from phase_record import PhaseRecord
 
-    phase_upper = (phase or "").upper()
+    # P14 fix: prefer agent-declared phase over cp_state fallback.
+    # extract_phase_record(msg, cp_s.phase) was using cp_s.phase unconditionally,
+    # so agent declaring "execution" while cp advances to "ANALYZE" produced
+    # _pr.phase="ANALYZE" — wrong contract applied → REJECTED.
+    declared = _extract_phase_from_message(agent_message)
+    phase_upper = declared if declared else (phase or "").upper()
     subtype = _PHASE_SUBTYPE_MAP.get(phase_upper, "unknown")
     principals = _extract_principals_from_message(agent_message)
     evidence_refs = _extract_evidence_refs(agent_message)
