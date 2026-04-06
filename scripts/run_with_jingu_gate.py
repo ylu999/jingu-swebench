@@ -2593,7 +2593,7 @@ def run_with_jingu(instance_id: str, output_dir: Path, max_attempts: int = 3,
                 })
                 # Patch bloat detection: warn if attempt 2 is much larger than attempt 1
                 if attempt >= 2 and len(attempts_log) >= 2:
-                    prev = attempts_log[-2].get("patch_fp", {})
+                    prev = attempts_log[-2].get("patch_fp") or {}
                     prev_size = prev.get("lines_added", 0) + prev.get("lines_removed", 0)
                     curr_size = fp["lines_added"] + fp["lines_removed"]
                     if prev_size > 0 and curr_size > prev_size * 1.5:
