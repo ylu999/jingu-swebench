@@ -399,14 +399,26 @@ def diff_principals(
     declared_norm = {p.lower() for p in declared}
     inferred_norm = {p.lower() for p in inferred_names}
 
-    # inferrable: principals that have at least one registered inference rule.
-    # A declared principal with no inference rule cannot be verified or falsified —
-    # it must not be counted as fake. Only principals the engine can actually
-    # evaluate are subject to the fake check.
-    inferrable = {rule.principal.lower() for rule in _RULE_REGISTRY}
+    # Derive the subtype for this phase so we can determine which rules actually ran.
+    # CC2: inferrable = rules-that-ran for this subtype, NOT all rules in registry.
+    # A rule with applies_to filter that didn't match the current subtype did not run —
+    # its principal cannot be judged fake (absence of unevaluated inference ≠ fake).
+    try:
+        from subtype_contracts import _PHASE_TO_SUBTYPE as _cc2_subtype_map
+        _cc2_subtype = _cc2_subtype_map.get(phase.upper(), "") if phase else ""
+    except Exception:
+        _cc2_subtype = ""
+
+    # inferrable: principals whose rule actually ran for this phase/subtype.
+    # A rule ran if: applies_to is None (all subtypes) OR subtype is in applies_to.
+    inferrable = {
+        rule.principal.lower()
+        for rule in _RULE_REGISTRY
+        if rule.applies_to is None or (_cc2_subtype and _cc2_subtype in rule.applies_to)
+    }
 
     # fake: declared AND inferrable but not inferred (agent claimed without behavioral support)
-    # Principals with no inference rule are excluded — absence of inference ≠ fake.
+    # Principals whose rule didn't run (applies_to mismatch) are excluded — CC2 invariant.
     fake = sorted((declared_norm & inferrable) - inferred_norm)
 
     # missing_required: required by contract but not declared (hard reject)
