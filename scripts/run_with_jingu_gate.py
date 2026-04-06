@@ -574,7 +574,7 @@ def _step_cp_update_and_verdict(
                 get_principal_feedback as _get_pg_feedback,
             )
             from control.reasoning_state import set_principal_violation as _set_pv
-            _admission = _eval_admission(_pr, str(_cp_s.phase))
+            _admission = _eval_admission(_pr, str(_pr.phase).upper())
             print(
                 f"    [principal_gate] phase={_pr.phase} admission={_admission.status}"
                 f" reasons={_admission.reasons}",
