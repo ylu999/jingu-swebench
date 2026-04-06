@@ -1188,6 +1188,8 @@ def build_execution_feedback(
     controlled_passed = test_results.get("controlled_passed")
     controlled_failed = test_results.get("controlled_failed")
     if controlled_passed is not None and controlled_failed is not None:
+        logger.info("[bef] branch=controlled controlled_passed=%s controlled_failed=%s",
+                    controlled_passed, controlled_failed)
         tests_str = ", ".join(fail_to_pass_tests[:4])
         if controlled_failed == 0:
             # Official tests passed — strong SUBMIT signal
@@ -1208,6 +1210,8 @@ def build_execution_feedback(
 
     # No controlled_verify result available — fall back to agent-heuristic (trust=30).
     # NOTE: agent-run tests are LOW TRUST. A failing agent test does NOT mean your patch is wrong.
+    logger.info("[bef] branch=last_passed_fallback tests_ran=%s last_passed=%s",
+                tests_ran, test_results.get("last_passed"))
     test_passed = test_results.get("last_passed")
 
     if not tests_ran:
