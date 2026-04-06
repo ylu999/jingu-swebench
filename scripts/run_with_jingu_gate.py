@@ -588,16 +588,19 @@ def _step_cp_update_and_verdict(
 
         _pr = None
         _pr_source = "none"
+        _pr_foreign_phase = ""   # agent declared a different phase than eval_phase
         try:
-            from declaration_extractor import extract_phase_record as _extract_pr
-            # P14/P15 fix: gate must evaluate _old_phase (the phase being completed),
-            # not the new phase after advance.
+            from declaration_extractor import extract_record_for_phase as _extract_for_phase
+            # Phase addressability invariant:
+            #   record_phase == eval_phase, always.
+            #   Agent-declared phase guides intent detection, NOT gate record selection.
             #
-            # Rule 1: only accept a record whose phase == _old_phase.
-            # Rule 2: if no matching record exists, extract from current message using
-            #         _old_phase as the authoritative phase — never use _cp_s.phase
-            #         (which is already advanced to the next phase).
-            # Rule 3: selector telemetry logged below.
+            # Rule 1: look for a cached record with phase == _old_phase (exact match).
+            # Rule 2: if none found, use extract_record_for_phase(target=_old_phase),
+            #         which enforces target_phase regardless of agent's PHASE: declaration.
+            # Rule 3: if agent declared a foreign phase (≠ eval_phase), log as soft signal;
+            #         do NOT pass those foreign principals to the gate.
+            # Rule 4: telemetry prints eval_phase / record_phase / declared_phase / source.
             _eval_phase = str(_old_phase).upper()
             _prev_pr = next(
                 (r for r in reversed(state.phase_records)
@@ -608,24 +611,30 @@ def _step_cp_update_and_verdict(
                 _pr = _prev_pr
                 _pr_source = "cache"
             else:
-                # No cached record for _old_phase — extract from current message.
-                # Pass _old_phase so the extracted record gets the correct phase/subtype.
-                _pr = _extract_pr(latest_assistant_text, str(_old_phase))
+                # No cached record — extract with target_phase enforced.
+                _pr, _declared_phase, _foreign = _extract_for_phase(
+                    latest_assistant_text, str(_old_phase)
+                )
                 state.phase_records.append(_pr)
                 _pr_source = "extracted"
-            # Rule 3: telemetry — eval_phase / selected_record_phase / source / subtype
+                if _foreign:
+                    _pr_foreign_phase = _declared_phase
+                    # Soft signal: agent declared a foreign phase in this message.
+                    # The extracted record has empty principals/evidence_refs because
+                    # those belong to the foreign phase, not to eval_phase.
+                    print(
+                        f"    [phase_record] foreign_phase_declared:"
+                        f" eval_phase={_eval_phase} declared_phase={_declared_phase}"
+                        f" — principals extracted from foreign context discarded",
+                        flush=True,
+                    )
+            # Rule 4: telemetry
             print(
                 f"    [phase_record] eval_phase={_eval_phase}"
-                f" selected_phase={_pr.phase} source={_pr_source}"
+                f" record_phase={_pr.phase} source={_pr_source}"
                 f" subtype={_pr.subtype} principals={_pr.principals}",
                 flush=True,
             )
-            if _pr.phase.upper() != _eval_phase:
-                print(
-                    f"    [phase_record] MISMATCH: eval_phase={_eval_phase}"
-                    f" but selected_phase={_pr.phase} — gate will use wrong contract",
-                    flush=True,
-                )
         except Exception as _pr_exc:
             print(f"    [phase_record] error (non-fatal): {_pr_exc}", flush=True)
 

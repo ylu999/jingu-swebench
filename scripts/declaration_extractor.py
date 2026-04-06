@@ -186,6 +186,11 @@ def extract_phase_record(agent_message: str, phase: str, from_steps: list[int] |
     - content:       agent_message[:500] (truncated raw content)
 
     Returns a PhaseRecord. Never raises — caller wraps in try/except.
+
+    NOTE: This function uses P14 semantics — agent-declared phase takes priority over
+    the `phase` parameter. This is correct for phase-intent detection (understanding
+    what the agent wants to do next), but NOT for gate evaluation path.
+    For gate evaluation, use extract_record_for_phase() which enforces target_phase.
     """
     from phase_record import PhaseRecord
 
@@ -209,3 +214,64 @@ def extract_phase_record(agent_message: str, phase: str, from_steps: list[int] |
         from_steps=from_steps if from_steps is not None else [],
         content=(agent_message or "")[:500],
     )
+
+
+def extract_record_for_phase(
+    agent_message: str,
+    target_phase: str,
+    from_steps: list[int] | None = None,
+) -> tuple:
+    """
+    Gate evaluation path: extract a PhaseRecord for target_phase.
+
+    Invariant: record_phase == target_phase, always.
+    Agent's self-declared phase DOES NOT override target_phase here.
+
+    This separates two concerns that were conflated in extract_phase_record:
+    - Phase declaration intent (what agent claims it's doing) → extract_phase_record
+    - Gate evaluation record (what gate must evaluate)        → this function
+
+    Returns: (phase_record, declared_phase, foreign_phase_declared)
+      phase_record:          PhaseRecord with phase=target_phase (always)
+      declared_phase:        what the agent declared (may differ from target_phase)
+      foreign_phase_declared: True if declared_phase != target_phase and declared_phase != ""
+
+    Never raises — caller wraps in try/except.
+    """
+    from phase_record import PhaseRecord
+
+    # Step 1: what did the agent declare?
+    declared_raw = _extract_phase_from_message(agent_message)
+    declared_phase = _PHASE_NORM.get(declared_raw, declared_raw) if declared_raw else ""
+
+    # Step 2: target_phase is authoritative for this record — never let agent override it
+    target_upper = _PHASE_NORM.get(target_phase.upper(), target_phase.upper())
+    subtype = _PHASE_SUBTYPE_MAP.get(target_upper, "unknown")
+
+    # Step 3: extract content signals (principals, evidence_refs apply to this record
+    # only if the agent was addressing target_phase, else they belong to another phase)
+    foreign_phase_declared = bool(declared_phase and declared_phase != target_upper)
+    if foreign_phase_declared:
+        # Agent was talking about a different phase — its principals/content don't
+        # belong to target_phase. Build a minimal record so gate can issue
+        # missing_target_phase_record rather than misinterpreting foreign declarations.
+        principals: list[str] = []
+        evidence_refs: list[str] = []
+        content = ""
+    else:
+        # Agent was addressing target_phase (or made no phase declaration) —
+        # extract signals normally.
+        principals = _extract_principals_from_message(agent_message)
+        evidence_refs = _extract_evidence_refs(agent_message)
+        content = (agent_message or "")[:500]
+
+    record = PhaseRecord(
+        phase=target_upper or target_phase,
+        subtype=subtype,
+        principals=principals,
+        claims=[],
+        evidence_refs=evidence_refs,
+        from_steps=from_steps if from_steps is not None else [],
+        content=content,
+    )
+    return record, declared_phase, foreign_phase_declared
