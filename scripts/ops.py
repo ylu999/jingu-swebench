@@ -191,7 +191,22 @@ def cmd_build(args) -> None:
 
 BATCH_GUARD_THRESHOLD = 3  # more than this many instances requires --confirmed
 
+_RUNBOOK_PATH = ".claude/smoke-test-runbook.md"
+
+def _check_runbook_ack(args) -> None:
+    """P1 enforcement: runbook must be explicitly acknowledged before any launch.
+    Passing --runbook-ack is the structural proof that the runbook was read this session.
+    Documentation alone (CLAUDE.md) is not sufficient — this flag makes it machine-checked.
+    """
+    if not getattr(args, "runbook_ack", False):
+        print(f"[ops] ERROR: --runbook-ack flag is required to launch any ECS task.")
+        print(f"[ops] Rule: read the runbook first, then pass --runbook-ack to confirm.")
+        print(f"[ops] Runbook: {_RUNBOOK_PATH}")
+        sys.exit(1)
+
+
 def cmd_run(args) -> None:
+    _check_runbook_ack(args)
     # Batch guard: more than BATCH_GUARD_THRESHOLD instances requires explicit --confirmed flag.
     # This prevents accidental large batch launches without user approval.
     if len(args.instance_ids) > BATCH_GUARD_THRESHOLD and not args.confirmed:
@@ -529,6 +544,9 @@ def cmd_smoke(args) -> None:
     Default filter: [jingu] [cp-step] [control-plane] [agent] errors pee:
     Use --filter to narrow, --all for everything.
     """
+    # Only require --runbook-ack when launching (not when attaching to existing task)
+    if not args.task_id:
+        _check_runbook_ack(args)
     ecs = boto3.client("ecs", region_name=REGION)
 
     # ── Determine filter ──────────────────────────────────────────────────────
@@ -741,6 +759,8 @@ def main():
                        help="Override JINGU_MODEL env var (e.g. bedrock/global.anthropic.claude-opus-4-5-20251101-v1:0)")
     p_run.add_argument("--confirmed", action="store_true",
                        help=f"Required when launching more than {BATCH_GUARD_THRESHOLD} instances (batch guard)")
+    p_run.add_argument("--runbook-ack", action="store_true",
+                       help=f"Required for all launches: confirms runbook ({_RUNBOOK_PATH}) was read this session")
 
     # smoke — launch + live tail, OR attach to existing task
     p_smoke = sub.add_parser(
@@ -765,6 +785,8 @@ def main():
                          help="Override JINGU_MODEL env var (e.g. bedrock/global.anthropic.claude-opus-4-5-20251101-v1:0)")
     p_smoke.add_argument("--confirmed", action="store_true",
                          help=f"Required when launching more than {BATCH_GUARD_THRESHOLD} instances (batch guard)")
+    p_smoke.add_argument("--runbook-ack", action="store_true",
+                         help=f"Required for all launches: confirms runbook ({_RUNBOOK_PATH}) was read this session")
 
     # list-tasks — show currently running/pending ECS tasks
     sub.add_parser("list-tasks", help="List currently RUNNING/PENDING ECS tasks")
