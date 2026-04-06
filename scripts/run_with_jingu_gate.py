@@ -556,8 +556,19 @@ def _step_cp_update_and_verdict(
         _pr = None
         try:
             from declaration_extractor import extract_phase_record as _extract_pr
-            _pr = _extract_pr(latest_assistant_text, str(_cp_s.phase))
-            state.phase_records.append(_pr)
+            # P15 fix: when agent writes code it often omits PHASE/PRINCIPALS declarations.
+            # Prefer the most recent phase_record with non-empty principals from this attempt
+            # (the last cognition-validated record) rather than re-parsing the current step.
+            # Fall back to parsing the current message only when no prior record exists.
+            _prev_pr = next(
+                (r for r in reversed(state.phase_records) if r.principals),
+                None,
+            )
+            if _prev_pr is not None:
+                _pr = _prev_pr
+            else:
+                _pr = _extract_pr(latest_assistant_text, str(_cp_s.phase))
+                state.phase_records.append(_pr)
             print(
                 f"    [phase_record] phase={_pr.phase} subtype={_pr.subtype}"
                 f" principals={_pr.principals}",
