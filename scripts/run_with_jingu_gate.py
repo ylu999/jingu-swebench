@@ -254,6 +254,10 @@ class StepMonitorState:
         if patch_non_empty:
             self._prev_patch_non_empty = True
 
+        _cur_step_index = (
+            cp_state_holder[0].step_index if cp_state_holder is not None
+            else self.cp_state.step_index
+        )
         step_partial, progress_evaluable_event, _pee_reason = extract_step_signals(
             tests_passed_count=tests_now,
             tests_passed_prev=tests_prev,
@@ -262,6 +266,7 @@ class StepMonitorState:
             patch_was_non_empty_prev=patch_prev,
             verify_history_len=verify_len_now,
             verify_history_len_prev=verify_len_prev,
+            step_index=_cur_step_index,
         )
         if cp_state_holder is not None:
             cp_state_holder[0] = update_reasoning_state(

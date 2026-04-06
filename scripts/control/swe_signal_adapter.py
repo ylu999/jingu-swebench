@@ -29,11 +29,24 @@ B5 — progress_evaluable_event (semantic event gating):
       1. inner verify returned new result (verify_history grew)
       2. env failure detected (failure is information)
       3. patch first write (False → True transition, not subsequent edits)
+      4. step_heartbeat: every OBSERVE_HEARTBEAT_INTERVAL steps (prevents permanent
+         stagnation freeze in pure observation loops with no verify/patch signals)
   - Regular read/think/write steps: False → no_progress frozen
   - Rationale: stagnation should be measured at "could-have-progressed" moments,
     not at arbitrary step counts (hardcode) or only at attempt-end (too sparse)
+
+B5.4 — step heartbeat (observe loop escape):
+  - Without verify or patch signals, pure OBSERVE loops never advance no_progress_steps.
+  - This causes permanent phase lock: decide_next() always returns CONTINUE.
+  - Fix: treat every OBSERVE_HEARTBEAT_INTERVAL-th step as a weak evaluable event.
+  - Interval is intentionally large (10) to avoid over-sensitivity on fast steps.
+  - The heartbeat does NOT inject evidence_gain — it only gates stagnation counting.
 """
+
 from __future__ import annotations
+
+# B5.4: heartbeat interval — every N steps counts as an evaluable event in pure observe loops.
+OBSERVE_HEARTBEAT_INTERVAL = 10
 
 
 def extract_step_signals(
@@ -45,6 +58,7 @@ def extract_step_signals(
     patch_was_non_empty_prev: bool = False,
     verify_history_len: int = 0,
     verify_history_len_prev: int = 0,
+    step_index: int = 0,
 ) -> tuple[dict, bool, str]:
     """
     Map one agent step's observable data to a partial CognitionSignals dict
@@ -60,6 +74,7 @@ def extract_step_signals(
         patch_was_non_empty_prev: True if patch was already non-empty before this step
         verify_history_len:       number of inner-verify results available now
         verify_history_len_prev:  number of inner-verify results before this step
+        step_index:               current step number (0-based) — used for B5.4 heartbeat
 
     Returns:
         (partial_signals, progress_evaluable_event, pee_reason)
@@ -68,7 +83,7 @@ def extract_step_signals(
                                   Pass as update_stagnation= to update_reasoning_state()
         pee_reason:               str — which condition triggered pee (empty if not triggered)
                                   One of: "inner_verify_new", "env_error", "patch_first_write",
-                                  or comma-joined if multiple fire simultaneously.
+                                  "step_heartbeat", or comma-joined if multiple fire.
     """
     partial: dict = {}
 
@@ -97,9 +112,13 @@ def extract_step_signals(
     #   2. env failure detected (bad information is still information)
     #   3. patch first write: False → True transition (phase boundary: explore → propose)
     #      NOT subsequent patch edits (would re-introduce over-sensitivity)
+    #   4. step heartbeat: every OBSERVE_HEARTBEAT_INTERVAL steps (B5.4 — observe escape)
     inner_verify_new = verify_history_len > verify_history_len_prev
     patch_first_write = patch_non_empty and not patch_was_non_empty_prev
-    progress_evaluable_event = inner_verify_new or env_error_detected or patch_first_write
+    step_heartbeat = (step_index > 0) and (step_index % OBSERVE_HEARTBEAT_INTERVAL == 0)
+    progress_evaluable_event = (
+        inner_verify_new or env_error_detected or patch_first_write or step_heartbeat
+    )
 
     # Build reason string for observability logging
     reasons = []
@@ -109,6 +128,8 @@ def extract_step_signals(
         reasons.append("env_error")
     if patch_first_write:
         reasons.append("patch_first_write")
+    if step_heartbeat:
+        reasons.append("step_heartbeat")
     pee_reason = ",".join(reasons)
 
     return partial, progress_evaluable_event, pee_reason

@@ -51,16 +51,20 @@ _JUDGE_GUIDANCE = (
 PHASE_GUIDANCE: dict[str, str] = {
     "UNDERSTAND": (
         "Read the issue description and test failures carefully. "
-        "Form a clear problem statement before doing anything else."
+        "Form a clear problem statement before doing anything else. "
+        "You may transition to OBSERVE when you have a clear understanding of the problem."
     ),
     "OBSERVE": (
-        "Focus on gathering evidence. Read files, run tests, understand the failing case. "
-        "Do NOT write code yet. Output: what you found and what it implies."
+        "Suggested phase: OBSERVE. Prefer gathering evidence — read files, run tests, "
+        "understand the failing case. "
+        "You may transition to ANALYZE when you have sufficient evidence to form a hypothesis. "
+        "Output: what you found and what it implies."
     ),
     "ANALYZE": _ANALYZE_GUIDANCE,
     "DECIDE": (
         "Choose the best fix strategy based on your analysis. "
-        "Output: which approach you will take and why."
+        "Output: which approach you will take and why. "
+        "You may transition to EXECUTE when you have a clear, grounded plan."
     ),
     "EXECUTE": _EXECUTE_GUIDANCE,
     "JUDGE": _JUDGE_GUIDANCE,
