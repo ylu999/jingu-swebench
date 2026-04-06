@@ -211,6 +211,10 @@ class StepMonitorState:
         # p190: per-phase records — one PhaseRecord appended on each VerdictAdvance.
         # Written into jingu_body["phase_records"] at attempt end.
         self.phase_records: list = []              # list[PhaseRecord]
+        # P16: RETRYABLE loop breaker — counts consecutive identical (phase, reason) RETRYABLE.
+        # Same phase + same reason N times in a row → ESCALATE_CONTRACT_BUG (VerdictStop).
+        # This is a safety fuse, not a contract substitute. Prevents infinite gate loops.
+        self._retryable_loop_counts: dict[tuple, int] = {}   # (phase, reason) → count
 
     def update_cp_with_step_signals(
         self,
@@ -633,38 +637,66 @@ def _step_cp_update_and_verdict(
                     )
                 else:
                     # RETRYABLE — right phase, incomplete output; redirect to repair
-                    _pv_verdict = decide_next(_cp_s)
-                    print(
-                        f"    [principal_gate] RETRYABLE → cognition_verdict={_pv_verdict.type}"
-                        f" to={getattr(_pv_verdict, 'to', '')}",
-                        flush=True,
+                    # P16 loop breaker: same (phase, reason) 3+ consecutive → ESCALATE
+                    _loop_key = (str(_pr.phase).upper(), _pg_violation)
+                    state._retryable_loop_counts[_loop_key] = (
+                        state._retryable_loop_counts.get(_loop_key, 0) + 1
                     )
-                    if isinstance(_pv_verdict, VerdictRedirect):
-                        # Update cp_state phase to redirect target so subsequent
-                        # decide_next() and evaluate_admission() use the correct phase.
-                        import dataclasses as _dc_ret
-                        if cp_state_holder is not None:
-                            cp_state_holder[0] = _dc_ret.replace(
-                                cp_state_holder[0], phase=_pv_verdict.to
-                            )
-                            _cp_s = cp_state_holder[0]
-                        else:
-                            state.cp_state = _dc_ret.replace(
-                                state.cp_state, phase=_pv_verdict.to
-                            )
-                            _cp_s = state.cp_state
-                        agent_self.messages.append({
-                            "role": "user",
-                            "content": (
-                                f"[Cognition gate RETRYABLE: {_pg_violation}] "
-                                f"{_pg_feedback} "
-                                f"{_pg_guidance} "
-                                f"Return to phase {_pv_verdict.to} before proceeding."
-                            ),
-                        })
-                        # Clear pending_redirect_hint — already injected above,
-                        # so _step_inject_phase won't inject it a second time.
-                        state.pending_redirect_hint = ""
+                    # Reset counts for all OTHER keys (different phase or reason = not same loop)
+                    for _k in list(state._retryable_loop_counts):
+                        if _k != _loop_key:
+                            state._retryable_loop_counts[_k] = 0
+                    _loop_count = state._retryable_loop_counts[_loop_key]
+                    _RETRYABLE_LOOP_LIMIT = 3
+                    if _loop_count >= _RETRYABLE_LOOP_LIMIT:
+                        print(
+                            f"    [principal_gate] ESCALATE_CONTRACT_BUG:"
+                            f" phase={_loop_key[0]} reason={_loop_key[1]}"
+                            f" count={_loop_count} >= {_RETRYABLE_LOOP_LIMIT}"
+                            f" → VerdictStop (contract loop, not agent failure)",
+                            flush=True,
+                        )
+                        state.early_stop_verdict = VerdictStop(reason="no_signal")
+                        _sl = getattr(getattr(agent_self, "config", None), "step_limit", 0)
+                        if _sl > 0:
+                            agent_self.n_calls = _sl
+                        # Skip the redirect injection — stopping here
+                    else:
+                        pass  # fall through to decide_next below
+
+                    if not state.early_stop_verdict:
+                        _pv_verdict = decide_next(_cp_s)
+                        print(
+                            f"    [principal_gate] RETRYABLE → cognition_verdict={_pv_verdict.type}"
+                            f" to={getattr(_pv_verdict, 'to', '')}",
+                            flush=True,
+                        )
+                        if isinstance(_pv_verdict, VerdictRedirect):
+                            # Update cp_state phase to redirect target so subsequent
+                            # decide_next() and evaluate_admission() use the correct phase.
+                            import dataclasses as _dc_ret
+                            if cp_state_holder is not None:
+                                cp_state_holder[0] = _dc_ret.replace(
+                                    cp_state_holder[0], phase=_pv_verdict.to
+                                )
+                                _cp_s = cp_state_holder[0]
+                            else:
+                                state.cp_state = _dc_ret.replace(
+                                    state.cp_state, phase=_pv_verdict.to
+                                )
+                                _cp_s = state.cp_state
+                            agent_self.messages.append({
+                                "role": "user",
+                                "content": (
+                                    f"[Cognition gate RETRYABLE: {_pg_violation}] "
+                                    f"{_pg_feedback} "
+                                    f"{_pg_guidance} "
+                                    f"Return to phase {_pv_verdict.to} before proceeding."
+                                ),
+                            })
+                            # Clear pending_redirect_hint — already injected above,
+                            # so _step_inject_phase won't inject it a second time.
+                            state.pending_redirect_hint = ""
         except Exception as _pg_exc:
             print(f"    [principal_gate] error={_pg_exc}", flush=True)
 

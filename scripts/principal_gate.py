@@ -250,6 +250,23 @@ def evaluate_admission(phase_record, phase: str, next_phase: str = "") -> Admiss
             if not val:  # None, [], "", 0 all count as missing
                 retryable.append(f"missing_required_field:{field_name}")
 
+        # 3b. has_evidence_basis check (RETRYABLE) — for phases that require evidence basis
+        # but NOT specifically file.py:line regex matches (e.g. ANALYZE).
+        # P16 fix: ANALYZE requires evidence *basis* (evidence_refs OR from_steps non-empty),
+        # not a hard evidence_refs field check. This separates representational artifact
+        # (regex-extracted file refs) from cognition requirement (evidence grounding).
+        try:
+            from subtype_contracts import SUBTYPE_CONTRACTS as _SC, _PHASE_TO_SUBTYPE as _PTS
+            _subtype = _PTS.get(phase.upper(), "")
+            _contract = _SC.get(_subtype, {})
+            if _contract.get("has_evidence_basis_required"):
+                _evidence_refs = getattr(phase_record, "evidence_refs", None) or []
+                _from_steps = getattr(phase_record, "from_steps", None) or []
+                if not _evidence_refs and not _from_steps:
+                    retryable.append("missing_evidence_basis")
+        except Exception:
+            pass
+
         # 4. allowed_next transition check (REJECTED — boundary error)
         if next_phase:
             try:

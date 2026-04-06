@@ -72,7 +72,12 @@ SUBTYPE_CONTRACTS: dict[str, SubtypeContract] = {
         ],
         "expected_principals": ["alternative_hypothesis_check", "uncertainty_honesty"],
         "forbidden_principals": ["action_grounding", "minimal_change"],
-        "required_fields": ["evidence_refs"],
+        # P16 fix: evidence_refs removed from required_fields.
+        # ANALYZE requires evidence *basis* (evidence_refs OR from_steps), not
+        # specifically file.py:line regex matches from the current step message.
+        # The has_evidence_basis check in principal_gate handles this semantic requirement.
+        "required_fields": [],
+        "has_evidence_basis_required": True,   # checked by principal_gate, not field-presence
         "allowed_next": ["DECIDE", "ANALYZE", "OBSERVE"],
         "repair_target": "OBSERVE",
     },
