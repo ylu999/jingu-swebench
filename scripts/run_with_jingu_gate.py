@@ -587,28 +587,45 @@ def _step_cp_update_and_verdict(
         print(f"    [cp] phase_advance from={_old_phase} to={_step_verdict.to}", flush=True)
 
         _pr = None
+        _pr_source = "none"
         try:
             from declaration_extractor import extract_phase_record as _extract_pr
-            # P15 fix: when agent writes code it often omits PHASE/PRINCIPALS declarations.
-            # Prefer the most recent phase_record with non-empty principals from the SAME phase
-            # (the last cognition-validated record for _old_phase) rather than re-parsing.
-            # Must match _old_phase to avoid carrying ANALYZE principals into EXECUTE advance.
-            # Fall back to parsing the current message only when no matching record exists.
+            # P14/P15 fix: gate must evaluate _old_phase (the phase being completed),
+            # not the new phase after advance.
+            #
+            # Rule 1: only accept a record whose phase == _old_phase.
+            # Rule 2: if no matching record exists, extract from current message using
+            #         _old_phase as the authoritative phase — never use _cp_s.phase
+            #         (which is already advanced to the next phase).
+            # Rule 3: selector telemetry logged below.
+            _eval_phase = str(_old_phase).upper()
             _prev_pr = next(
                 (r for r in reversed(state.phase_records)
-                 if r.principals and r.phase.upper() == str(_old_phase).upper()),
+                 if r.phase.upper() == _eval_phase),
                 None,
             )
             if _prev_pr is not None:
                 _pr = _prev_pr
+                _pr_source = "cache"
             else:
-                _pr = _extract_pr(latest_assistant_text, str(_cp_s.phase))
+                # No cached record for _old_phase — extract from current message.
+                # Pass _old_phase so the extracted record gets the correct phase/subtype.
+                _pr = _extract_pr(latest_assistant_text, str(_old_phase))
                 state.phase_records.append(_pr)
+                _pr_source = "extracted"
+            # Rule 3: telemetry — eval_phase / selected_record_phase / source / subtype
             print(
-                f"    [phase_record] phase={_pr.phase} subtype={_pr.subtype}"
-                f" principals={_pr.principals}",
+                f"    [phase_record] eval_phase={_eval_phase}"
+                f" selected_phase={_pr.phase} source={_pr_source}"
+                f" subtype={_pr.subtype} principals={_pr.principals}",
                 flush=True,
             )
+            if _pr.phase.upper() != _eval_phase:
+                print(
+                    f"    [phase_record] MISMATCH: eval_phase={_eval_phase}"
+                    f" but selected_phase={_pr.phase} — gate will use wrong contract",
+                    flush=True,
+                )
         except Exception as _pr_exc:
             print(f"    [phase_record] error (non-fatal): {_pr_exc}", flush=True)
 
@@ -620,10 +637,12 @@ def _step_cp_update_and_verdict(
                 get_principal_feedback as _get_pg_feedback,
             )
             from control.reasoning_state import set_principal_violation as _set_pv
-            _admission = _eval_admission(_pr, str(_pr.phase).upper())
+            # Rule 1: evaluate against _old_phase (the phase being completed), not _pr.phase
+            # (which may differ if the record was extracted with wrong phase in prior sessions).
+            _admission = _eval_admission(_pr, _eval_phase)
             print(
-                f"    [principal_gate] phase={_pr.phase} admission={_admission.status}"
-                f" reasons={_admission.reasons}",
+                f"    [principal_gate] eval_phase={_eval_phase} record_phase={_pr.phase}"
+                f" admission={_admission.status} reasons={_admission.reasons}",
                 flush=True,
             )
             if _admission.status in ("RETRYABLE", "REJECTED"):
@@ -665,7 +684,8 @@ def _step_cp_update_and_verdict(
                 else:
                     # RETRYABLE — right phase, incomplete output; redirect to repair
                     # P16 loop breaker: same (phase, reason) 3+ consecutive → ESCALATE
-                    _loop_key = (str(_pr.phase).upper(), _pg_violation)
+                    # Rule 4: loop key must bind (eval_phase, reason) — not _pr.phase
+                    _loop_key = (_eval_phase, _pg_violation)
                     state._retryable_loop_counts[_loop_key] = (
                         state._retryable_loop_counts.get(_loop_key, 0) + 1
                     )
@@ -729,7 +749,7 @@ def _step_cp_update_and_verdict(
             if _pr is None:
                 raise RuntimeError("phase_record unavailable, skipping inference check")
             from principal_gate import check_principal_inference as _check_pi
-            _inf_violation = _check_pi(_pr, str(_cp_s.phase))
+            _inf_violation = _check_pi(_pr, _eval_phase)
             if _inf_violation and "fake_principal" in _inf_violation:
                 try:
                     from subtype_contracts import get_repair_target as _get_repair_target
@@ -752,12 +772,12 @@ def _step_cp_update_and_verdict(
                 raise RuntimeError("phase_record unavailable, skipping telemetry")
             from principal_inference import run_inference, diff_principals
             from subtype_contracts import _PHASE_TO_SUBTYPE as _pi_phase_map
-            _pi_subtype = _pi_phase_map.get(str(_cp_s.phase).upper(), "")
+            _pi_subtype = _pi_phase_map.get(_eval_phase, "")
             _inf_rich = run_inference(_pr, _pi_subtype)
             diff_principals(
                 getattr(_pr, "principals", []) or [],
                 _inf_rich,
-                phase=str(_cp_s.phase),
+                phase=_eval_phase,
             )
         except Exception:
             pass
