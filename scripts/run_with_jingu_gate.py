@@ -51,6 +51,17 @@ from control.reasoning_state import (
 )
 from control.swe_signal_adapter import extract_verify_signals, extract_step_signals, extract_weak_progress
 
+
+class StopExecution(Exception):
+    """Raised by _monitored_step when VerdictStop is issued.
+    Immediately interrupts the agent step loop — no delayed enforcement via n_calls.
+    Caught in run_agent's process_instance wrapper; treated as a clean early exit.
+    """
+    def __init__(self, reason: str):
+        self.reason = reason
+        super().__init__(f"StopExecution: {reason}")
+
+
 # P-INV-001: run environment invariant checks before any batch work
 run_preflight()
 
@@ -542,14 +553,12 @@ def _step_cp_update_and_verdict(
 
     if isinstance(_step_verdict, VerdictStop):
         state.early_stop_verdict = _step_verdict
-        _sl = getattr(getattr(agent_self, "config", None), "step_limit", 0)
-        if _sl > 0:
-            agent_self.n_calls = _sl
-            print(
-                f"    [cp] VerdictStop enforcement: n_calls set to step_limit={_sl}"
-                f" — agent will stop after this step",
-                flush=True,
-            )
+        print(
+            f"    [cp] VerdictStop enforcement: raising StopExecution({_step_verdict.reason})"
+            f" — immediate interrupt, no phase injection",
+            flush=True,
+        )
+        raise StopExecution(_step_verdict.reason)
 
     elif isinstance(_step_verdict, VerdictRedirect):
         state.pending_redirect_hint = f"[REDIRECT:{_step_verdict.to}] {_step_verdict.reason}"
@@ -646,14 +655,12 @@ def _step_cp_update_and_verdict(
                 if _admission.status == "REJECTED":
                     # Phase boundary error — stop attempt, do not redirect
                     state.early_stop_verdict = VerdictStop(reason="no_signal")
-                    _sl = getattr(getattr(agent_self, "config", None), "step_limit", 0)
-                    if _sl > 0:
-                        agent_self.n_calls = _sl
                     print(
                         f"    [principal_gate] REJECTED → VerdictStop"
                         f" reasons={_admission.reasons}",
                         flush=True,
                     )
+                    raise StopExecution("no_signal")
                 else:
                     # RETRYABLE — right phase, incomplete output; redirect to repair
                     # P16 loop breaker: same (phase, reason) 3+ consecutive → ESCALATE
@@ -676,10 +683,8 @@ def _step_cp_update_and_verdict(
                             flush=True,
                         )
                         state.early_stop_verdict = VerdictStop(reason="no_signal")
-                        _sl = getattr(getattr(agent_self, "config", None), "step_limit", 0)
-                        if _sl > 0:
-                            agent_self.n_calls = _sl
-                        # Skip the redirect injection — stopping here
+                        raise StopExecution("no_signal")
+                        # Skip the redirect injection — stopping here (unreachable but documents intent)
                     else:
                         pass  # fall through to decide_next below
 
@@ -839,14 +844,20 @@ def _install_step_monitor(
         _patch_non_empty = _step_verify_if_needed(
             self, state=_state, verify_debounce_s=VERIFY_DEBOUNCE_S
         )
-        _step_cp_update_and_verdict(
-            self,
-            state=_state,
-            cp_state_holder=_cp_holder,
-            env_error_detected=_env_error,
-            step_patch_non_empty=_patch_non_empty,
-            latest_assistant_text=_latest_assistant_text,
-        )
+        try:
+            _step_cp_update_and_verdict(
+                self,
+                state=_state,
+                cp_state_holder=_cp_holder,
+                env_error_detected=_env_error,
+                step_patch_non_empty=_patch_non_empty,
+                latest_assistant_text=_latest_assistant_text,
+            )
+        except StopExecution:
+            # VerdictStop issued — skip phase injection and propagate up to run_agent.
+            # This is the correct termination path: immediate interrupt, no delayed enforcement.
+            raise
+
         _step_inject_phase(self, cp_state_holder=_cp_holder, state=_state)
 
         return result
@@ -2335,6 +2346,15 @@ def run_agent(
     with _step_patch, ScopedPatch(_DA, "run", _verifying_run):
         try:
             process_instance(instance, attempt_dir, config, progress)
+        except StopExecution as e:
+            # VerdictStop: clean early exit — not an error.
+            # _monitor.early_stop_verdict is already set; caller (run_with_jingu) will
+            # log and break the attempt loop.
+            print(
+                f"  [cp] early_stop instance={instance_id} attempt={attempt}"
+                f" reason={e.reason} — StopExecution caught, exiting agent loop",
+                flush=True,
+            )
         except Exception as e:
             print(f"    [agent] ERROR: {e}")
             traceback.print_exc()
