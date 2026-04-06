@@ -50,6 +50,7 @@ from control.reasoning_state import (
     VerdictStop, VerdictRedirect, VerdictAdvance, VerdictContinue,
 )
 from control.swe_signal_adapter import extract_verify_signals, extract_step_signals, extract_weak_progress
+from control.phase_result import build_phase_result, route_from_phase_result
 
 
 class StopExecution(Exception):
@@ -2625,13 +2626,46 @@ def run_with_jingu(instance_id: str, output_dir: Path, max_attempts: int = 3,
                 flush=True,
             )
             if _esv.reason == "no_signal":
-                # Equivalent to steps_since_last_signal >= NO_SIGNAL_THRESHOLD path.
-                # Preserve last_failure for NBR compliance if more attempts remain.
-                last_failure = (
-                    "Previous attempt stopped early: no progress signal detected "
-                    "(control-plane verdict=STOP no_signal). "
-                    "Change your approach entirely — avoid repeated reads without writing code."
+                # p202: build typed PhaseResult from monitor state — parallel path.
+                # Old generic last_failure kept as fallback; PhaseResult hint overrides
+                # for the 3 known subtypes (NO_PATCH / NO_VERIFY / VERIFY_STALL).
+                _mon = _attempt_monitor
+                _tr = (jingu_body or {}).get("test_results", {})
+                _phase_result = build_phase_result(
+                    str(_mon.cp_state.phase).upper(),
+                    has_patch=_mon._prev_patch_non_empty,
+                    has_inner_verify=len(_mon.verify_history) > 0,
+                    test_results=_tr,
+                    no_progress_steps=_mon.cp_state.no_progress_steps,
+                    early_stop_reason=_esv.reason,
                 )
+                _pr_route, _pr_target, _pr_hint = route_from_phase_result(_phase_result)
+                print(
+                    f"  [phase_result] phase={_phase_result.phase}"
+                    f" outcome={_phase_result.outcome}"
+                    f" verdict={_phase_result.verdict}"
+                    f" route={_pr_route}"
+                    f" target={_pr_target or '-'}"
+                    f" trust={_phase_result.trust_score or '-'}"
+                    f" reason={_phase_result.judge_reason}",
+                    flush=True,
+                )
+                # Override last_failure with typed hint for the 3 known subtypes.
+                # Other cases fall through to the generic message below.
+                _typed_subtypes = {
+                    "NO_SIGNAL_NO_PATCH",
+                    "NO_SIGNAL_NO_VERIFY",
+                    "NO_SIGNAL_STALLED_AFTER_VERIFY",
+                }
+                if _phase_result.outcome in _typed_subtypes and _pr_hint:
+                    last_failure = _pr_hint
+                else:
+                    # Fallback: generic no_signal message (old behaviour preserved).
+                    last_failure = (
+                        "Previous attempt stopped early: no progress signal detected "
+                        "(control-plane verdict=STOP no_signal). "
+                        "Change your approach entirely — avoid repeated reads without writing code."
+                    )
             # For task_success: controlled_verify confirmed pass, no retry needed.
             break
 
