@@ -50,7 +50,11 @@ RouteAction = Literal[
 
 Outcome = Literal[
     "SUCCESS",
-    "NO_SIGNAL_NO_PATCH",              # agent never produced a patch
+    # NO_PATCH subtypes (p202): classify why agent never produced a valid patch
+    "NO_PATCH_NO_ATTEMPT",             # phase never reached EXECUTE (stopped in OBSERVE/ANALYZE/DECIDE)
+    "NO_PATCH_NO_WRITE",               # EXECUTE phase entered but files_written=0
+    "NO_PATCH_WRITE_FAIL",             # files written but patch empty/invalid (git diff empty)
+    "NO_PATCH_ABORTED",                # no_progress_steps fired before patch was produced
     "NO_SIGNAL_NO_VERIFY",             # patch exists, no verify ran
     "NO_SIGNAL_STALLED_AFTER_VERIFY",  # verify ran, no new signal afterward
     "PRINCIPAL_GATE_LOOP",             # same (phase, reason) repeated ≥ 3
@@ -60,9 +64,12 @@ Outcome = Literal[
 JudgeReason = Literal[
     "controlled_tests_passed",  # SUCCESS: controlled_verify confirmed all pass
     "controlled_tests_failed",  # HARD_FAIL: controlled_verify confirmed failure
-    "execution_not_reached",    # NO_PATCH: agent never produced a patch
-    "missing_verify_step",      # PATCH_NO_VERIFY: patch exists, no verify ran
-    "verify_no_new_signal",     # PATCH_VERIFY_STALL: verify ran, no new signal
+    "no_patch_no_attempt",      # NO_PATCH_NO_ATTEMPT: stopped before EXECUTE phase
+    "no_patch_no_write",        # NO_PATCH_NO_WRITE: EXECUTE entered, files_written=0
+    "no_patch_write_fail",      # NO_PATCH_WRITE_FAIL: wrote files but patch empty
+    "no_patch_aborted",         # NO_PATCH_ABORTED: no_progress cut in before patch
+    "missing_verify_step",      # NO_SIGNAL_NO_VERIFY: patch exists, no verify ran
+    "verify_no_new_signal",     # NO_SIGNAL_STALLED_AFTER_VERIFY: verify ran, no signal
     "principal_gate_loop",      # same RETRYABLE (phase, reason) repeated ≥ 3
     "no_progress_timeout",      # generic P7 exhaustion (fallback)
 ]
@@ -134,20 +141,56 @@ def phase_result_success(
     )
 
 
-def phase_result_no_patch(phase: PhaseName) -> PhaseResult:
-    """Agent never produced a patch. Redirect to EXECUTE."""
+def phase_result_no_patch(
+    phase: PhaseName,
+    subtype: "Outcome | None" = None,
+) -> "PhaseResult":
+    """Agent never produced a valid patch. Redirect to EXECUTE.
+
+    subtype selects the fine-grained NO_PATCH_* outcome; defaults to NO_PATCH_NO_ATTEMPT
+    when omitted (backwards compat).
+    """
+    outcome: Outcome = subtype if subtype is not None else "NO_PATCH_NO_ATTEMPT"  # type: ignore[assignment]
+    reason_map: dict[str, JudgeReason] = {
+        "NO_PATCH_NO_ATTEMPT": "no_patch_no_attempt",
+        "NO_PATCH_NO_WRITE":   "no_patch_no_write",
+        "NO_PATCH_WRITE_FAIL": "no_patch_write_fail",
+        "NO_PATCH_ABORTED":    "no_patch_aborted",
+    }
+    judge_reason: JudgeReason = reason_map.get(str(outcome), "no_patch_no_attempt")  # type: ignore[assignment]
+
+    hint_map = {
+        "NO_PATCH_NO_ATTEMPT": (
+            "You never reached the execution phase. Stop reading and start writing code. "
+            "Identify the target file, write a minimal patch, then run the tests."
+        ),
+        "NO_PATCH_NO_WRITE": (
+            "You entered execution but wrote no files. You must modify source code. "
+            "Write a patch to the identified target file now."
+        ),
+        "NO_PATCH_WRITE_FAIL": (
+            "You modified files but the resulting patch was empty or invalid. "
+            "Ensure your changes produce a non-empty git diff on source files, not test files."
+        ),
+        "NO_PATCH_ABORTED": (
+            "You were making progress but stalled before producing a patch. "
+            "Write the patch now — do not keep reading without writing."
+        ),
+    }
+    hint = hint_map.get(str(outcome), (
+        "You must write code. Reading and reasoning without writing a patch is not progress. "
+        "Produce a minimal patch that addresses the root cause, then run the tests."
+    ))
+
     return PhaseResult(
         phase=phase,
         verdict="SOFT_FAIL",
         route="REDIRECT",
-        outcome="NO_SIGNAL_NO_PATCH",
-        judge_reason="execution_not_reached",
+        outcome=outcome,
+        judge_reason=judge_reason,
         redirect_target="EXECUTE",
         produced=False,
-        hint=(
-            "You must write code. Reading and reasoning without writing a patch is not progress. "
-            "Produce a minimal patch that addresses the root cause, then run the tests."
-        ),
+        hint=hint,
     )
 
 
@@ -230,6 +273,8 @@ def phase_result_hard_failure(
 # Signal classifier — pure function, no side effects
 # ---------------------------------------------------------------------------
 
+_EXECUTE_OR_LATER = {"EXECUTE", "JUDGE"}
+
 def _classify_signal_pipeline(
     has_patch: bool,
     has_inner_verify: bool,
@@ -237,6 +282,8 @@ def _classify_signal_pipeline(
     controlled_failed: Optional[int],
     no_progress_steps: int,
     early_stop_reason: str,
+    files_written: int = 0,
+    phase: str = "OBSERVE",
 ) -> tuple[Outcome, JudgeReason]:
     """
     Classify where in the signal pipeline the attempt broke down.
@@ -244,10 +291,14 @@ def _classify_signal_pipeline(
     Priority order (most specific → least specific):
       1. controlled_verify result present → SUCCESS or HARD_FAILURE
       2. principal_gate_loop              → PRINCIPAL_GATE_LOOP
-      3. no patch produced                → NO_SIGNAL_NO_PATCH
+      3. no patch produced                → NO_PATCH_* subtype (p202)
+         a. phase never reached EXECUTE   → NO_PATCH_NO_ATTEMPT
+         b. EXECUTE entered, 0 writes     → NO_PATCH_NO_WRITE
+         c. files written, patch invalid  → NO_PATCH_WRITE_FAIL
+         d. no_progress fired before patch→ NO_PATCH_ABORTED
       4. patch but no verify              → NO_SIGNAL_NO_VERIFY
       5. patch + verify but stalled       → NO_SIGNAL_STALLED_AFTER_VERIFY
-      6. fallback                         → NO_SIGNAL_NO_PATCH (generic P7)
+      6. fallback                         → NO_SIGNAL_STALLED_AFTER_VERIFY
     """
     # 1. Controlled verify result is ground truth — highest priority
     if controlled_passed is not None and controlled_failed is not None:
@@ -260,9 +311,19 @@ def _classify_signal_pipeline(
     if early_stop_reason == "principal_gate_loop":
         return "PRINCIPAL_GATE_LOOP", "principal_gate_loop"
 
-    # 3. No patch ever written — agent stayed in cognition loop
+    # 3. No patch — classify which stage broke down (p202 NO_PATCH subtypes)
     if not has_patch:
-        return "NO_SIGNAL_NO_PATCH", "execution_not_reached"
+        # 3d. no_progress fired before any patch was produced
+        if no_progress_steps > 0:
+            return "NO_PATCH_ABORTED", "no_patch_aborted"
+        # 3a. phase never reached EXECUTE
+        if phase.upper() not in _EXECUTE_OR_LATER:
+            return "NO_PATCH_NO_ATTEMPT", "no_patch_no_attempt"
+        # 3b. EXECUTE or later, but zero files written
+        if files_written == 0:
+            return "NO_PATCH_NO_WRITE", "no_patch_no_write"
+        # 3c. files written but patch still empty/invalid
+        return "NO_PATCH_WRITE_FAIL", "no_patch_write_fail"
 
     # 4. Patch exists but no verify step ran
     if not has_inner_verify:
@@ -288,6 +349,7 @@ def build_phase_result(
     test_results: Optional[dict],
     no_progress_steps: int,
     early_stop_reason: str = "no_signal",
+    files_written: int = 0,
 ) -> PhaseResult:
     """
     Bridge from runtime state to PhaseResult.
@@ -323,6 +385,8 @@ def build_phase_result(
         controlled_failed=controlled_failed,
         no_progress_steps=no_progress_steps,
         early_stop_reason=early_stop_reason,
+        files_written=files_written,
+        phase=phase,
     )
 
     # Derive trust_score from verification source (p201 trust hierarchy)
@@ -339,8 +403,8 @@ def build_phase_result(
         return phase_result_hard_failure(phase, trust_score=trust_score)
     elif outcome == "PRINCIPAL_GATE_LOOP":
         return phase_result_principal_loop(phase)
-    elif outcome == "NO_SIGNAL_NO_PATCH":
-        return phase_result_no_patch(phase)
+    elif outcome in ("NO_PATCH_NO_ATTEMPT", "NO_PATCH_NO_WRITE", "NO_PATCH_WRITE_FAIL", "NO_PATCH_ABORTED"):
+        return phase_result_no_patch(phase, subtype=outcome)  # type: ignore[arg-type]
     elif outcome == "NO_SIGNAL_NO_VERIFY":
         return phase_result_no_verify(phase)
     else:  # NO_SIGNAL_STALLED_AFTER_VERIFY

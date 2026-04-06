@@ -2640,6 +2640,7 @@ def run_with_jingu(instance_id: str, output_dir: Path, max_attempts: int = 3,
                     test_results=_tr,
                     no_progress_steps=cp_state_holder[0].no_progress_steps,
                     early_stop_reason=_esv.reason,
+                    files_written=len((jingu_body or {}).get("files_written", [])),
                 )
                 _pr_route, _pr_target, _pr_hint = route_from_phase_result(_phase_result)
                 print(
@@ -2655,7 +2656,10 @@ def run_with_jingu(instance_id: str, output_dir: Path, max_attempts: int = 3,
                 # Override last_failure with typed hint for the 3 known subtypes.
                 # Other cases fall through to the generic message below.
                 _typed_subtypes = {
-                    "NO_SIGNAL_NO_PATCH",
+                    "NO_PATCH_NO_ATTEMPT",
+                    "NO_PATCH_NO_WRITE",
+                    "NO_PATCH_WRITE_FAIL",
+                    "NO_PATCH_ABORTED",
                     "NO_SIGNAL_NO_VERIFY",
                     "NO_SIGNAL_STALLED_AFTER_VERIFY",
                 }
@@ -2680,6 +2684,7 @@ def run_with_jingu(instance_id: str, output_dir: Path, max_attempts: int = 3,
                     test_results=_tr_ts,
                     no_progress_steps=cp_state_holder[0].no_progress_steps,
                     early_stop_reason="task_success",
+                    files_written=len((_tr_ts or {}).get("files_written", [])),
                 )
                 _pr_ts_route, _pr_ts_target, _ = route_from_phase_result(_pr_ts)
                 print(
@@ -2968,6 +2973,7 @@ def run_with_jingu(instance_id: str, output_dir: Path, max_attempts: int = 3,
                                 test_results=_tr_cpv,
                                 no_progress_steps=cp_state_holder[0].no_progress_steps,
                                 early_stop_reason=cp_verdict.reason,
+                                files_written=len((jingu_body or {}).get("files_written", [])),
                             )
                             _pr_cpv_route, _pr_cpv_target, _ = route_from_phase_result(_pr_cpv)
                             print(
@@ -3006,6 +3012,7 @@ def run_with_jingu(instance_id: str, output_dir: Path, max_attempts: int = 3,
                                 test_results=_tr_sf,
                                 no_progress_steps=cp_state_holder[0].no_progress_steps,
                                 early_stop_reason=retry_plan.control_action.lower(),
+                                files_written=len((jingu_body or {}).get("files_written", [])),
                             )
                             _pr_sf_route, _pr_sf_target, _ = route_from_phase_result(_pr_sf)
                             print(
@@ -3032,6 +3039,7 @@ def run_with_jingu(instance_id: str, output_dir: Path, max_attempts: int = 3,
                                 test_results=_tr_vp,
                                 no_progress_steps=cp_state_holder[0].no_progress_steps,
                                 early_stop_reason="verified_pass",
+                                files_written=len((jingu_body or {}).get("files_written", [])),
                             )
                             _pr_vp_route, _pr_vp_target, _ = route_from_phase_result(_pr_vp)
                             print(
