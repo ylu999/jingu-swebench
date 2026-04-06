@@ -751,19 +751,55 @@ def _step_cp_update_and_verdict(
             from principal_gate import check_principal_inference as _check_pi
             _inf_violation = _check_pi(_pr, _eval_phase)
             if _inf_violation and "fake_principal" in _inf_violation:
+                # CC2: fake principal = declared but not supported by behavioral evidence.
+                # Only fake_checkable principals (stage 4, has inference rule) reach here.
+                # Treat as RETRYABLE — same loop-break logic as evaluate_admission RETRYABLE.
                 try:
-                    from subtype_contracts import get_repair_target as _get_repair_target
-                    _inf_repair = _get_repair_target(str(_cp_s.phase))
+                    from subtype_contracts import (
+                        get_repair_target as _get_repair_target,
+                        build_phase_principal_guidance as _build_pg_guidance,
+                    )
+                    _inf_repair = _get_repair_target(_eval_phase)
+                    _inf_guidance = _build_pg_guidance(_eval_phase)
                 except Exception:
                     _inf_repair = ""
+                    _inf_guidance = ""
+                _inf_repair_suffix = f" Repair phase: {_inf_repair}." if _inf_repair else ""
                 state.pending_redirect_hint = (
-                    f"[PRINCIPAL_MISMATCH:{_inf_violation}] "
+                    f"[RETRYABLE:{_inf_violation}] "
                     f"Your declared principals are not supported by your reasoning. "
-                    f"Strengthen your reasoning before declaring these principals. "
-                    f"Redirect to {_inf_repair or 'previous phase'} phase."
+                    f"Provide concrete evidence (file references, causal reasoning) "
+                    f"before declaring these principals.{_inf_repair_suffix} {_inf_guidance}"
                 )
+                print(
+                    f"    [principal_inference] FAKE_RETRYABLE: phase={_eval_phase}"
+                    f" violation={_inf_violation} repair={_inf_repair}",
+                    flush=True,
+                )
+                # Loop-break: same (eval_phase, violation) N+ times → ESCALATE
+                _fi_loop_key = (_eval_phase, _inf_violation)
+                state._retryable_loop_counts[_fi_loop_key] = (
+                    state._retryable_loop_counts.get(_fi_loop_key, 0) + 1
+                )
+                for _k in list(state._retryable_loop_counts):
+                    if _k != _fi_loop_key:
+                        state._retryable_loop_counts[_k] = 0
+                _fi_loop_count = state._retryable_loop_counts[_fi_loop_key]
+                _FAKE_LOOP_LIMIT = 3
+                if _fi_loop_count >= _FAKE_LOOP_LIMIT:
+                    print(
+                        f"    [principal_inference] ESCALATE_FAKE_LOOP:"
+                        f" phase={_eval_phase} violation={_inf_violation}"
+                        f" count={_fi_loop_count} >= {_FAKE_LOOP_LIMIT}"
+                        f" → VerdictStop (fake principal loop, not agent failure)",
+                        flush=True,
+                    )
+                    state.early_stop_verdict = VerdictStop(reason="no_signal")
+                    raise StopExecution("no_signal")
             elif _inf_violation and "missing_required" in _inf_violation:
                 pass  # logged by principal_gate above; inference perspective is telemetry only
+        except StopExecution:
+            raise  # ESCALATE_FAKE_LOOP issued — propagate to outer handler
         except Exception as _pi_exc:
             print(f"    [principal_inference] check error={_pi_exc}", flush=True)
 
