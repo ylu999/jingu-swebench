@@ -27,6 +27,7 @@ import sys
 import tempfile
 import time
 import traceback
+import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
@@ -153,6 +154,24 @@ def _verify_prerequisites(cognition_result: str | None = None, judge_result=None
     except Exception:
         # Conservative fallback: allow controlled_verify to run on unexpected errors
         return True, ""
+
+# P18: per-instance monitor registry — concurrent-safe dispatch.
+# Maps instance_id → (StepMonitorState, cp_state_holder, mode).
+# _monitored_step and _verifying_run look up state by self.instance_id,
+# so parallel workers each see their own state regardless of class-level patch order.
+_INSTANCE_MONITOR_REGISTRY: dict[str, tuple] = {}
+_INSTANCE_MONITOR_REGISTRY_LOCK = threading.Lock()
+
+
+def _register_monitor(instance_id: str, state, cp_state_holder, mode: str) -> None:
+    with _INSTANCE_MONITOR_REGISTRY_LOCK:
+        _INSTANCE_MONITOR_REGISTRY[instance_id] = (state, cp_state_holder, mode)
+
+
+def _unregister_monitor(instance_id: str) -> None:
+    with _INSTANCE_MONITOR_REGISTRY_LOCK:
+        _INSTANCE_MONITOR_REGISTRY.pop(instance_id, None)
+
 
 # ╔══════════════════════════════════════════════════════════════════════════════╗
 # ║  LAYER 2 — RUNTIME STATE (agent responsibility)                             ║
@@ -797,26 +816,38 @@ def _install_step_monitor(
     _orig_step = ProgressTrackingAgent.step
     state = StepMonitorState(instance_id, attempt, instance)
 
+    # P18: register state in global registry keyed by instance_id.
+    # _monitored_step dispatches via self.instance_id, not closure — concurrent-safe.
+    _register_monitor(instance_id, state, cp_state_holder, mode)
+
     def _monitored_step(self):
         result = _orig_step(self)
+
+        # P18: dispatch via instance_id — each parallel worker finds its own state.
+        _iid = getattr(self, "instance_id", instance_id)
+        with _INSTANCE_MONITOR_REGISTRY_LOCK:
+            _entry = _INSTANCE_MONITOR_REGISTRY.get(_iid)
+        if _entry is None:
+            return result  # registry cleared (run finished) — skip monitoring
+        _state, _cp_holder, _mode = _entry
 
         # Thin orchestrator: delegates to the four section functions above.
         # Each section is independently testable and has explicit parameter contracts.
         _latest_assistant_text, _snippet, _env_error = _step_observe(
-            self, step_n=self.n_calls, mode=mode
+            self, step_n=self.n_calls, mode=_mode
         )
         _patch_non_empty = _step_verify_if_needed(
-            self, state=state, verify_debounce_s=VERIFY_DEBOUNCE_S
+            self, state=_state, verify_debounce_s=VERIFY_DEBOUNCE_S
         )
         _step_cp_update_and_verdict(
             self,
-            state=state,
-            cp_state_holder=cp_state_holder,
+            state=_state,
+            cp_state_holder=_cp_holder,
             env_error_detected=_env_error,
             step_patch_non_empty=_patch_non_empty,
             latest_assistant_text=_latest_assistant_text,
         )
-        _step_inject_phase(self, cp_state_holder=cp_state_holder, state=state)
+        _step_inject_phase(self, cp_state_holder=_cp_holder, state=_state)
 
         return result
 
@@ -2184,10 +2215,17 @@ def run_agent(
     _orig_run = _DA.run   # captured here; ScopedPatch restores it on __exit__
 
     def _verifying_run(self_agent, *args, **kwargs):
+        # P18: look up this agent's monitor from registry — avoids using closed-over
+        # _monitor which may belong to a different parallel worker.
+        _iid = getattr(self_agent, "instance_id", instance_id)
+        with _INSTANCE_MONITOR_REGISTRY_LOCK:
+            _vr_entry = _INSTANCE_MONITOR_REGISTRY.get(_iid)
+        _vr_monitor = _vr_entry[0] if _vr_entry is not None else _monitor
+
         # Inject container_id so step monitor can start verifying mid-run
         cid = getattr(getattr(self_agent, 'env', None), 'container_id', None)
-        if cid and not _monitor.container_id:
-            _monitor.container_id = cid
+        if cid and not _vr_monitor.container_id:
+            _vr_monitor.container_id = cid
             print(f"    [inner-verify] container ready: {cid[:12]}...", flush=True)
 
         result = _orig_run(self_agent, *args, **kwargs)
@@ -2222,7 +2260,7 @@ def run_agent(
             print(f"    [cognition_gate] phase=JUDGE result={_cg_result_str}", flush=True)
             if not _cg_pass:
                 # Inject feedback as redirect hint — agent receives it on next attempt
-                _monitor.pending_redirect_hint = f"[COGNITION_FAIL] {_cg_feedback}"
+                _vr_monitor.pending_redirect_hint = f"[COGNITION_FAIL] {_cg_feedback}"
                 print(
                     f"    [cognition_gate] skipping controlled_verify — feedback injected",
                     flush=True,
@@ -2255,11 +2293,11 @@ def run_agent(
             if not _judge_result.all_pass:
                 # Hard check failures — set redirect hints (controlled_verify gated below)
                 if not _judge_result.patch_non_empty:
-                    _monitor.early_stop_verdict = VerdictStop(reason="empty_patch")
+                    _vr_monitor.early_stop_verdict = VerdictStop(reason="empty_patch")
                 elif not _judge_result.patch_format:
-                    _monitor.pending_redirect_hint = "[REDIRECT:EXECUTE] patch_format_error"
+                    _vr_monitor.pending_redirect_hint = "[REDIRECT:EXECUTE] patch_format_error"
                 elif not _judge_result.no_semantic_weakening:
-                    _monitor.pending_redirect_hint = "[REDIRECT:ANALYZE] semantic_weakening_detected"
+                    _vr_monitor.pending_redirect_hint = "[REDIRECT:ANALYZE] semantic_weakening_detected"
                 print(
                     f"    [in_loop_judge] skipping controlled_verify (hard check failed)",
                     flush=True,
@@ -2279,15 +2317,15 @@ def run_agent(
         )
 
         if not _prereq_pass:
-            _monitor._verify_skipped = True
-            _monitor._verify_skip_reason = _prereq_reason
+            _vr_monitor._verify_skipped = True
+            _vr_monitor._verify_skip_reason = _prereq_reason
             return result
 
         t_cv0 = time.monotonic()
         cv_result = run_controlled_verify(submitted, instance, cid, timeout_s=60)
         cv_result["elapsed_ms"] = round((time.monotonic() - t_cv0) * 1000, 1)
         # Store as last verify_history entry (step=-1 means end-of-attempt)
-        _monitor.record_verify(-1, cv_result)
+        _vr_monitor.record_verify(-1, cv_result)
         return result
 
     t_llm = Timer("LLM agent loop (Bedrock)", parent=t_agent)
@@ -2300,6 +2338,9 @@ def run_agent(
         except Exception as e:
             print(f"    [agent] ERROR: {e}")
             traceback.print_exc()
+    # P18: remove from registry immediately after run — prevents cross-case state
+    # bleed on retry. _monitor object itself is still referenced below for post-processing.
+    _unregister_monitor(instance_id)
     t_llm.stop()
 
     # Parse traj for usage + submission
