@@ -557,11 +557,13 @@ def _step_cp_update_and_verdict(
         try:
             from declaration_extractor import extract_phase_record as _extract_pr
             # P15 fix: when agent writes code it often omits PHASE/PRINCIPALS declarations.
-            # Prefer the most recent phase_record with non-empty principals from this attempt
-            # (the last cognition-validated record) rather than re-parsing the current step.
-            # Fall back to parsing the current message only when no prior record exists.
+            # Prefer the most recent phase_record with non-empty principals from the SAME phase
+            # (the last cognition-validated record for _old_phase) rather than re-parsing.
+            # Must match _old_phase to avoid carrying ANALYZE principals into EXECUTE advance.
+            # Fall back to parsing the current message only when no matching record exists.
             _prev_pr = next(
-                (r for r in reversed(state.phase_records) if r.principals),
+                (r for r in reversed(state.phase_records)
+                 if r.principals and r.phase.upper() == str(_old_phase).upper()),
                 None,
             )
             if _prev_pr is not None:
