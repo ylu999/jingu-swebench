@@ -2631,12 +2631,14 @@ def run_with_jingu(instance_id: str, output_dir: Path, max_attempts: int = 3,
                 # for the 3 known subtypes (NO_PATCH / NO_VERIFY / VERIFY_STALL).
                 _mon = _attempt_monitor
                 _tr = (jingu_body or {}).get("test_results", {})
+                # Use cp_state_holder[0] for phase — it tracks VerdictAdvance phase changes.
+                # _mon.cp_state.phase stays at OBSERVE; cp_state_holder[0].phase is current.
                 _phase_result = build_phase_result(
-                    str(_mon.cp_state.phase).upper(),
+                    str(cp_state_holder[0].phase).upper(),
                     has_patch=_mon._prev_patch_non_empty,
                     has_inner_verify=len(_mon.verify_history) > 0,
                     test_results=_tr,
-                    no_progress_steps=_mon.cp_state.no_progress_steps,
+                    no_progress_steps=cp_state_holder[0].no_progress_steps,
                     early_stop_reason=_esv.reason,
                 )
                 _pr_route, _pr_target, _pr_hint = route_from_phase_result(_phase_result)
@@ -2672,11 +2674,11 @@ def run_with_jingu(instance_id: str, output_dir: Path, max_attempts: int = 3,
                 _mon_ts = _attempt_monitor
                 _tr_ts = (jingu_body or {}).get("test_results", {})
                 _pr_ts = build_phase_result(
-                    str(_mon_ts.cp_state.phase).upper(),
+                    str(cp_state_holder[0].phase).upper(),
                     has_patch=_mon_ts._prev_patch_non_empty,
                     has_inner_verify=len(_mon_ts.verify_history) > 0,
                     test_results=_tr_ts,
-                    no_progress_steps=_mon_ts.cp_state.no_progress_steps,
+                    no_progress_steps=cp_state_holder[0].no_progress_steps,
                     early_stop_reason="task_success",
                 )
                 _pr_ts_route, _pr_ts_target, _ = route_from_phase_result(_pr_ts)
