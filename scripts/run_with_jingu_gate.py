@@ -2667,6 +2667,29 @@ def run_with_jingu(instance_id: str, output_dir: Path, max_attempts: int = 3,
                         "Change your approach entirely — avoid repeated reads without writing code."
                     )
             # For task_success: controlled_verify confirmed pass, no retry needed.
+            # p202 fourth cut: emit [phase_result] for task_success (SUCCESS path).
+            if _esv.reason == "task_success":
+                _mon_ts = _attempt_monitor
+                _tr_ts = (jingu_body or {}).get("test_results", {})
+                _pr_ts = build_phase_result(
+                    str(_mon_ts.cp_state.phase).upper(),
+                    has_patch=_mon_ts._prev_patch_non_empty,
+                    has_inner_verify=len(_mon_ts.verify_history) > 0,
+                    test_results=_tr_ts,
+                    no_progress_steps=_mon_ts.cp_state.no_progress_steps,
+                    early_stop_reason="task_success",
+                )
+                _pr_ts_route, _pr_ts_target, _ = route_from_phase_result(_pr_ts)
+                print(
+                    f"  [phase_result] phase={_pr_ts.phase}"
+                    f" outcome={_pr_ts.outcome}"
+                    f" verdict={_pr_ts.verdict}"
+                    f" route={_pr_ts_route}"
+                    f" target={_pr_ts_target or '-'}"
+                    f" trust={_pr_ts.trust_score or '-'}"
+                    f" reason={_pr_ts.judge_reason}",
+                    flush=True,
+                )
             break
 
         # p179: record test counts for this attempt (used later for tests_delta)
@@ -2934,6 +2957,27 @@ def run_with_jingu(instance_id: str, output_dir: Path, max_attempts: int = 3,
                         print(f"    [control-plane] instance={_iid_short} attempt={attempt} verdict={cp_verdict}")
                         if isinstance(cp_verdict, VerdictStop):
                             print(f"    [control-plane] instance={_iid_short} STOPPING — reason={cp_verdict.reason}")
+                            # p202 fourth cut: emit [phase_result] at cp_verdict STOP boundary.
+                            _tr_cpv = (jingu_body or {}).get("test_results", {})
+                            _pr_cpv = build_phase_result(
+                                str(cp_state_holder[0].phase).upper(),
+                                has_patch=(_attempt_monitor._prev_patch_non_empty if _attempt_monitor else False),
+                                has_inner_verify=len(_attempt_monitor.verify_history) > 0 if _attempt_monitor else False,
+                                test_results=_tr_cpv,
+                                no_progress_steps=cp_state_holder[0].no_progress_steps,
+                                early_stop_reason=cp_verdict.reason,
+                            )
+                            _pr_cpv_route, _pr_cpv_target, _ = route_from_phase_result(_pr_cpv)
+                            print(
+                                f"  [phase_result] phase={_pr_cpv.phase}"
+                                f" outcome={_pr_cpv.outcome}"
+                                f" verdict={_pr_cpv.verdict}"
+                                f" route={_pr_cpv_route}"
+                                f" target={_pr_cpv_target or '-'}"
+                                f" trust={_pr_cpv.trust_score or '-'}"
+                                f" reason={_pr_cpv.judge_reason}",
+                                flush=True,
+                            )
                             break
                         if isinstance(cp_verdict, VerdictRedirect):
                             # Unconditional override (CORR3): REDIRECT always forces ADJUST
@@ -2951,11 +2995,53 @@ def run_with_jingu(instance_id: str, output_dir: Path, max_attempts: int = 3,
                         # Honor control_action: stop when verify passed or no signal
                         if retry_plan.control_action in ("STOP_FAIL", "STOP_NO_SIGNAL"):
                             print(f"    [retry-ctrl] STOPPING — action={retry_plan.control_action}")
+                            # p202 fourth cut: emit [phase_result] at STOP_FAIL / STOP_NO_SIGNAL.
+                            _tr_sf = (jingu_body or {}).get("test_results", {})
+                            _pr_sf = build_phase_result(
+                                str(cp_state_holder[0].phase).upper(),
+                                has_patch=(_attempt_monitor._prev_patch_non_empty if _attempt_monitor else False),
+                                has_inner_verify=len(_attempt_monitor.verify_history) > 0 if _attempt_monitor else False,
+                                test_results=_tr_sf,
+                                no_progress_steps=cp_state_holder[0].no_progress_steps,
+                                early_stop_reason=retry_plan.control_action.lower(),
+                            )
+                            _pr_sf_route, _pr_sf_target, _ = route_from_phase_result(_pr_sf)
+                            print(
+                                f"  [phase_result] phase={_pr_sf.phase}"
+                                f" outcome={_pr_sf.outcome}"
+                                f" verdict={_pr_sf.verdict}"
+                                f" route={_pr_sf_route}"
+                                f" target={_pr_sf_target or '-'}"
+                                f" trust={_pr_sf.trust_score or '-'}"
+                                f" reason={_pr_sf.judge_reason}",
+                                flush=True,
+                            )
                             break
                         # verified_pass: controlled_verify confirmed all tests pass — no retry needed
                         # (kept as fallback; VerdictStop(task_success) above is the primary path)
                         if _strategy_failure_class_v2 == "verified_pass":
                             print(f"    [retry-ctrl] STOPPING — verified_pass (controlled_verify tests_failed=0)")
+                            # p202 fourth cut: emit [phase_result] at verified_pass (SUCCESS path).
+                            _tr_vp = (jingu_body or {}).get("test_results", {})
+                            _pr_vp = build_phase_result(
+                                str(cp_state_holder[0].phase).upper(),
+                                has_patch=(_attempt_monitor._prev_patch_non_empty if _attempt_monitor else False),
+                                has_inner_verify=len(_attempt_monitor.verify_history) > 0 if _attempt_monitor else False,
+                                test_results=_tr_vp,
+                                no_progress_steps=cp_state_holder[0].no_progress_steps,
+                                early_stop_reason="verified_pass",
+                            )
+                            _pr_vp_route, _pr_vp_target, _ = route_from_phase_result(_pr_vp)
+                            print(
+                                f"  [phase_result] phase={_pr_vp.phase}"
+                                f" outcome={_pr_vp.outcome}"
+                                f" verdict={_pr_vp.verdict}"
+                                f" route={_pr_vp_route}"
+                                f" target={_pr_vp_target or '-'}"
+                                f" trust={_pr_vp.trust_score or '-'}"
+                                f" reason={_pr_vp.judge_reason}",
+                                flush=True,
+                            )
                             break
 
                         # next_attempt_prompt already merges hint_prefix + exec_feedback
