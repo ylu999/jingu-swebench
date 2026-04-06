@@ -230,6 +230,10 @@ def cmd_run(args) -> None:
                 "command": cmd_parts,
                 "environment": [
                     {"name": "BATCH_NAME", "value": batch_name},
+                    *(
+                        [{"name": "JINGU_MODEL", "value": args.model}]
+                        if getattr(args, "model", None) else []
+                    ),
                 ],
             }]
         },
@@ -631,6 +635,10 @@ def cmd_smoke(args) -> None:
                 "command": cmd_parts,
                 "environment": [
                     {"name": "BATCH_NAME", "value": batch_name},
+                    *(
+                        [{"name": "JINGU_MODEL", "value": args.model}]
+                        if getattr(args, "model", None) else []
+                    ),
                 ],
             }]
         },
@@ -729,6 +737,8 @@ def main():
     p_run.add_argument("--workers", type=int, default=3)
     p_run.add_argument("--dataset", default="Verified", choices=["Lite", "Verified"])
     p_run.add_argument("--s3-upload", action="store_true", default=True)
+    p_run.add_argument("--model", default=None,
+                       help="Override JINGU_MODEL env var (e.g. bedrock/global.anthropic.claude-opus-4-5-20251101-v1:0)")
     p_run.add_argument("--confirmed", action="store_true",
                        help=f"Required when launching more than {BATCH_GUARD_THRESHOLD} instances (batch guard)")
 
@@ -751,6 +761,8 @@ def main():
                          help="Regex filter (overrides default). E.g. 'cp-step|control-plane|pee'")
     p_smoke.add_argument("--all", "-a", action="store_true",
                          help="Show all lines including noise (no filter)")
+    p_smoke.add_argument("--model", default=None,
+                         help="Override JINGU_MODEL env var (e.g. bedrock/global.anthropic.claude-opus-4-5-20251101-v1:0)")
     p_smoke.add_argument("--confirmed", action="store_true",
                          help=f"Required when launching more than {BATCH_GUARD_THRESHOLD} instances (batch guard)")
 
