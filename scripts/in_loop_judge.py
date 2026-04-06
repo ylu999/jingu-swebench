@@ -33,14 +33,15 @@ class InLoopJudgeResult:
     @property
     def all_pass(self) -> bool:
         """
-        True if all three HARD checks pass.
-        changed_file_relevant is a SOFT check (warning only) and does not block.
-        Hard checks: patch_non_empty, patch_format, no_semantic_weakening.
+        True if all four HARD checks pass.
+        p204: changed_file_relevant promoted from soft (warn-only) to hard (blocks verify).
+        Hard checks: patch_non_empty, patch_format, no_semantic_weakening, changed_file_relevant.
         """
         return (
             self.patch_non_empty
             and self.patch_format
             and self.no_semantic_weakening
+            and self.changed_file_relevant
         )
 
     def status_str(self, flag: bool) -> str:

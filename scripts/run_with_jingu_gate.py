@@ -1180,8 +1180,35 @@ def build_execution_feedback(
     """
     test_results = jingu_body.get("test_results", {})
     tests_ran = test_results.get("ran_tests", False)
-    test_passed = test_results.get("last_passed")
     excerpt = test_results.get("excerpt", "")
+
+    # p201: trust hierarchy — check controlled_passed (trust=100) BEFORE last_passed (trust=30).
+    # controlled_passed is the official FAIL_TO_PASS harness result — ground truth.
+    # last_passed is a heuristic scan of agent tool output — low trust, may be wrong.
+    controlled_passed = test_results.get("controlled_passed")
+    controlled_failed = test_results.get("controlled_failed")
+    if controlled_passed is not None and controlled_failed is not None:
+        tests_str = ", ".join(fail_to_pass_tests[:4])
+        if controlled_failed == 0:
+            # Official tests passed — strong SUBMIT signal
+            return (
+                f"Official FAIL_TO_PASS tests PASSED ({controlled_passed} passed, 0 failed). "
+                f"Your patch is correct. Submit immediately. "
+                f"Required tests: {tests_str}"
+            )
+        else:
+            # Official tests failed — HARD_FAIL with counts
+            return (
+                f"Official FAIL_TO_PASS tests FAILED: "
+                f"{controlled_passed} passed, {controlled_failed} failed. "
+                f"Your patch does not fix the required tests. "
+                f"Required tests: {tests_str}. "
+                f"Revisit your analysis — the root cause fix is incomplete."
+            )
+
+    # No controlled_verify result available — fall back to agent-heuristic (trust=30).
+    # NOTE: agent-run tests are LOW TRUST. A failing agent test does NOT mean your patch is wrong.
+    test_passed = test_results.get("last_passed")
 
     if not tests_ran:
         return (
@@ -1190,12 +1217,11 @@ def build_execution_feedback(
         )
 
     if test_passed:
-        # Agent's own tests passed but fast_eval may still fail — give benefit of doubt
-        # Remind agent to verify against the specific FAIL_TO_PASS tests
+        # Agent's own tests passed but official FAIL_TO_PASS not yet verified (low trust).
         tests_str = ", ".join(fail_to_pass_tests[:4])
         return (
-            f"Previous attempt's tests passed locally. "
-            f"Ensure these specific tests pass: {tests_str}. "
+            f"Previous attempt's tests passed (agent-run, not official verification). "
+            f"Ensure these specific FAIL_TO_PASS tests pass: {tests_str}. "
             f"If they already pass, submit immediately."
         )
 
@@ -2291,16 +2317,9 @@ def run_agent(
                 f"patch_non_empty={'pass' if _judge_result.patch_non_empty else 'fail'} "
                 f"patch_format={'pass' if _judge_result.patch_format else 'fail'} "
                 f"semantic_weakening={'pass' if _judge_result.no_semantic_weakening else 'fail'} "
-                f"changed_file_relevant={'pass' if _judge_result.changed_file_relevant else 'warn'}",
+                f"changed_file_relevant={'pass' if _judge_result.changed_file_relevant else 'fail'}",
                 flush=True,
             )
-            if _judge_result.all_pass and not _judge_result.changed_file_relevant:
-                # Soft check — warn only, do not block
-                print(
-                    f"    [in_loop_judge] warn: changed_file_relevant=fail "
-                    f"(soft check — controlled_verify continues)",
-                    flush=True,
-                )
             if not _judge_result.all_pass:
                 # Hard check failures — set redirect hints (controlled_verify gated below)
                 if not _judge_result.patch_non_empty:
@@ -2309,6 +2328,10 @@ def run_agent(
                     _vr_monitor.pending_redirect_hint = "[REDIRECT:EXECUTE] patch_format_error"
                 elif not _judge_result.no_semantic_weakening:
                     _vr_monitor.pending_redirect_hint = "[REDIRECT:ANALYZE] semantic_weakening_detected"
+                elif not _judge_result.changed_file_relevant:
+                    # p204: changed_file_relevant promoted to hard check
+                    # Agent modified only test files (not source) — redirect back to EXECUTE
+                    _vr_monitor.pending_redirect_hint = "[REDIRECT:EXECUTE] wrong_file_changed"
                 print(
                     f"    [in_loop_judge] skipping controlled_verify (hard check failed)",
                     flush=True,

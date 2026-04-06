@@ -211,6 +211,19 @@ def validate_cognition_record(record: CognitionRecord) -> list[CognitionViolatio
             step_n=step_n,
         ))
 
+    # V5: claims require supporting evidence (p203 axis 3 — evidence_supports_claims)
+    # If the record makes claims but cites no evidence, the claims are unverifiable.
+    # Applies to all phases — a claim without evidence is a hypothesis, not a finding.
+    if record.claims and not record.evidence_refs:
+        violations.append(CognitionViolation(
+            code="CLAIMS_WITHOUT_EVIDENCE",
+            message=f"phase={phase} has {len(record.claims)} claim(s) but no EVIDENCE_REFS. "
+                    f"Add EVIDENCE: <file:line or test name> supporting each claim. "
+                    f"Claims without evidence are hypotheses, not findings.",
+            phase=phase,
+            step_n=step_n,
+        ))
+
     return violations
 
 
