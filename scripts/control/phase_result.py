@@ -226,6 +226,131 @@ def phase_result_hard_failure(
 # Routing helper (I2 enforcement)
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Signal classifier — pure function, no side effects
+# ---------------------------------------------------------------------------
+
+def _classify_signal_pipeline(
+    has_patch: bool,
+    has_inner_verify: bool,
+    controlled_passed: Optional[int],
+    controlled_failed: Optional[int],
+    no_progress_steps: int,
+    early_stop_reason: str,
+) -> tuple[Outcome, JudgeReason]:
+    """
+    Classify where in the signal pipeline the attempt broke down.
+
+    Priority order (most specific → least specific):
+      1. controlled_verify result present → SUCCESS or HARD_FAILURE
+      2. principal_gate_loop              → PRINCIPAL_GATE_LOOP
+      3. no patch produced                → NO_SIGNAL_NO_PATCH
+      4. patch but no verify              → NO_SIGNAL_NO_VERIFY
+      5. patch + verify but stalled       → NO_SIGNAL_STALLED_AFTER_VERIFY
+      6. fallback                         → NO_SIGNAL_NO_PATCH (generic P7)
+    """
+    # 1. Controlled verify result is ground truth — highest priority
+    if controlled_passed is not None and controlled_failed is not None:
+        if controlled_failed == 0:
+            return "SUCCESS", "controlled_tests_passed"
+        else:
+            return "HARD_FAILURE", "controlled_tests_failed"
+
+    # 2. Contract loop — principal gate fired same violation ≥ 3 times
+    if early_stop_reason == "principal_gate_loop":
+        return "PRINCIPAL_GATE_LOOP", "principal_gate_loop"
+
+    # 3. No patch ever written — agent stayed in cognition loop
+    if not has_patch:
+        return "NO_SIGNAL_NO_PATCH", "execution_not_reached"
+
+    # 4. Patch exists but no verify step ran
+    if not has_inner_verify:
+        return "NO_SIGNAL_NO_VERIFY", "missing_verify_step"
+
+    # 5. Patch + verify ran but no new signal afterward (no_progress accumulated)
+    if no_progress_steps > 0:
+        return "NO_SIGNAL_STALLED_AFTER_VERIFY", "verify_no_new_signal"
+
+    # 6. Fallback — patch + verify present but still stopped; treat as stall
+    return "NO_SIGNAL_STALLED_AFTER_VERIFY", "no_progress_timeout"
+
+
+# ---------------------------------------------------------------------------
+# Builder — translates runtime state → PhaseResult
+# ---------------------------------------------------------------------------
+
+def build_phase_result(
+    phase: PhaseName,
+    *,
+    has_patch: bool,
+    has_inner_verify: bool,
+    test_results: Optional[dict],
+    no_progress_steps: int,
+    early_stop_reason: str = "no_signal",
+) -> PhaseResult:
+    """
+    Bridge from runtime state to PhaseResult.
+
+    This is the SINGLE entry point for deriving a PhaseResult from control-plane
+    state. Callers must not build PhaseResult by reading raw flags outside this
+    function — that is an I2 violation.
+
+    Args:
+        phase:              Current phase name.
+        has_patch:          True iff agent produced a non-empty patch at any point
+                            during this attempt (StepMonitorState._prev_patch_non_empty).
+        has_inner_verify:   True iff at least one inner_verify event fired
+                            (len(StepMonitorState.verify_history) > 0).
+        test_results:       jingu_body["test_results"] dict, or None if unavailable.
+                            Expected keys: controlled_passed, controlled_failed,
+                            ran_tests, last_passed.
+        no_progress_steps:  ReasoningState.no_progress_steps at attempt end.
+        early_stop_reason:  Reason string from VerdictStop / StepMonitorState
+                            (e.g. "no_signal", "principal_gate_loop").
+
+    Returns:
+        PhaseResult with all invariants satisfied.
+    """
+    tr = test_results or {}
+    controlled_passed: Optional[int] = tr.get("controlled_passed")
+    controlled_failed: Optional[int] = tr.get("controlled_failed")
+
+    outcome, judge_reason = _classify_signal_pipeline(
+        has_patch=has_patch,
+        has_inner_verify=has_inner_verify,
+        controlled_passed=controlled_passed,
+        controlled_failed=controlled_failed,
+        no_progress_steps=no_progress_steps,
+        early_stop_reason=early_stop_reason,
+    )
+
+    # Derive trust_score from verification source (p201 trust hierarchy)
+    trust_score: Optional[int] = None
+    if controlled_passed is not None and controlled_failed is not None:
+        trust_score = 100  # controlled_verify — ground truth
+    elif tr.get("ran_tests") and tr.get("last_passed") is not None:
+        trust_score = 30   # agent-heuristic scan — low trust
+
+    # Dispatch to typed constructor helper
+    if outcome == "SUCCESS":
+        return phase_result_success(phase, trust_score=trust_score or 100)
+    elif outcome == "HARD_FAILURE":
+        return phase_result_hard_failure(phase, trust_score=trust_score)
+    elif outcome == "PRINCIPAL_GATE_LOOP":
+        return phase_result_principal_loop(phase)
+    elif outcome == "NO_SIGNAL_NO_PATCH":
+        return phase_result_no_patch(phase)
+    elif outcome == "NO_SIGNAL_NO_VERIFY":
+        return phase_result_no_verify(phase)
+    else:  # NO_SIGNAL_STALLED_AFTER_VERIFY
+        return phase_result_verify_stall(phase)
+
+
+# ---------------------------------------------------------------------------
+# Routing helper (I2 enforcement)
+# ---------------------------------------------------------------------------
+
 def route_from_phase_result(result: PhaseResult) -> tuple[RouteAction, Optional[PhaseName], Optional[str]]:
     """
     Derive (route, redirect_target, hint) from a PhaseResult.
