@@ -112,6 +112,17 @@ except Exception:
         "JUDGE":    "judge.verification",
     }
 
+# Agent-declared phase names may use gerund/noun variants (e.g. "execution", "observation").
+# Normalize to canonical Phase enum values before _PHASE_SUBTYPE_MAP lookup.
+_PHASE_NORM: dict[str, str] = {
+    "OBSERVATION": "OBSERVE",
+    "ANALYSIS":    "ANALYZE",
+    "DECISION":    "DECIDE",
+    "EXECUTION":   "EXECUTE",
+    "JUDGEMENT":   "JUDGE",
+    "JUDGMENT":    "JUDGE",
+}
+
 
 def _extract_phase_from_message(agent_message: str) -> str | None:
     """Extract PHASE: declaration from agent message.
@@ -184,6 +195,7 @@ def extract_phase_record(agent_message: str, phase: str, from_steps: list[int] |
     # _pr.phase="ANALYZE" — wrong contract applied → REJECTED.
     declared = _extract_phase_from_message(agent_message)
     phase_upper = declared if declared else (phase or "").upper()
+    phase_upper = _PHASE_NORM.get(phase_upper, phase_upper)
     subtype = _PHASE_SUBTYPE_MAP.get(phase_upper, "unknown")
     principals = _extract_principals_from_message(agent_message)
     evidence_refs = _extract_evidence_refs(agent_message)
