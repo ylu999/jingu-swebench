@@ -90,7 +90,7 @@ fi
 cd /root
 
 if [ -d jingu-swebench ]; then
-  cd jingu-swebench && git fetch -q && git reset --hard origin/main -q && cd ..
+  cd jingu-swebench && git pull -q && cd ..
 else
   git clone https://github.com/ylu999/jingu-swebench.git -q
 fi
