@@ -48,15 +48,40 @@ class SubtypeContract(TypedDict, total=False):
 # expected_principals: quality signal (soft) — missing → inference diff warning only
 # required_fields:     PhaseRecord attribute non-empty check — missing → RETRYABLE
 # allowed_next:        legal next phases — violation → REJECTED (wrong phase position)
+# ── Principal lifecycle enforcement contract ──────────────────────────────────
+#
+# CC3 invariant: a principal may only appear in required_principals if it has
+# an inference rule in principal_inference._RULE_REGISTRY with matching applies_to.
+# Principals without inference rules are NOT fake-checkable (stage < fake_checkable)
+# and must be in expected_principals (soft quality signal) only.
+#
+# Principals WITH inference rules (fake_checkable, stage 4):
+#   causal_grounding      — applies_to: ["analysis.root_cause"]
+#   evidence_linkage      — applies_to: None (all subtypes)
+#   minimal_change        — applies_to: ["execution.code_patch"]
+#   alternative_hypothesis_check — applies_to: ["analysis.root_cause"]
+#   invariant_preservation       — applies_to: ["judge.verification"]
+#
+# Principals WITHOUT inference rules (required_enforced, stage 2 — expected only):
+#   ontology_alignment, phase_boundary_discipline, evidence_completeness,
+#   action_grounding, option_comparison, constraint_satisfaction,
+#   scope_minimality, result_verification, uncertainty_honesty, residual_risk_detection
+#
+# This table is the enforcement boundary. Update it when inference rules are added.
+# ─────────────────────────────────────────────────────────────────────────────
+
 SUBTYPE_CONTRACTS: dict[str, SubtypeContract] = {
     "observation.fact_gathering": {
         "phase": "OBSERVE",
-        "required_principals": [
-            "ontology_alignment",
-            "phase_boundary_discipline",
-            "evidence_completeness",
+        # No principals are fake_checkable for OBSERVE subtype.
+        # evidence_linkage rule applies to all subtypes but requires evidence_refs +
+        # from_steps — agent output at OBSERVE rarely has from_steps, so treat as expected.
+        "required_principals": [],
+        "expected_principals": [
+            "ontology_alignment",         # stage=required_enforced, no inference rule
+            "phase_boundary_discipline",  # stage=required_enforced, no inference rule
+            "evidence_completeness",      # stage=required_enforced, no inference rule
         ],
-        "expected_principals": [],
         "forbidden_principals": ["action_grounding", "minimal_change"],
         "required_fields": ["evidence_refs"],
         "allowed_next": ["ANALYZE", "OBSERVE"],
@@ -64,13 +89,18 @@ SUBTYPE_CONTRACTS: dict[str, SubtypeContract] = {
     },
     "analysis.root_cause": {
         "phase": "ANALYZE",
+        # causal_grounding + evidence_linkage are fake_checkable for analysis.root_cause.
+        # ontology_alignment + phase_boundary_discipline have no inference rule → expected only.
         "required_principals": [
-            "ontology_alignment",
-            "phase_boundary_discipline",
             "causal_grounding",
             "evidence_linkage",
         ],
-        "expected_principals": ["alternative_hypothesis_check", "uncertainty_honesty"],
+        "expected_principals": [
+            "ontology_alignment",         # stage=required_enforced, no inference rule
+            "phase_boundary_discipline",  # stage=required_enforced, no inference rule
+            "alternative_hypothesis_check",
+            "uncertainty_honesty",
+        ],
         "forbidden_principals": ["action_grounding", "minimal_change"],
         # P16 fix: evidence_refs removed from required_fields.
         # ANALYZE requires evidence *basis* (evidence_refs OR from_steps), not
@@ -83,13 +113,15 @@ SUBTYPE_CONTRACTS: dict[str, SubtypeContract] = {
     },
     "decision.fix_direction": {
         "phase": "DECIDE",
-        "required_principals": [
-            "ontology_alignment",
-            "phase_boundary_discipline",
-            "option_comparison",
-            "constraint_satisfaction",
+        # No principals are fake_checkable for decision.fix_direction subtype.
+        "required_principals": [],
+        "expected_principals": [
+            "ontology_alignment",         # stage=required_enforced, no inference rule
+            "phase_boundary_discipline",  # stage=required_enforced, no inference rule
+            "option_comparison",          # stage=required_enforced, no inference rule
+            "constraint_satisfaction",    # stage=required_enforced, no inference rule
+            "uncertainty_honesty",
         ],
-        "expected_principals": ["uncertainty_honesty"],
         "forbidden_principals": [],
         "required_fields": [],
         "allowed_next": ["DESIGN", "DECIDE", "ANALYZE"],
@@ -97,13 +129,15 @@ SUBTYPE_CONTRACTS: dict[str, SubtypeContract] = {
     },
     "design.solution_shape": {
         "phase": "DESIGN",
-        "required_principals": [
-            "ontology_alignment",
-            "phase_boundary_discipline",
-            "invariant_preservation",
-            "scope_minimality",
+        # invariant_preservation has an inference rule (applies_to: judge.verification),
+        # but NOT for design.solution_shape — so not fake_checkable here either.
+        "required_principals": [],
+        "expected_principals": [
+            "ontology_alignment",         # stage=required_enforced, no inference rule
+            "phase_boundary_discipline",  # stage=required_enforced, no inference rule
+            "invariant_preservation",     # inference rule exists but applies_to=judge.verification only
+            "scope_minimality",           # stage=required_enforced, no inference rule
         ],
-        "expected_principals": [],
         "forbidden_principals": ["minimal_change"],
         "required_fields": [],
         "allowed_next": ["EXECUTE", "DESIGN", "DECIDE"],
@@ -111,13 +145,18 @@ SUBTYPE_CONTRACTS: dict[str, SubtypeContract] = {
     },
     "execution.code_patch": {
         "phase": "EXECUTE",
+        # minimal_change is fake_checkable for execution.code_patch.
+        # action_grounding has no inference rule → expected only.
+        # ontology_alignment + phase_boundary_discipline have no inference rule → expected only.
         "required_principals": [
-            "ontology_alignment",
-            "phase_boundary_discipline",
-            "action_grounding",
             "minimal_change",
         ],
-        "expected_principals": ["invariant_preservation"],
+        "expected_principals": [
+            "ontology_alignment",         # stage=required_enforced, no inference rule
+            "phase_boundary_discipline",  # stage=required_enforced, no inference rule
+            "action_grounding",           # stage=required_enforced, no inference rule
+            "invariant_preservation",
+        ],
         "forbidden_principals": [],
         "required_fields": [],
         "allowed_next": ["JUDGE", "EXECUTE", "ANALYZE"],
@@ -125,12 +164,17 @@ SUBTYPE_CONTRACTS: dict[str, SubtypeContract] = {
     },
     "judge.verification": {
         "phase": "JUDGE",
+        # invariant_preservation is fake_checkable for judge.verification.
+        # result_verification + uncertainty_honesty have no inference rule → expected only.
         "required_principals": [
-            "ontology_alignment",
-            "result_verification",
-            "uncertainty_honesty",
+            "invariant_preservation",
         ],
-        "expected_principals": ["residual_risk_detection"],
+        "expected_principals": [
+            "ontology_alignment",         # stage=required_enforced, no inference rule
+            "result_verification",        # stage=required_enforced, no inference rule
+            "uncertainty_honesty",        # stage=required_enforced, no inference rule
+            "residual_risk_detection",
+        ],
         "forbidden_principals": [],
         "required_fields": [],
         "allowed_next": ["EXECUTE", "ANALYZE"],
