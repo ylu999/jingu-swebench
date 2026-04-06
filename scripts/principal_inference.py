@@ -399,8 +399,15 @@ def diff_principals(
     declared_norm = {p.lower() for p in declared}
     inferred_norm = {p.lower() for p in inferred_names}
 
-    # fake: declared but not inferred (agent claimed without behavioral support)
-    fake = sorted(declared_norm - inferred_norm)
+    # inferrable: principals that have at least one registered inference rule.
+    # A declared principal with no inference rule cannot be verified or falsified —
+    # it must not be counted as fake. Only principals the engine can actually
+    # evaluate are subject to the fake check.
+    inferrable = {rule.principal.lower() for rule in _RULE_REGISTRY}
+
+    # fake: declared AND inferrable but not inferred (agent claimed without behavioral support)
+    # Principals with no inference rule are excluded — absence of inference ≠ fake.
+    fake = sorted((declared_norm & inferrable) - inferred_norm)
 
     # missing_required: required by contract but not declared (hard reject)
     missing_required = sorted(required - declared_norm)
