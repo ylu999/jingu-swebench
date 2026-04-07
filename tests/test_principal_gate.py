@@ -42,10 +42,15 @@ def test_analyze_missing_causal_grounding():
 
 
 def test_analyze_with_causal_grounding():
-    """ANALYZE phase with causal_grounding declared -> no violation."""
+    """ANALYZE phase requires both causal_grounding and evidence_linkage (v2.0 contract)."""
+    # causal_grounding alone is insufficient
     record = _FakePhaseRecord(principals=["causal_grounding", "evidence_based"])
     violation = check_principal_gate(record, "ANALYZE")
-    assert violation is None, f"expected None, got {violation}"
+    assert violation is not None, "causal_grounding alone should fail (evidence_linkage also required)"
+    # both required principals satisfies the gate
+    record2 = _FakePhaseRecord(principals=["causal_grounding", "evidence_linkage"])
+    violation2 = check_principal_gate(record2, "ANALYZE")
+    assert violation2 is None, f"causal_grounding + evidence_linkage should pass, got {violation2}"
 
 
 def test_execute_missing_minimal_change():
@@ -99,14 +104,14 @@ def test_unknown_phase_no_enforcement():
 
 def test_principals_case_insensitive():
     """Principal matching is case-insensitive."""
-    record = _FakePhaseRecord(principals=["Causal_Grounding"])
+    record = _FakePhaseRecord(principals=["Causal_Grounding", "Evidence_Linkage"])
     violation = check_principal_gate(record, "ANALYZE")
     assert violation is None, f"case-insensitive match should work, got {violation}"
 
 
 def test_phase_case_insensitive():
     """Phase name matching is case-insensitive."""
-    record = _FakePhaseRecord(principals=["causal_grounding"])
+    record = _FakePhaseRecord(principals=["causal_grounding", "evidence_linkage"])
     violation = check_principal_gate(record, "analyze")  # lowercase
     assert violation is None
 

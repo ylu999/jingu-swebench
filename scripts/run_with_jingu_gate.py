@@ -627,13 +627,17 @@ def _step_cp_update_and_verdict(
                 flush=True,
             )
             if _exec_redirect_count > _EXECUTE_REDIRECT_LIMIT:
+                # Bug A fix (p16): redirecting to DECIDE repeatedly didn't help (30/30 FAILED).
+                # After limit is exhausted, back off: reset counter and let agent self-rescue
+                # in EXECUTE rather than stopping the whole attempt with no patch.
                 print(
                     f"    [cp] execute_no_progress loop exceeded limit={_EXECUTE_REDIRECT_LIMIT}"
-                    f" → VerdictStop(no_signal)",
+                    f" → back-off: reset redirect counter, agent continues in EXECUTE",
                     flush=True,
                 )
-                state.early_stop_verdict = VerdictStop(reason="no_signal")
-                raise StopExecution("no_signal")
+                state._retryable_loop_counts[_exec_key] = 0
+                # Fall through: redirect message already injected above, counter reset.
+                # Agent is on its own — no more forced DECIDE redirects until threshold hit again.
         else:
             # Non-execute redirect: reset execute_no_progress counter
             _exec_key = ("EXECUTE", "execute_no_progress")
@@ -763,6 +767,15 @@ def _step_cp_update_and_verdict(
                     _admission.reasons.insert(0, _foreign_reason)
                 # principals were cleared (untrusted) — don't also report them as missing
                 _admission.reasons = [r for r in _admission.reasons if not r.startswith("missing_required_principal")]
+                # Bug B fix (p16): after stripping missing_required_principal, if the only
+                # remaining reason is foreign_phase_declared, promote status to ADMITTED.
+                # Without this, status stays RETRYABLE → same (phase, reason) fires 3+ times
+                # → ESCALATE_CONTRACT_BUG loop → 22/30 FAILED in p16.
+                # foreign_phase_declared is a phase boundary annotation, not a violation —
+                # the record is still evaluable (evidence_refs preserved, 改动10).
+                _non_foreign_reasons = [r for r in _admission.reasons if r != _foreign_reason]
+                if not _non_foreign_reasons and _admission.status == "RETRYABLE":
+                    _admission.status = "ADMITTED"
             print(
                 f"    [principal_gate] eval_phase={_eval_phase} record_phase={_pr.phase}"
                 f" admission={_admission.status} reasons={_admission.reasons}",

@@ -173,10 +173,12 @@ def test_principal_gate_rejects_causality():
 
 
 def test_principal_gate_accepts_causal_grounding():
-    """check_principal_gate accepts ['causal_grounding'] for ANALYZE (gate minimum)."""
+    """check_principal_gate requires both causal_grounding and evidence_linkage for ANALYZE."""
+    # ANALYZE requires causal_grounding + evidence_linkage (v2.0 contract)
     record = _FakePR(principals=["causal_grounding"])
     violation = check_principal_gate(record, "ANALYZE")
-    assert violation is None, f"expected None, got {violation}"
+    assert violation is not None, "causal_grounding alone should not satisfy ANALYZE (needs evidence_linkage too)"
+    assert "evidence_linkage" in violation
 
 
 def test_principal_gate_accepts_causal_grounding_and_evidence_linkage():
@@ -219,10 +221,11 @@ def test_phase_prompt_judge_contains_invariant_preservation():
 # ── Tests: expected_principals (soft / quality signal) ───────────────────────
 
 def test_analyze_contract_has_expected_principals():
-    """analysis.root_cause expected_principals includes evidence_linkage (soft signal)."""
+    """analysis.root_cause required_principals includes evidence_linkage (v2.0: moved from expected to required)."""
     contract = SUBTYPE_CONTRACTS["analysis.root_cause"]
-    assert "expected_principals" in contract
-    assert "evidence_linkage" in contract["expected_principals"]
+    # evidence_linkage moved to required_principals in v2.0 — no longer in expected
+    assert "evidence_linkage" in contract["required_principals"]
+    assert "evidence_linkage" not in contract.get("expected_principals", [])
 
 
 def test_execute_contract_has_expected_principals():
@@ -233,9 +236,12 @@ def test_execute_contract_has_expected_principals():
 
 
 def test_get_expected_principals_analyze():
-    """ANALYZE expected principals includes evidence_linkage."""
+    """ANALYZE required principals includes evidence_linkage (v2.0: moved to required)."""
+    required = get_required_principals("ANALYZE")
+    assert "evidence_linkage" in required, f"expected evidence_linkage in required, got: {required}"
+    # NOT in expected (moved to required)
     expected = get_expected_principals("ANALYZE")
-    assert "evidence_linkage" in expected, f"expected evidence_linkage in {expected}"
+    assert "evidence_linkage" not in expected
 
 
 def test_get_expected_principals_execute():
@@ -245,9 +251,10 @@ def test_get_expected_principals_execute():
 
 
 def test_get_expected_principals_observe():
-    """OBSERVE has no expected principals (no contract)."""
+    """OBSERVE has expected principals (ontology_alignment, phase_boundary_discipline, evidence_completeness)."""
     expected = get_expected_principals("OBSERVE")
-    assert expected == []
+    assert len(expected) > 0, "OBSERVE should have expected principals"
+    assert "ontology_alignment" in expected
 
 
 def test_get_expected_principals_unknown():
@@ -298,12 +305,12 @@ def test_guidance_execute_has_must_and_should():
 
 
 def test_guidance_judge_has_must_no_should():
-    """JUDGE guidance has MUST (no expected principals defined)."""
+    """JUDGE guidance has MUST and SHOULD (expected principals defined in v2.0)."""
     guidance = build_phase_principal_guidance("JUDGE")
     assert "MUST" in guidance
     assert "invariant_preservation" in guidance
-    # judge.verification has empty expected_principals, so no SHOULD line
-    assert "SHOULD" not in guidance
+    # judge.verification has expected_principals in v2.0, so SHOULD line present
+    assert "SHOULD" in guidance
 
 
 # ── Tests: cross-system consistency ──────────────────────────────────────────
