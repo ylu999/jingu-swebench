@@ -246,6 +246,11 @@ class StepMonitorState:
         # Same phase + same reason N times in a row → ESCALATE_CONTRACT_BUG (VerdictStop).
         # This is a safety fuse, not a contract substitute. Prevents infinite gate loops.
         self._retryable_loop_counts: dict[tuple, int] = {}   # (phase, reason) → count
+        # 改动9b: per-step keyed idempotency for control signal injection.
+        # key = f"{step}:{kind}:{signal_id}" where kind ∈ {phase_prefix, cognition_violation}
+        # Prevents repeated injection when _monitored_step fires multiple times per step
+        # (once per tool call in a multi-tool LLM response).
+        self._injected_signals: set[str] = set()
 
     def update_cp_with_step_signals(
         self,
@@ -405,8 +410,17 @@ def _step_observe(agent_self, *, step_n: int, mode: str) -> tuple[str, str, bool
                 )
                 if _cog_violations:
                     _feedback = format_violation_feedback(_cog_violations, _cog_record)
-                    print(f"    [cognition] VIOLATION — injecting feedback", flush=True)
-                    agent_self.messages.append({"role": "user", "content": _feedback})
+                    # 改动9b: keyed idempotency — inject once per (step, violation fingerprint)
+                    _viol_codes = ":".join(sorted(v.code if hasattr(v, "code") else str(v) for v in _cog_violations))
+                    _cog_key = f"{step_n}:cognition_violation:{_viol_codes}"
+                    _state_ref = getattr(agent_self, "_jingu_monitor_state", None)
+                    if _state_ref is None or _cog_key not in _state_ref._injected_signals:
+                        if _state_ref is not None:
+                            _state_ref._injected_signals.add(_cog_key)
+                        print(f"    [cognition] VIOLATION — injecting feedback", flush=True)
+                        agent_self.messages.append({"role": "user", "content": _feedback})
+                    else:
+                        print(f"    [cognition] VIOLATION — skipped=dedup key={_cog_key}", flush=True)
         except Exception as _cog_exc:
             print(f"    [cognition] parse error (non-fatal): {_cog_exc}", flush=True)
 
@@ -942,17 +956,14 @@ def _step_inject_phase(agent_self, *, cp_state_holder: "list | None", state: "St
         _phase_str = str(_cp_s.phase)
         _phase_prefix = _build_phase_prefix(_phase_str)
         if _phase_prefix:
-            # 改动9: dedup — skip injection if last message is already this phase prefix.
-            # Prevents repeated injection when one LLM step produces multiple tool calls,
-            # each triggering _monitored_step and thus _step_inject_phase.
             _phase_content = _phase_prefix.rstrip("\n")
-            _last_msg = agent_self.messages[-1] if agent_self.messages else None
-            _already_injected = (
-                _last_msg is not None
-                and _last_msg.get("role") == "user"
-                and _last_msg.get("content") == _phase_content
-            )
-            if not _already_injected:
+            # 改动9b: keyed idempotency — inject once per (step, phase).
+            # Replaces the brittle last-message text comparison (改动9) with a state-based key.
+            # key includes step_n so phase prefix resets cleanly on each new LLM step.
+            _step_n = agent_self.n_calls
+            _phase_key = f"{_step_n}:phase_prefix:{_phase_str}"
+            if _phase_key not in state._injected_signals:
+                state._injected_signals.add(_phase_key)
                 agent_self.messages.append({"role": "user", "content": _phase_content})
                 print(f"    [phase_injection] phase={_phase_str} injected=true", flush=True)
             else:
@@ -1007,6 +1018,9 @@ def _install_step_monitor(
 
         # Thin orchestrator: delegates to the four section functions above.
         # Each section is independently testable and has explicit parameter contracts.
+        # 改动9b: wire monitor state onto agent instance so _step_observe can access
+        # _injected_signals for cognition violation keyed idempotency.
+        self._jingu_monitor_state = _state
         _latest_assistant_text, _snippet, _env_error = _step_observe(
             self, step_n=self.n_calls, mode=_mode
         )
