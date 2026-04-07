@@ -35,7 +35,10 @@ _ANALYZE_GUIDANCE = (
     + " Output: your diagnosis, the causal chain, and why."
 )
 _EXECUTE_GUIDANCE = (
-    "Write the minimal fix targeting the root cause identified in ANALYZE/DECIDE. "
+    "BEFORE writing any code, output these two lines exactly:\n"
+    "  PHASE: execution\n"
+    "  PRINCIPALS: minimal_change\n"
+    "Then write the minimal fix targeting the root cause identified in ANALYZE/DECIDE. "
     + _EXECUTE_PRINCIPAL
     + " Output: the patch and why it addresses the root cause."
 )
@@ -55,10 +58,10 @@ PHASE_GUIDANCE: dict[str, str] = {
         "You may transition to OBSERVE when you have a clear understanding of the problem."
     ),
     "OBSERVE": (
-        "Suggested phase: OBSERVE. Prefer gathering evidence — read files, run tests, "
-        "understand the failing case. "
-        "You may transition to ANALYZE when you have sufficient evidence to form a hypothesis. "
-        "Output: what you found and what it implies."
+        "Suggested phase: OBSERVE. Gather evidence by reading files and running tests. "
+        "Output must include at least one file reference in the format path/to/file.py:line — "
+        "for example: EVIDENCE: django/db/models/query.py:234. "
+        "You may transition to ANALYZE when you have sufficient evidence to form a hypothesis."
     ),
     "ANALYZE": _ANALYZE_GUIDANCE,
     "DECIDE": (
