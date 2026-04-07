@@ -252,12 +252,21 @@ def extract_record_for_phase(
     # only if the agent was addressing target_phase, else they belong to another phase)
     foreign_phase_declared = bool(declared_phase and declared_phase != target_upper)
     if foreign_phase_declared:
-        # Agent was talking about a different phase — its principals/content don't
-        # belong to target_phase. Build a minimal record so gate can issue
-        # missing_target_phase_record rather than misinterpreting foreign declarations.
-        principals: list[str] = []
-        evidence_refs: list[str] = []
-        content = ""
+        # 改动10 (v1): foreign phase declared — preserve grounded evidence, discard phase-scoped signals.
+        # Rationale: phase boundary is a governance constraint, not a signal destruction gate.
+        # evidence_refs (file:line patterns) are mechanically extractable facts — they exist
+        # independent of which phase the agent claims to be in. Discarding them converts the
+        # gate from a governance layer into an information circuit-breaker, causing infinite
+        # RETRYABLE loops where the agent has real evidence but the gate never sees it.
+        #
+        # What we keep:    evidence_refs — grounded, phase-neutral, mechanically extracted
+        # What we discard: principals, content — phase-scoped, untrustworthy under foreign context
+        #
+        # Gate receives: foreign_phase_declared=True + evidence_refs populated
+        # Gate should issue: foreign_phase_declared / principals_untrusted (not missing_evidence)
+        principals: list[str] = []          # untrusted: declared for foreign phase
+        evidence_refs = _extract_evidence_refs(agent_message)   # preserved: phase-neutral facts
+        content = ""                        # discarded: belongs to declared (foreign) phase
     else:
         # Agent was addressing target_phase (or made no phase declaration) —
         # extract signals normally.

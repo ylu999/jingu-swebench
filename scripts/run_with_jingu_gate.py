@@ -731,6 +731,22 @@ def _step_cp_update_and_verdict(
             # Rule 1: evaluate against _old_phase (the phase being completed), not _pr.phase
             # (which may differ if the record was extracted with wrong phase in prior sessions).
             _admission = _eval_admission(_pr, _eval_phase)
+            # 改动10: if agent declared a foreign phase, prepend the reason so gate output
+            # reflects the actual problem (phase boundary violation) rather than a misleading
+            # missing_required_field:evidence_refs (which we no longer discard, but principals
+            # are still untrusted, so a foreign_phase reason is still warranted).
+            if _pr_foreign_phase:
+                _delta = abs(
+                    [UNDERSTAND,OBSERVE,ANALYZE,DECIDE,EXECUTE,JUDGE].index(_pr_foreign_phase)
+                    - [UNDERSTAND,OBSERVE,ANALYZE,DECIDE,EXECUTE,JUDGE].index(_eval_phase)
+                ) if _pr_foreign_phase in [UNDERSTAND,OBSERVE,ANALYZE,DECIDE,EXECUTE,JUDGE]
+                  and _eval_phase in [UNDERSTAND,OBSERVE,ANALYZE,DECIDE,EXECUTE,JUDGE]
+                  else 0
+                _foreign_reason = f"foreign_phase_declared:declared={_pr_foreign_phase},eval={_eval_phase},delta={_delta}"
+                if _foreign_reason not in _admission.reasons:
+                    _admission.reasons.insert(0, _foreign_reason)
+                # principals were cleared (untrusted) — don't also report them as missing
+                _admission.reasons = [r for r in _admission.reasons if not r.startswith("missing_required_principal")]
             print(
                 f"    [principal_gate] eval_phase={_eval_phase} record_phase={_pr.phase}"
                 f" admission={_admission.status} reasons={_admission.reasons}",
