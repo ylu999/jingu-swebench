@@ -2697,6 +2697,30 @@ def run_agent(
     if sub_from_traj_diff:
         return sub_from_traj_diff, exit_status, jingu_body, _monitor
 
+    # 改动8: container git diff fallback.
+    # agent 用 str_replace_editor 修改了文件但未调用 submit，也未打印 git diff。
+    # sub_from_traj 和 sub_from_traj_diff 都为空，但容器里可能有真实的修改。
+    # 直接从容器里 git diff base_commit 获取最终 patch。
+    # 只在容器仍然存在时有效（StopExecution 场景下容器还活着）。
+    _cid = _monitor.container_id if _monitor else None
+    if _cid:
+        try:
+            _base_c = instance.get("base_commit", "HEAD")
+            _diff_r = _sp.run(
+                ["docker", "exec", "-w", "/testbed", _cid, "git", "diff", _base_c],
+                capture_output=True, text=True, timeout=10,
+            )
+            _diff_patch = _diff_r.stdout.strip() if _diff_r.returncode == 0 else ""
+            if _diff_patch:
+                print(
+                    f"    [agent] container-diff fallback: extracted {len(_diff_patch)}c patch "
+                    f"from container {_cid[:12]}...",
+                    flush=True,
+                )
+                return _diff_patch, exit_status, jingu_body, _monitor
+        except Exception as _e:
+            print(f"    [agent] container-diff fallback failed: {_e}", flush=True)
+
     return None, exit_status, jingu_body, _monitor
 
 # ── Main loop ─────────────────────────────────────────────────────────────────
