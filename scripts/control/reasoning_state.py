@@ -241,6 +241,11 @@ def decide_next(state: ReasoningState) -> ControlVerdict:
 
     # 3. stagnation
     if state.no_progress_steps >= NO_PROGRESS_THRESHOLD:
+        # 改动5: EXECUTE no_progress → DECIDE (not JUDGE).
+        # EXECUTE with no new patch means the agent doesn't know what to write;
+        # advancing to JUDGE would verify nothing. Route back to DECIDE to re-plan.
+        if state.phase == "EXECUTE":
+            return VerdictRedirect(to="DECIDE", reason="execute_no_progress")
         next_phase = _ADVANCE_TABLE.get(state.phase)
         if next_phase is None or state.phase == "JUDGE":
             return VerdictStop(reason="no_signal")

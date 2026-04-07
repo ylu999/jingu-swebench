@@ -131,11 +131,29 @@ def check_principal_inference(phase_record, phase: str) -> str | None:
             phase=phase,
         )
         if _diff["fake"]:
-            print(
-                f"    [principal_inference] fake={_diff['fake']} inferred={_rich_result.present}",
-                flush=True,
-            )
-            return f"fake_principal:{','.join(_diff['fake'])}"
+            # 改动4: only treat fake as hard violation if the principal is required.
+            # Expected-only fake (declared but not behaviorally supported, not required)
+            # → warn only, do NOT trigger RETRYABLE redirect.
+            # This prevents soft principals (e.g. alternative_hypothesis_check) from
+            # blocking the main path after required principals already passed.
+            try:
+                _required_set = {p.lower() for p in (get_required_principals(phase) or [])}
+            except Exception:
+                _required_set = set()
+            _hard_fake = [p for p in _diff["fake"] if p in _required_set]
+            _soft_fake = [p for p in _diff["fake"] if p not in _required_set]
+            if _soft_fake:
+                print(
+                    f"    [principal_inference] fake_soft={_soft_fake}"
+                    f" (expected-only, warn-only) inferred={_rich_result.present}",
+                    flush=True,
+                )
+            if _hard_fake:
+                print(
+                    f"    [principal_inference] fake={_hard_fake} inferred={_rich_result.present}",
+                    flush=True,
+                )
+                return f"fake_principal:{','.join(_hard_fake)}"
         elif _diff["missing_required"]:
             print(
                 f"    [principal_inference] missing_required={_diff['missing_required']}"
