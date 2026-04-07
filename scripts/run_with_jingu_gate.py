@@ -736,12 +736,8 @@ def _step_cp_update_and_verdict(
             # missing_required_field:evidence_refs (which we no longer discard, but principals
             # are still untrusted, so a foreign_phase reason is still warranted).
             if _pr_foreign_phase:
-                _delta = abs(
-                    [UNDERSTAND,OBSERVE,ANALYZE,DECIDE,EXECUTE,JUDGE].index(_pr_foreign_phase)
-                    - [UNDERSTAND,OBSERVE,ANALYZE,DECIDE,EXECUTE,JUDGE].index(_eval_phase)
-                ) if _pr_foreign_phase in [UNDERSTAND,OBSERVE,ANALYZE,DECIDE,EXECUTE,JUDGE]
-                  and _eval_phase in [UNDERSTAND,OBSERVE,ANALYZE,DECIDE,EXECUTE,JUDGE]
-                  else 0
+                _phase_order = ["UNDERSTAND", "OBSERVE", "ANALYZE", "DECIDE", "EXECUTE", "JUDGE"]
+                _delta = abs(_phase_order.index(_pr_foreign_phase) - _phase_order.index(_eval_phase)) if (_pr_foreign_phase in _phase_order and _eval_phase in _phase_order) else 0
                 _foreign_reason = f"foreign_phase_declared:declared={_pr_foreign_phase},eval={_eval_phase},delta={_delta}"
                 if _foreign_reason not in _admission.reasons:
                     _admission.reasons.insert(0, _foreign_reason)
