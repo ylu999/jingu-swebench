@@ -764,6 +764,33 @@ def _step_cp_update_and_verdict(
         try:
             if _pr is None:
                 raise RuntimeError("phase_record unavailable, skipping inference check")
+            # Inference telemetry: run inference directly to log per-principal signals.
+            # This is independent of check_principal_inference — purely observability.
+            try:
+                from principal_inference import run_inference as _run_inf
+                from subtype_contracts import _PHASE_TO_SUBTYPE as _pts
+                _inf_subtype = _pts.get(_eval_phase, "")
+                _inf_result = _run_inf(_pr, _inf_subtype)
+                _inf_telem_parts = []
+                for _pname, _pdetail in _inf_result.details.items():
+                    _inferred_flag = "✓" if _pname in _inf_result.present else "✗"
+                    _inf_telem_parts.append(
+                        f"{_inferred_flag}{_pname}(score={_pdetail.score:.1f}"
+                        f" signals={_pdetail.signals})"
+                    )
+                print(
+                    f"    [principal_inference] subtype={_inf_subtype}"
+                    f" declared={[p.lower() for p in (_pr.principals or [])]}"
+                    f" inferred={_inf_result.present}",
+                    flush=True,
+                )
+                if _inf_telem_parts:
+                    print(
+                        f"    [principal_inference] details: {' | '.join(_inf_telem_parts)}",
+                        flush=True,
+                    )
+            except Exception as _inf_telem_exc:
+                print(f"    [principal_inference] telemetry error={_inf_telem_exc}", flush=True)
             from principal_gate import check_principal_inference as _check_pi
             _inf_violation = _check_pi(_pr, _eval_phase)
             if _inf_violation and "fake_principal" in _inf_violation:

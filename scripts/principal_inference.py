@@ -87,7 +87,8 @@ _CAUSAL_KEYWORDS = re.compile(
     re.IGNORECASE,
 )
 _ALTERNATIVE_KEYWORDS = re.compile(
-    r"\b(alternative|another possibility|could also|or instead|other approach)\b",
+    r"\b(alternative|another possibility|could also|or instead|other approach"
+    r"|however|but|yet|rather than|instead of|another way|might also|could be)\b",
     re.IGNORECASE,
 )
 _PRESERVE_KEYWORDS = re.compile(
@@ -114,56 +115,65 @@ def _extract_fields(phase_record):
 # ── Rule implementations ──────────────────────────────────────────────────────
 
 def _infer_causal_grounding(phase_record) -> tuple[float, list[str], str]:
-    """causal_grounding: evidence_refs present + causal language + from_steps linkage."""
-    evidence_refs, from_steps, _content, full_text = _extract_fields(phase_record)
+    """causal_grounding: evidence_refs present + causal language in content.
+
+    P1 fix: from_steps linkage removed from scoring — from_steps is populated by
+    gate step indices, not by the agent message itself. Requiring it caused score
+    to cap at 0.8 max when from_steps=[] (the common case at extraction time).
+    Threshold lowered to 0.5 so evidence_refs alone is sufficient.
+    """
+    evidence_refs, _from_steps, _content, full_text = _extract_fields(phase_record)
     score = 0.0
     signals: list[str] = []
 
     if evidence_refs:
-        score += 0.4
+        score += 0.5
         signals.append("has_evidence_refs")
-    else:
-        # without evidence_refs we can still get partial score for causal language
-        pass
 
     if _CAUSAL_KEYWORDS.search(full_text):
-        score += 0.4
+        score += 0.3
         signals.append("has_causal_language")
-
-    if from_steps:
-        score += 0.2
-        signals.append("has_step_linkage")
 
     # Require evidence_refs as minimum for causal_grounding to fire at all
     if not evidence_refs:
         score = 0.0
+        signals.append("no_evidence_refs")
 
-    if score >= 0.7:
-        explanation = f"Causal reasoning supported by {len(evidence_refs)} evidence ref(s)"
+    if score >= 0.5:
+        explanation = f"Causal reasoning grounded in {len(evidence_refs)} evidence ref(s)"
     else:
-        explanation = "Missing causal explanation or evidence"
+        explanation = "Missing evidence refs (causal_grounding requires file references)"
 
     return score, signals, explanation
 
 
 def _infer_evidence_linkage(phase_record) -> tuple[float, list[str], str]:
-    """evidence_linkage: evidence_refs present AND from_steps present."""
+    """evidence_linkage: evidence_refs present OR from_steps present.
+
+    P1 fix: changed from AND to OR, threshold lowered from 0.7 to 0.5.
+    from_steps is populated by gate step indices at runtime, not by agent message.
+    At record extraction time from_steps=[] is the norm — requiring both AND
+    caused evidence_linkage to almost never fire (score cap 0.5 < threshold 0.7).
+    Evidence_refs alone (file:line references in agent output) is sufficient signal.
+    """
     evidence_refs, from_steps, _content, _full_text = _extract_fields(phase_record)
     score = 0.0
     signals: list[str] = []
 
     if evidence_refs:
-        score += 0.5
+        score += 0.7
         signals.append("has_evidence_refs")
 
     if from_steps:
-        score += 0.5
+        score += 0.3
+        score = min(score, 1.0)
         signals.append("has_step_linkage")
 
-    if score >= 1.0:
-        explanation = "Evidence chain present with step linkage"
-    elif score > 0:
-        explanation = "Partial evidence chain (missing refs or step linkage)"
+    if not evidence_refs and not from_steps:
+        signals.append("no_evidence_chain")
+
+    if score >= 0.5:
+        explanation = f"Evidence chain present ({len(evidence_refs)} ref(s), {len(from_steps)} step(s))"
     else:
         explanation = "No evidence references or step linkage"
 
@@ -253,14 +263,14 @@ register_rule(InferenceRule(
     principal="causal_grounding",
     infer=_infer_causal_grounding,
     applies_to=["analysis.root_cause"],
-    threshold=0.7,
+    threshold=0.5,  # P1 fix: evidence_refs alone is sufficient (was 0.7, required from_steps)
 ))
 
 register_rule(InferenceRule(
     principal="evidence_linkage",
     infer=_infer_evidence_linkage,
     applies_to=None,  # all subtypes
-    threshold=0.7,
+    threshold=0.5,  # P1 fix: evidence_refs OR from_steps sufficient (was 0.7, required both AND)
 ))
 
 register_rule(InferenceRule(
