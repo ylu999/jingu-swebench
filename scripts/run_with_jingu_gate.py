@@ -562,6 +562,34 @@ def _step_cp_update_and_verdict(
         raise StopExecution(_step_verdict.reason)
 
     elif isinstance(_step_verdict, VerdictRedirect):
+        # 改动6: execute_no_progress loop breaker.
+        # EXECUTE→DECIDE redirect is valid but must not loop indefinitely.
+        # Count consecutive execute_no_progress redirects; > limit → StopExecution.
+        _EXECUTE_REDIRECT_LIMIT = 3
+        if _step_verdict.reason == "execute_no_progress":
+            _exec_key = ("EXECUTE", "execute_no_progress")
+            state._retryable_loop_counts[_exec_key] = (
+                state._retryable_loop_counts.get(_exec_key, 0) + 1
+            )
+            _exec_redirect_count = state._retryable_loop_counts[_exec_key]
+            print(
+                f"    [cp] execute_no_progress_redirect count={_exec_redirect_count}"
+                f" limit={_EXECUTE_REDIRECT_LIMIT}",
+                flush=True,
+            )
+            if _exec_redirect_count > _EXECUTE_REDIRECT_LIMIT:
+                print(
+                    f"    [cp] execute_no_progress loop exceeded limit={_EXECUTE_REDIRECT_LIMIT}"
+                    f" → VerdictStop(no_signal)",
+                    flush=True,
+                )
+                state.early_stop_verdict = VerdictStop(reason="no_signal")
+                raise StopExecution("no_signal")
+        else:
+            # Non-execute redirect: reset execute_no_progress counter
+            _exec_key = ("EXECUTE", "execute_no_progress")
+            state._retryable_loop_counts[_exec_key] = 0
+
         state.pending_redirect_hint = f"[REDIRECT:{_step_verdict.to}] {_step_verdict.reason}"
         agent_self.messages.append({
             "role": "user",

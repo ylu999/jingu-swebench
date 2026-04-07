@@ -197,7 +197,7 @@ _ADVANCE_TABLE: dict[Phase, Optional[Phase]] = {
     "JUDGE":      None,  # terminal
 }
 
-NO_PROGRESS_THRESHOLD = 2  # consecutive no-signal steps → forced advance or stop
+NO_PROGRESS_THRESHOLD = 4  # consecutive no-signal steps → forced advance or stop
 
 def decide_next(state: ReasoningState) -> ControlVerdict:
     """
