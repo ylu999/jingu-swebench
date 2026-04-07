@@ -37,12 +37,18 @@ _ANALYZE_GUIDANCE = (
     " Output: your diagnosis, the causal chain, and why."
 )
 _EXECUTE_GUIDANCE = (
+    "ACTION REQUIRED NOW. You have already analyzed the problem. Stop analyzing. Write the patch.\n\n"
     "BEFORE writing any code, output these two lines exactly:\n"
     "  PHASE: execution\n"
-    "  PRINCIPALS: minimal_change\n"
-    "Then write the minimal fix targeting the root cause identified in ANALYZE/DECIDE. "
+    "  PRINCIPALS: minimal_change\n\n"
+    "Then IMMEDIATELY write the code fix. Rules:\n"
+    "1. DO NOT re-read files to 'confirm' your understanding. You already know the root cause.\n"
+    "2. DO NOT re-run tests to 'see the current state'. Write the fix first.\n"
+    "3. DO NOT summarize the problem again. You already did that in ANALYZE.\n"
+    "4. Write the minimal patch to the specific file and line identified in ANALYZE/DECIDE.\n"
+    "5. If you do not produce a code change this step, this step counts as FAILED.\n\n"
     + _EXECUTE_PRINCIPAL
-    + " Output: the patch and why it addresses the root cause."
+    + "\nSuccess condition: a file is edited with a concrete code change. Anything else is failure."
 )
 _JUDGE_GUIDANCE = (
     "Verify your fix. Run tests. Check that invariants are preserved. "
