@@ -942,8 +942,21 @@ def _step_inject_phase(agent_self, *, cp_state_holder: "list | None", state: "St
         _phase_str = str(_cp_s.phase)
         _phase_prefix = _build_phase_prefix(_phase_str)
         if _phase_prefix:
-            agent_self.messages.append({"role": "user", "content": _phase_prefix.rstrip("\n")})
-            print(f"    [phase_injection] phase={_phase_str} injected=true", flush=True)
+            # 改动9: dedup — skip injection if last message is already this phase prefix.
+            # Prevents repeated injection when one LLM step produces multiple tool calls,
+            # each triggering _monitored_step and thus _step_inject_phase.
+            _phase_content = _phase_prefix.rstrip("\n")
+            _last_msg = agent_self.messages[-1] if agent_self.messages else None
+            _already_injected = (
+                _last_msg is not None
+                and _last_msg.get("role") == "user"
+                and _last_msg.get("content") == _phase_content
+            )
+            if not _already_injected:
+                agent_self.messages.append({"role": "user", "content": _phase_content})
+                print(f"    [phase_injection] phase={_phase_str} injected=true", flush=True)
+            else:
+                print(f"    [phase_injection] phase={_phase_str} skipped=dedup", flush=True)
     except Exception as _phase_exc:
         print(f"    [phase_injection] error (non-fatal): {_phase_exc}", flush=True)
 
