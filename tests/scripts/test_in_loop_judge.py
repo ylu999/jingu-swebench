@@ -170,17 +170,17 @@ diff --git a/tests/test_models.py b/tests/test_models.py
 class TestInLoopJudgeChangedFileRelevant:
     def test_only_test_files_changed_is_soft_check(self):
         """
-        Only test files changed → changed_file_relevant=False (soft check warning).
-        IMPORTANT: all_pass must still be True — changed_file_relevant does NOT block.
+        Only test files changed → changed_file_relevant=False.
+        p204: changed_file_relevant promoted to hard check — all_pass is False.
         """
         result = run_in_loop_judge(_ONLY_TEST_FILES_PATCH)
         assert result.changed_file_relevant is False
-        # Soft check: does NOT affect all_pass
-        # The 3 hard checks all pass (valid format, no weakening, non-empty)
+        # Hard checks: format, non-empty, no-weakening still pass
         assert result.patch_non_empty is True
         assert result.patch_format is True
         assert result.no_semantic_weakening is True
-        assert result.all_pass is True  # soft check does not block
+        # p204: changed_file_relevant is now a hard check — blocks all_pass
+        assert result.all_pass is False
 
     def test_source_file_changed(self):
         """Source file (non-test .py) changed → changed_file_relevant=True."""

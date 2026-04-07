@@ -89,7 +89,11 @@ def test_infer_evidence_linkage():
 
 
 def test_infer_evidence_linkage_not_inferred_without_from_steps():
-    """evidence_refs alone (no from_steps) does NOT infer evidence_linkage."""
+    """evidence_refs alone (no from_steps) DOES infer evidence_linkage (P1 fix: OR not AND).
+
+    Rule was changed: evidence_refs OR from_steps is sufficient. from_steps=[] at record
+    extraction time is the norm (gate step indices populated at runtime, not by agent).
+    """
     rec = FakePhaseRecord(
         phase="ANALYZE",
         evidence_refs=["ref1"],
@@ -97,7 +101,9 @@ def test_infer_evidence_linkage_not_inferred_without_from_steps():
         content="some content",
     )
     result = infer_principals(rec)
-    assert "evidence_linkage" not in result, f"Should not have evidence_linkage, got {result}"
+    assert "evidence_linkage" in result, (
+        f"evidence_refs alone should infer evidence_linkage (P1 fix: OR not AND), got {result}"
+    )
 
 
 def test_infer_minimal_change_short_patch():
@@ -147,15 +153,20 @@ def test_infer_empty_record():
 # ── diff_principals tests (three-way split) ──────────────────────────────────
 
 def test_diff_fake_principal():
-    """declared has principal that inferred does not => fake."""
+    """declared has principal that inferred does not => fake (when rule ran for subtype).
+
+    CC2: inferrable = rules-that-ran for the subtype.
+    causal_grounding has applies_to=["analysis.root_cause"], so phase="ANALYZE" is needed
+    to make it inferrable. With empty phase, causal_grounding is NOT inferrable → not fake.
+    """
     result = diff_principals(
         declared=["causal_grounding"],
         inferred=[],
-        phase="",
+        phase="ANALYZE",  # causal_grounding applies to analysis.root_cause (ANALYZE)
     )
-    assert result["fake"] == ["causal_grounding"]
-    assert result["missing_required"] == []
-    assert result["missing_expected"] == []
+    assert "causal_grounding" in result["fake"], (
+        f"causal_grounding declared but not inferred should be fake for ANALYZE, got {result}"
+    )
 
 
 def test_diff_missing_required():
@@ -173,18 +184,26 @@ def test_diff_missing_required():
 
 
 def test_diff_missing_expected():
-    """ANALYZE phase: declared has required but not expected => missing_expected only."""
-    # For ANALYZE: required=["causal_grounding"], expected=["evidence_linkage", "alternative_hypothesis_check"]
+    """ANALYZE phase: declared has all required but not expected => missing_expected only.
+
+    v2.0 contract: required=["causal_grounding", "evidence_linkage"].
+    Must declare both required to avoid missing_required.
+    expected principals (e.g. alternative_hypothesis_check) go in missing_expected.
+    """
     result = diff_principals(
-        declared=["causal_grounding"],
-        inferred=["causal_grounding"],
+        declared=["causal_grounding", "evidence_linkage"],
+        inferred=["causal_grounding", "evidence_linkage"],
         phase="ANALYZE",
     )
-    assert result["missing_required"] == []
-    assert result["fake"] == []
-    # evidence_linkage and/or alternative_hypothesis_check should be missing_expected
+    assert result["missing_required"] == [], (
+        f"Expected no missing_required when all required declared, got {result}"
+    )
+    assert result["fake"] == [], (
+        f"Expected no fake when declared matches inferred, got {result}"
+    )
+    # alternative_hypothesis_check is expected but not declared => missing_expected
     assert len(result["missing_expected"]) > 0, (
-        f"Expected some missing_expected for ANALYZE, got {result}"
+        f"Expected some missing_expected (e.g. alternative_hypothesis_check) for ANALYZE, got {result}"
     )
 
 

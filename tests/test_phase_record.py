@@ -24,7 +24,7 @@ def test_phase_record_dataclass_fields():
     """PhaseRecord has all required fields and can be constructed."""
     rec = PhaseRecord(
         phase="ANALYZE",
-        subtype="root_cause_analysis",
+        subtype="analysis.root_cause",
         principals=["causality", "evidence_based"],
         claims=[],
         evidence_refs=["django/db/models.py:45"],
@@ -32,7 +32,7 @@ def test_phase_record_dataclass_fields():
         content="Agent analyzed the root cause",
     )
     assert rec.phase == "ANALYZE"
-    assert rec.subtype == "root_cause_analysis"
+    assert rec.subtype == "analysis.root_cause"
     assert rec.principals == ["causality", "evidence_based"]
     assert rec.claims == []
     assert rec.evidence_refs == ["django/db/models.py:45"]
@@ -45,7 +45,7 @@ def test_phase_record_as_dict_serializable():
     import json
     rec = PhaseRecord(
         phase="EXECUTE",
-        subtype="patch_writing",
+        subtype="execution.code_patch",
         principals=["scope_control"],
         claims=[],
         evidence_refs=[],
@@ -58,7 +58,7 @@ def test_phase_record_as_dict_serializable():
     # content_preview must be truncated to 100 chars
     assert len(d["content_preview"]) <= 100
     assert d["phase"] == "EXECUTE"
-    assert d["subtype"] == "patch_writing"
+    assert d["subtype"] == "execution.code_patch"
     assert d["principals"] == ["scope_control"]
 
 
@@ -68,28 +68,28 @@ def test_extract_phase_record_observe():
     """OBSERVE phase -> subtype=observation."""
     rec = extract_phase_record("I will read the codebase", "OBSERVE")
     assert rec.phase == "OBSERVE"
-    assert rec.subtype == "observation"
+    assert rec.subtype == "observation.fact_gathering"
 
 
 def test_extract_phase_record_analyze():
     """ANALYZE phase -> subtype=root_cause_analysis."""
     rec = extract_phase_record("The root cause is in models.py:45", "ANALYZE")
     assert rec.phase == "ANALYZE"
-    assert rec.subtype == "root_cause_analysis"
+    assert rec.subtype == "analysis.root_cause"
 
 
 def test_extract_phase_record_execute():
     """EXECUTE phase -> subtype=patch_writing."""
     rec = extract_phase_record("Applying minimal change to fix.py", "EXECUTE")
     assert rec.phase == "EXECUTE"
-    assert rec.subtype == "patch_writing"
+    assert rec.subtype == "execution.code_patch"
 
 
 def test_extract_phase_record_judge():
     """JUDGE phase -> subtype=verification."""
     rec = extract_phase_record("Verified: tests pass", "JUDGE")
     assert rec.phase == "JUDGE"
-    assert rec.subtype == "verification"
+    assert rec.subtype == "judge.verification"
 
 
 def test_extract_phase_record_unknown_phase():
@@ -165,7 +165,7 @@ def test_extract_phase_record_empty_message():
     """Empty agent message -> returns PhaseRecord with empty principals and refs."""
     rec = extract_phase_record("", "ANALYZE")
     assert rec.phase == "ANALYZE"
-    assert rec.subtype == "root_cause_analysis"
+    assert rec.subtype == "analysis.root_cause"
     assert rec.principals == []
     assert rec.evidence_refs == []
     assert rec.content == ""

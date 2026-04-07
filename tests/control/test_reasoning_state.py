@@ -225,7 +225,8 @@ class TestDecideNext:
         ("OBSERVE",    "ANALYZE"),
         ("ANALYZE",    "DECIDE"),
         ("DECIDE",     "EXECUTE"),
-        ("EXECUTE",    "JUDGE"),
+        # EXECUTE is excluded: 改动5 changed EXECUTE stagnation to VerdictRedirect(DECIDE)
+        # See test_execute_stagnation_redirects_to_decide below.
     ])
     def test_stagnation_advance_table(self, phase, expected_to):
         s = initial_reasoning_state(phase)
@@ -234,6 +235,17 @@ class TestDecideNext:
         verdict = decide_next(s)
         assert isinstance(verdict, VerdictAdvance)
         assert verdict.to == expected_to
+
+    def test_execute_stagnation_redirects_to_decide(self):
+        """改动5: EXECUTE stagnation → VerdictRedirect(DECIDE), not VerdictAdvance(JUDGE).
+        Agent has no patch yet — send back to DECIDE to rethink, not forward to JUDGE."""
+        s = initial_reasoning_state("EXECUTE")
+        for _ in range(NO_PROGRESS_THRESHOLD):
+            s = update_reasoning_state(s, no_progress_signals())
+        verdict = decide_next(s)
+        assert isinstance(verdict, VerdictRedirect)
+        assert verdict.to == "DECIDE"
+        assert verdict.reason == "execute_no_progress"
 
     # phase gates
     def test_observe_hypothesis_narrowing_advances(self):
@@ -585,7 +597,13 @@ class TestB3StagnationGating:
         # One more verify window without progress (window_partial already unpacked above)
         s = update_reasoning_state(s, normalize_signals(window_partial),
                                    update_stagnation=True)
-        assert s.no_progress_steps == 2  # == NO_PROGRESS_THRESHOLD
+        assert s.no_progress_steps == 2
+
+        # Keep adding verify windows until threshold
+        for _ in range(NO_PROGRESS_THRESHOLD - 2):
+            s = update_reasoning_state(s, normalize_signals(window_partial),
+                                       update_stagnation=True)
+        assert s.no_progress_steps == NO_PROGRESS_THRESHOLD
 
         # Now stagnation should fire
         verdict = decide_next(s)
