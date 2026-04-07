@@ -32,7 +32,9 @@ except Exception:
 _ANALYZE_GUIDANCE = (
     "Form hypotheses. Identify root cause with causal evidence. Do NOT fix yet. "
     + _ANALYZE_PRINCIPAL
-    + " Output: your diagnosis, the causal chain, and why."
+    + " Your response MUST include at least one file reference in the format"
+    " path/to/file.py:line — for example: EVIDENCE: django/core/validators.py:68."
+    " Output: your diagnosis, the causal chain, and why."
 )
 _EXECUTE_GUIDANCE = (
     "BEFORE writing any code, output these two lines exactly:\n"
