@@ -194,10 +194,9 @@ def test_bugA_execute_no_progress_policy_documented():
 def test_bugA_execute_no_progress_loop_limit_is_3():
     """Documents that execute_no_progress redirect limit is 3 (改动6).
 
-    After 3 consecutive execute_no_progress redirects, the loop breaker fires.
-    Bug A fix (p16): behavior changed from VerdictStop → back-off (reset counter).
-    This prevents 30/30 FAILED caused by stopping whole attempt when DECIDE redirect
-    didn't help. Agent is now allowed to self-rescue in EXECUTE.
+    After 3 consecutive execute_no_progress redirects, the loop breaker fires
+    VerdictStop(no_signal). Bug A fix (p17): no_signal is attempt-terminal,
+    so outer loop continues to next attempt instead of breaking the instance.
     """
     import re
     gate_path = os.path.join(os.path.dirname(__file__), "..", "scripts", "run_with_jingu_gate.py")
@@ -206,18 +205,60 @@ def test_bugA_execute_no_progress_loop_limit_is_3():
     m = re.search(r'_EXECUTE_REDIRECT_LIMIT\s*=\s*(\d+)', content)
     assert m is not None, "_EXECUTE_REDIRECT_LIMIT not found in run_with_jingu_gate.py"
     limit = int(m.group(1))
-    # Documents current value — change this test if policy changes intentionally
     assert limit == 3, (
         f"execute_no_progress loop limit is {limit}, expected 3. "
         "If this changed intentionally, update this test."
     )
-    # Bug A fix (p17): verify attempt-terminal semantics (not instance-terminal).
-    # execute_no_progress should stop the current attempt and retry, not kill the instance.
-    attempt_terminal_marker = "attempt-terminal, will retry"
-    assert attempt_terminal_marker in content, (
-        "Bug A fix: execute_no_progress exceeded limit should be attempt-terminal "
-        "(outer loop continues to next attempt), not instance-terminal (break). "
-        "Missing attempt-terminal marker in run_with_jingu_gate.py."
+    assert "attempt-terminal, will retry" in content, (
+        "Bug A fix: execute_no_progress exceeded limit should emit attempt-terminal marker. "
+        "Missing in run_with_jingu_gate.py."
+    )
+
+
+def test_bugA_early_stop_scope_no_signal_is_attempt_terminal():
+    """early_stop_scope('no_signal') must return 'attempt_terminal'.
+
+    Bug A root cause (p17): outer loop used unconditional break for all early_stop_verdict
+    reasons — treating no_signal (retriable) the same as task_success (verified pass).
+
+    Fix: early_stop_scope() encodes the taxonomy.
+      no_signal     → attempt_terminal → outer loop continues to next attempt
+      task_success  → instance_terminal → outer loop breaks
+    """
+    from run_with_jingu_gate import early_stop_scope
+    assert early_stop_scope("no_signal") == "attempt_terminal", (
+        "no_signal must be attempt_terminal. "
+        "Bug A: treating no_signal as instance_terminal killed instances prematurely."
+    )
+
+
+def test_bugA_early_stop_scope_task_success_is_instance_terminal():
+    """early_stop_scope('task_success') must return 'instance_terminal'.
+
+    task_success = controlled_verify confirmed pass → no further attempts needed.
+    """
+    from run_with_jingu_gate import early_stop_scope
+    assert early_stop_scope("task_success") == "instance_terminal"
+
+
+def test_bugA_early_stop_scope_unknown_reason_is_unknown():
+    """early_stop_scope with unrecognised reason returns 'unknown'.
+
+    Prevents new unrecognised reasons from silently becoming instance-terminal.
+    """
+    from run_with_jingu_gate import early_stop_scope
+    assert early_stop_scope("some_future_reason") == "unknown"
+
+
+def test_bugA_no_signal_not_in_instance_terminal_set():
+    """no_signal must NOT be in _INSTANCE_TERMINAL_REASONS.
+
+    Regression guard: catches accidental addition of no_signal to instance-terminal set
+    before any batch run.
+    """
+    from run_with_jingu_gate import _INSTANCE_TERMINAL_REASONS
+    assert "no_signal" not in _INSTANCE_TERMINAL_REASONS, (
+        "no_signal must not be instance-terminal — it is attempt_terminal."
     )
 
 

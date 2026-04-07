@@ -63,6 +63,31 @@ class StopExecution(Exception):
         super().__init__(f"StopExecution: {reason}")
 
 
+# Stop-scope taxonomy (Bug A fix, p17):
+# Determines whether an early_stop_verdict terminates the current attempt only
+# (attempt-terminal → continue to next attempt) or the whole instance
+# (instance-terminal → break attempt loop entirely).
+#
+# Extracted as a pure function so it can be unit-tested independently of
+# the attempt loop machinery in run_with_jingu().
+_INSTANCE_TERMINAL_REASONS = frozenset({"task_success"})
+_ATTEMPT_TERMINAL_REASONS  = frozenset({"no_signal"})
+
+def early_stop_scope(reason: str) -> str:
+    """Return the scope of an early-stop verdict.
+
+    Returns:
+        "instance_terminal" — break the attempt loop (verified pass or hard stop)
+        "attempt_terminal"  — continue to next attempt (retriable failure)
+        "unknown"           — unrecognised reason; caller should treat conservatively
+    """
+    if reason in _INSTANCE_TERMINAL_REASONS:
+        return "instance_terminal"
+    if reason in _ATTEMPT_TERMINAL_REASONS:
+        return "attempt_terminal"
+    return "unknown"
+
+
 # P-INV-001: run environment invariant checks before any batch work
 run_preflight()
 
@@ -2967,18 +2992,18 @@ def run_with_jingu(instance_id: str, output_dir: Path, max_attempts: int = 3,
                 )
                 break  # task_success = instance-terminal: verified pass, no retry needed.
 
-            # Bug A fix (p17): no_signal is attempt-terminal, not instance-terminal.
-            # Before this fix: unconditional break → instance failed even with attempt budget left.
-            # After fix: continue to next attempt with last_failure hint already set above.
-            # Reset cp_state to fresh OBSERVE so attempt N+1 doesn't inherit stale loop counts.
-            if _esv.reason == "no_signal":
+            # Bug A fix (p17): use early_stop_scope() to decide break vs continue.
+            # no_signal → attempt-terminal: reset cp_state, continue to next attempt.
+            # unknown reasons → fall through to normal gate logic (conservative).
+            _scope = early_stop_scope(_esv.reason)
+            if _scope == "attempt_terminal":
                 print(
                     f"  [cp] no_signal attempt={attempt}/{max_attempts}"
                     f" — attempt-terminal, resetting cp_state for next attempt",
                     flush=True,
                 )
                 cp_state_holder[0] = initial_reasoning_state("OBSERVE")
-                continue  # → next attempt with last_failure hint
+                continue  # → next attempt with last_failure hint already set above
 
         # p179: record test counts for this attempt (used later for tests_delta)
         _test_counts_by_attempt[attempt] = extract_test_counts(jingu_body)
