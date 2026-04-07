@@ -405,3 +405,49 @@ def test_analyze_missing_required_is_retryable():
     admission = evaluate_admission(pr, "ANALYZE")
     assert admission.status == "RETRYABLE"
     assert any("missing_required_principal" in r for r in admission.reasons)
+
+
+# ── Bug C: ESCALATE_CONTRACT_BUG must bypass (ADMITTED) not stop ──────────────
+
+def test_bugC_escalate_contract_bypass_not_stop():
+    """ESCALATE_CONTRACT_BUG must set _contract_bypass=True and not raise StopExecution.
+
+    Bug C (p18): 10/10 FAILED because ESCALATE_CONTRACT_BUG raised StopExecution('no_signal').
+    Both attempts hit the same loop and stopped — agent never reached the patch phase.
+    Fix: when _loop_count >= limit, set _admission.status = 'ADMITTED' with contract_bypass
+    and set _contract_bypass = True to skip the RETRYABLE redirect injection.
+    """
+    import inspect
+    import run_with_jingu_gate as rwjg
+
+    src = inspect.getsource(rwjg)
+    # The fix must set _contract_bypass = True in the ESCALATE branch
+    assert "_contract_bypass = True" in src, (
+        "Bug C fix: ESCALATE branch must set _contract_bypass=True to skip redirect injection."
+    )
+    # Must NOT raise StopExecution in the ESCALATE branch anymore
+    # (the old code had: state.early_stop_verdict = VerdictStop(reason='no_signal')
+    #                    raise StopExecution('no_signal')  ← this line must be gone)
+    # We detect the old pattern by checking VerdictStop is not paired with ESCALATE_CONTRACT_BUG
+    escalate_idx = src.find("ESCALATE_CONTRACT_BUG")
+    stop_after_escalate = "raise StopExecution" in src[escalate_idx:escalate_idx + 400]
+    assert not stop_after_escalate, (
+        "Bug C fix: ESCALATE_CONTRACT_BUG must not raise StopExecution. "
+        "Agent must continue with contract_bypass ADMITTED."
+    )
+
+
+def test_bugC_contract_bypass_skips_retryable_redirect():
+    """After contract_bypass, the RETRYABLE redirect injection must be skipped.
+
+    The `if not _contract_bypass and not state.early_stop_verdict:` guard
+    must exist to prevent decide_next() and message injection from running.
+    """
+    import inspect
+    import run_with_jingu_gate as rwjg
+
+    src = inspect.getsource(rwjg)
+    assert "not _contract_bypass and not state.early_stop_verdict" in src, (
+        "Bug C fix: redirect injection guard must check _contract_bypass. "
+        "Without this, RETRYABLE redirect fires even after contract_bypass."
+    )

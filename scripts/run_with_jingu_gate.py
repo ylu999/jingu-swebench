@@ -861,21 +861,28 @@ def _step_cp_update_and_verdict(
                             state._retryable_loop_counts[_k] = 0
                     _loop_count = state._retryable_loop_counts[_loop_key]
                     _RETRYABLE_LOOP_LIMIT = 3
+                    _contract_bypass = False
                     if _loop_count >= _RETRYABLE_LOOP_LIMIT:
+                        # Bug C fix (p18): ESCALATE_CONTRACT_BUG should NOT stop the instance.
+                        # When agent consistently fails to declare required principals, this is
+                        # a contract-vs-agent-capability gap, not an agent logic error.
+                        # Stopping (no_signal) wastes both attempts — agent never gets to patch.
+                        # Fix: bypass admission (ADMITTED with contract_bypass marker) and let
+                        # agent continue. Score will be lower but instance can still solve.
                         print(
                             f"    [principal_gate] ESCALATE_CONTRACT_BUG:"
                             f" phase={_loop_key[0]} reason={_loop_key[1]}"
                             f" count={_loop_count} >= {_RETRYABLE_LOOP_LIMIT}"
-                            f" → VerdictStop (contract loop, not agent failure)",
+                            f" → contract_bypass ADMITTED (agent continues without principal check)",
                             flush=True,
                         )
-                        state.early_stop_verdict = VerdictStop(reason="no_signal")
-                        raise StopExecution("no_signal")
-                        # Skip the redirect injection — stopping here (unreachable but documents intent)
-                    else:
-                        pass  # fall through to decide_next below
+                        _admission.status = "ADMITTED"
+                        _admission.reasons = [f"contract_bypass:{_loop_key[1]}"]
+                        state._retryable_loop_counts[_loop_key] = 0  # reset to avoid re-trigger
+                        _contract_bypass = True
+                        # Skip RETRYABLE redirect injection below — agent continues normally.
 
-                    if not state.early_stop_verdict:
+                    if not _contract_bypass and not state.early_stop_verdict:
                         _pv_verdict = decide_next(_cp_s)
                         print(
                             f"    [principal_gate] RETRYABLE → cognition_verdict={_pv_verdict.type}"
