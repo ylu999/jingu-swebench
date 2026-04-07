@@ -627,17 +627,16 @@ def _step_cp_update_and_verdict(
                 flush=True,
             )
             if _exec_redirect_count > _EXECUTE_REDIRECT_LIMIT:
-                # Bug A fix (p16): redirecting to DECIDE repeatedly didn't help (30/30 FAILED).
-                # After limit is exhausted, back off: reset counter and let agent self-rescue
-                # in EXECUTE rather than stopping the whole attempt with no patch.
+                # Bug A fix (p17): execute_no_progress is attempt-terminal, not instance-terminal.
+                # Outer loop now does `continue` (not `break`) on no_signal — next attempt gets
+                # a fresh cp_state and the NBR hint. This is the correct scope for this signal.
                 print(
                     f"    [cp] execute_no_progress loop exceeded limit={_EXECUTE_REDIRECT_LIMIT}"
-                    f" → back-off: reset redirect counter, agent continues in EXECUTE",
+                    f" → VerdictStop(no_signal) [attempt-terminal, will retry]",
                     flush=True,
                 )
-                state._retryable_loop_counts[_exec_key] = 0
-                # Fall through: redirect message already injected above, counter reset.
-                # Agent is on its own — no more forced DECIDE redirects until threshold hit again.
+                state.early_stop_verdict = VerdictStop(reason="no_signal")
+                raise StopExecution("no_signal")
         else:
             # Non-execute redirect: reset execute_no_progress counter
             _exec_key = ("EXECUTE", "execute_no_progress")
@@ -2966,7 +2965,20 @@ def run_with_jingu(instance_id: str, output_dir: Path, max_attempts: int = 3,
                     f" reason={_pr_ts.judge_reason}",
                     flush=True,
                 )
-            break
+                break  # task_success = instance-terminal: verified pass, no retry needed.
+
+            # Bug A fix (p17): no_signal is attempt-terminal, not instance-terminal.
+            # Before this fix: unconditional break → instance failed even with attempt budget left.
+            # After fix: continue to next attempt with last_failure hint already set above.
+            # Reset cp_state to fresh OBSERVE so attempt N+1 doesn't inherit stale loop counts.
+            if _esv.reason == "no_signal":
+                print(
+                    f"  [cp] no_signal attempt={attempt}/{max_attempts}"
+                    f" — attempt-terminal, resetting cp_state for next attempt",
+                    flush=True,
+                )
+                cp_state_holder[0] = initial_reasoning_state("OBSERVE")
+                continue  # → next attempt with last_failure hint
 
         # p179: record test counts for this attempt (used later for tests_delta)
         _test_counts_by_attempt[attempt] = extract_test_counts(jingu_body)

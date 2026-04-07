@@ -211,11 +211,13 @@ def test_bugA_execute_no_progress_loop_limit_is_3():
         f"execute_no_progress loop limit is {limit}, expected 3. "
         "If this changed intentionally, update this test."
     )
-    # Bug A fix: verify back-off behavior (not VerdictStop) when limit exceeded
-    back_off_marker = "back-off: reset redirect counter"
-    assert back_off_marker in content, (
-        "Bug A fix: after limit exceeded, gate should back off (reset counter), "
-        "not VerdictStop. Missing back-off marker in run_with_jingu_gate.py."
+    # Bug A fix (p17): verify attempt-terminal semantics (not instance-terminal).
+    # execute_no_progress should stop the current attempt and retry, not kill the instance.
+    attempt_terminal_marker = "attempt-terminal, will retry"
+    assert attempt_terminal_marker in content, (
+        "Bug A fix: execute_no_progress exceeded limit should be attempt-terminal "
+        "(outer loop continues to next attempt), not instance-terminal (break). "
+        "Missing attempt-terminal marker in run_with_jingu_gate.py."
     )
 
 
