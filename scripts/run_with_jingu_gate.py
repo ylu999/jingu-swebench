@@ -584,7 +584,18 @@ def _step_cp_update_and_verdict(
             else:
                 state.cp_state = _dc_adv.replace(state.cp_state, phase=_step_verdict.to)
                 _cp_s = state.cp_state
-        print(f"    [cp] phase_advance from={_old_phase} to={_step_verdict.to}", flush=True)
+        # Log agent declared phase at advance time — key for misalignment diagnosis.
+        try:
+            from declaration_extractor import _extract_phase_from_message as _epfm, _PHASE_NORM as _pnorm
+            _adv_declared_raw = _epfm(latest_assistant_text)
+            _adv_declared = _pnorm.get(_adv_declared_raw, _adv_declared_raw) if _adv_declared_raw else "none"
+        except Exception:
+            _adv_declared = "unknown"
+        print(
+            f"    [cp] phase_advance from={_old_phase} to={_step_verdict.to}"
+            f" agent_declared={_adv_declared}",
+            flush=True,
+        )
 
         _pr = None
         _pr_source = "none"
@@ -622,9 +633,21 @@ def _step_cp_update_and_verdict(
                     # Soft signal: agent declared a foreign phase in this message.
                     # The extracted record has empty principals/evidence_refs because
                     # those belong to the foreign phase, not to eval_phase.
+                    # Classify misalignment direction: ahead = agent is past eval_phase,
+                    # behind = agent is re-doing an earlier phase, unknown = unlisted phase.
+                    _PHASE_ORDER = ["UNDERSTAND", "OBSERVE", "ANALYZE", "DECIDE", "EXECUTE", "JUDGE"]
+                    try:
+                        _eval_idx = _PHASE_ORDER.index(_eval_phase)
+                        _decl_idx = _PHASE_ORDER.index(_declared_phase)
+                        _align = "declared_ahead" if _decl_idx > _eval_idx else "declared_behind"
+                        _align_delta = _decl_idx - _eval_idx
+                    except (ValueError, AttributeError):
+                        _align = "unknown_phase"
+                        _align_delta = 0
                     print(
                         f"    [phase_record] foreign_phase_declared:"
                         f" eval_phase={_eval_phase} declared_phase={_declared_phase}"
+                        f" alignment={_align} delta={_align_delta}"
                         f" — principals extracted from foreign context discarded",
                         flush=True,
                     )
