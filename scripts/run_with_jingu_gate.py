@@ -2780,6 +2780,7 @@ def run_agent(
     _cid = _monitor.container_id if _monitor else None
     if _cid:
         try:
+            import subprocess as _sp
             _base_c = instance.get("base_commit", "HEAD")
             _diff_r = _sp.run(
                 ["docker", "exec", "-w", "/testbed", _cid, "git", "diff", _base_c],
