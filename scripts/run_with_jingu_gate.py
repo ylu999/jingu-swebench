@@ -246,11 +246,15 @@ class StepMonitorState:
         # Same phase + same reason N times in a row → ESCALATE_CONTRACT_BUG (VerdictStop).
         # This is a safety fuse, not a contract substitute. Prevents infinite gate loops.
         self._retryable_loop_counts: dict[tuple, int] = {}   # (phase, reason) → count
-        # 改动9b: per-step keyed idempotency for control signal injection.
-        # key = f"{step}:{kind}:{signal_id}" where kind ∈ {phase_prefix, cognition_violation}
-        # Prevents repeated injection when _monitored_step fires multiple times per step
-        # (once per tool call in a multi-tool LLM response).
+        # 改动9c: per-LLM-step keyed idempotency for control signal injection.
+        # key = f"{llm_step}:{kind}:{signal_id}" where kind ∈ {phase_prefix, cognition_violation}
+        # _llm_step increments only when a NEW assistant text is observed in _step_observe,
+        # i.e. once per LLM response — NOT once per tool call (n_calls).
+        # 改动9b bug: used n_calls as step id, but n_calls increments per tool call →
+        # each _monitored_step invocation got a unique key → dedup never fired.
         self._injected_signals: set[str] = set()
+        self._llm_step: int = 0                    # increments on each new assistant response
+        self._last_assistant_text: str = ""       # tracks last seen assistant text for change detection
 
     def update_cp_with_step_signals(
         self,
@@ -392,6 +396,17 @@ def _step_observe(agent_self, *, step_n: int, mode: str) -> tuple[str, str, bool
                 latest_assistant_text = content
                 snippet = content.replace("\n", " ")[:80]
             break
+
+    # 改动9c: increment _llm_step when a new assistant response is detected.
+    # _llm_step is used as the idempotency key scope for phase_prefix and cognition_violation.
+    # One LLM response may trigger _monitored_step N times (once per tool call) — all N
+    # invocations see the same assistant text → same _llm_step → dedup fires correctly.
+    _state_ref = getattr(agent_self, "_jingu_monitor_state", None)
+    if _state_ref is not None and latest_assistant_text:
+        if latest_assistant_text != _state_ref._last_assistant_text:
+            _state_ref._llm_step += 1
+            _state_ref._last_assistant_text = latest_assistant_text
+
     print(f"    [step {step_n}] ${agent_self.cost:.2f}  {snippet}", flush=True)
 
     # Cognition record parse + violation feedback
@@ -410,10 +425,11 @@ def _step_observe(agent_self, *, step_n: int, mode: str) -> tuple[str, str, bool
                 )
                 if _cog_violations:
                     _feedback = format_violation_feedback(_cog_violations, _cog_record)
-                    # 改动9b: keyed idempotency — inject once per (step, violation fingerprint)
+                    # 改动9c: use _llm_step (not step_n/n_calls) for keyed idempotency.
+                    # _state_ref already set above from _jingu_monitor_state.
                     _viol_codes = ":".join(sorted(v.code if hasattr(v, "code") else str(v) for v in _cog_violations))
-                    _cog_key = f"{step_n}:cognition_violation:{_viol_codes}"
-                    _state_ref = getattr(agent_self, "_jingu_monitor_state", None)
+                    _llm_step_id = _state_ref._llm_step if _state_ref is not None else step_n
+                    _cog_key = f"{_llm_step_id}:cognition_violation:{_viol_codes}"
                     if _state_ref is None or _cog_key not in _state_ref._injected_signals:
                         if _state_ref is not None:
                             _state_ref._injected_signals.add(_cog_key)
@@ -957,11 +973,11 @@ def _step_inject_phase(agent_self, *, cp_state_holder: "list | None", state: "St
         _phase_prefix = _build_phase_prefix(_phase_str)
         if _phase_prefix:
             _phase_content = _phase_prefix.rstrip("\n")
-            # 改动9b: keyed idempotency — inject once per (step, phase).
-            # Replaces the brittle last-message text comparison (改动9) with a state-based key.
-            # key includes step_n so phase prefix resets cleanly on each new LLM step.
-            _step_n = agent_self.n_calls
-            _phase_key = f"{_step_n}:phase_prefix:{_phase_str}"
+            # 改动9c: use _llm_step (not n_calls) for keyed idempotency.
+            # n_calls increments per tool call; _llm_step increments per LLM response.
+            # One LLM response with N tool calls → _monitored_step fires N times →
+            # all N see same _llm_step → only first injection passes, rest are deduped.
+            _phase_key = f"{state._llm_step}:phase_prefix:{_phase_str}"
             if _phase_key not in state._injected_signals:
                 state._injected_signals.add(_phase_key)
                 agent_self.messages.append({"role": "user", "content": _phase_content})
