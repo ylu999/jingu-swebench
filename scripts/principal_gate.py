@@ -218,7 +218,7 @@ class AdmissionResult:
         return f"AdmissionResult({self.status}, {self.reasons})"
 
 
-def evaluate_admission(phase_record, phase: str, next_phase: str = "") -> AdmissionResult:
+def evaluate_admission(phase_record, phase: str, next_phase: str = "", observe_tool_signal: bool = False) -> AdmissionResult:
     """
     Full admission check for a PhaseRecord at phase boundary.
 
@@ -269,10 +269,12 @@ def evaluate_admission(phase_record, phase: str, next_phase: str = "") -> Admiss
                 retryable.append(f"missing_required_field:{field_name}")
 
         # 3b. has_evidence_basis check (RETRYABLE) — for phases that require evidence basis
-        # but NOT specifically file.py:line regex matches (e.g. ANALYZE).
-        # P16 fix: ANALYZE requires evidence *basis* (evidence_refs OR from_steps non-empty),
-        # not a hard evidence_refs field check. This separates representational artifact
-        # (regex-extracted file refs) from cognition requirement (evidence grounding).
+        # but NOT specifically file.py:line regex matches (e.g. ANALYZE, OBSERVE).
+        # Y-lite: has_evidence_basis = evidence_refs OR from_steps OR observe_tool_signal.
+        # observe_tool_signal=True when agent used any observation-class tool (Read/Grep/Search/Bash)
+        # in this step — tools ARE the evidence basis for OBSERVE, even without explicit EVIDENCE text.
+        # This separates representational artifact (regex-extracted file refs) from cognition
+        # requirement (evidence grounding via any observation mechanism).
         try:
             from subtype_contracts import SUBTYPE_CONTRACTS as _SC, _PHASE_TO_SUBTYPE as _PTS
             _subtype = _PTS.get(phase.upper(), "")
@@ -280,7 +282,7 @@ def evaluate_admission(phase_record, phase: str, next_phase: str = "") -> Admiss
             if _contract.get("has_evidence_basis_required"):
                 _evidence_refs = getattr(phase_record, "evidence_refs", None) or []
                 _from_steps = getattr(phase_record, "from_steps", None) or []
-                if not _evidence_refs and not _from_steps:
+                if not _evidence_refs and not _from_steps and not observe_tool_signal:
                     retryable.append("missing_evidence_basis")
         except Exception:
             pass

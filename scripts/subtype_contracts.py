@@ -83,7 +83,13 @@ SUBTYPE_CONTRACTS: dict[str, SubtypeContract] = {
             "evidence_completeness",      # stage=required_enforced, no inference rule
         ],
         "forbidden_principals": ["action_grounding", "minimal_change"],
-        "required_fields": ["evidence_refs"],
+        # Y-lite fix: evidence_refs regex match is too strict for OBSERVE.
+        # Agent uses Read/Grep/Search tools (implicit evidence basis) but may not
+        # write explicit EVIDENCE: file.py:N text → evidence_refs=[] → RETRYABLE loop.
+        # Solution: require has_evidence_basis (evidence_refs OR from_steps OR observe_tool_signal),
+        # where observe_tool_signal=True when agent used any observation-class tool in this step.
+        "required_fields": [],
+        "has_evidence_basis_required": True,  # evaluated by principal_gate (not field-presence)
         "allowed_next": ["ANALYZE", "OBSERVE"],
         "repair_target": "OBSERVE",
     },

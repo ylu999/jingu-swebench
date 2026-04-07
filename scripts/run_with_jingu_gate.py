@@ -255,6 +255,10 @@ class StepMonitorState:
         self._injected_signals: set[str] = set()
         self._llm_step: int = 0                    # increments on each new assistant response
         self._last_assistant_text: str = ""       # tracks last seen assistant text for change detection
+        # Y-lite: observe_tool_signal — True if agent used any tool in the current LLM step.
+        # Tools (Read/Grep/Search/Bash) in OBSERVE phase constitute implicit evidence basis.
+        # Reset to False on each new LLM step (when _last_assistant_text changes).
+        self._observe_tool_signal: bool = False
 
     def update_cp_with_step_signals(
         self,
@@ -406,6 +410,21 @@ def _step_observe(agent_self, *, step_n: int, mode: str) -> tuple[str, str, bool
         if latest_assistant_text != _state_ref._last_assistant_text:
             _state_ref._llm_step += 1
             _state_ref._last_assistant_text = latest_assistant_text
+            _state_ref._observe_tool_signal = False  # reset on new LLM step
+
+    # Y-lite: detect observation-class tool calls in the latest assistant message.
+    # Any tool call in OBSERVE phase = agent is gathering evidence via tools.
+    # We set observe_tool_signal=True for the gate to treat as implicit evidence basis.
+    if _state_ref is not None:
+        for _msg in reversed(agent_self.messages):
+            if _msg.get("role") == "assistant":
+                _tcs = _msg.get("tool_calls", [])
+                if _tcs:
+                    _state_ref._observe_tool_signal = True
+                # Also check extra.actions (some adapters use this format)
+                elif _msg.get("extra", {}).get("actions"):
+                    _state_ref._observe_tool_signal = True
+                break
 
     print(f"    [step {step_n}] ${agent_self.cost:.2f}  {snippet}", flush=True)
 
@@ -730,7 +749,8 @@ def _step_cp_update_and_verdict(
             from control.reasoning_state import set_principal_violation as _set_pv
             # Rule 1: evaluate against _old_phase (the phase being completed), not _pr.phase
             # (which may differ if the record was extracted with wrong phase in prior sessions).
-            _admission = _eval_admission(_pr, _eval_phase)
+            _obs_tool_sig = getattr(getattr(agent_self, "_jingu_monitor_state", None), "_observe_tool_signal", False)
+            _admission = _eval_admission(_pr, _eval_phase, observe_tool_signal=_obs_tool_sig)
             # 改动10: if agent declared a foreign phase, prepend the reason so gate output
             # reflects the actual problem (phase boundary violation) rather than a misleading
             # missing_required_field:evidence_refs (which we no longer discard, but principals
