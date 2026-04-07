@@ -632,7 +632,8 @@ def _step_cp_update_and_verdict(
             print(
                 f"    [phase_record] eval_phase={_eval_phase}"
                 f" record_phase={_pr.phase} source={_pr_source}"
-                f" subtype={_pr.subtype} principals={_pr.principals}",
+                f" subtype={_pr.subtype} principals={_pr.principals}"
+                f" evidence_refs={_pr.evidence_refs}",
                 flush=True,
             )
         except Exception as _pr_exc:
@@ -692,6 +693,12 @@ def _step_cp_update_and_verdict(
                     raise StopExecution("no_signal")
                 else:
                     # RETRYABLE — right phase, incomplete output; redirect to repair
+                    # Invalidate cached record for eval_phase so next step does fresh extraction.
+                    # Without this, a RETRYABLE record stays in cache and blocks all retries.
+                    state.phase_records = [
+                        r for r in state.phase_records
+                        if r.phase.upper() != _eval_phase
+                    ]
                     # P16 loop breaker: same (phase, reason) 3+ consecutive → ESCALATE
                     # Rule 4: loop key must bind (eval_phase, reason) — not _pr.phase
                     _loop_key = (_eval_phase, _pg_violation)
@@ -785,6 +792,11 @@ def _step_cp_update_and_verdict(
                     f" violation={_inf_violation} repair={_inf_repair}",
                     flush=True,
                 )
+                # Invalidate cached record so next step does fresh extraction.
+                state.phase_records = [
+                    r for r in state.phase_records
+                    if r.phase.upper() != _eval_phase
+                ]
                 # Loop-break: same (eval_phase, violation) N+ times → ESCALATE
                 _fi_loop_key = (_eval_phase, _inf_violation)
                 state._retryable_loop_counts[_fi_loop_key] = (
