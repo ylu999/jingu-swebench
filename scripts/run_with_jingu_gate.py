@@ -3032,15 +3032,34 @@ def run_with_jingu(instance_id: str, output_dir: Path, max_attempts: int = 3,
             # Bug A fix (p17): use early_stop_scope() to decide break vs continue.
             # no_signal → attempt-terminal: reset cp_state, continue to next attempt.
             # unknown reasons → fall through to normal gate logic (conservative).
+            #
+            # p24 submission persistence gate: if run_agent returned a non-empty patch
+            # (agent called submit before no_signal fired), do NOT discard it — fall
+            # through to normal gate logic so the submission is evaluated.
+            # Only continue (discard attempt) when patch is empty.
+            # Root cause of 11179 bug: att2 submitted exact gold patch + controlled_verify
+            # passed, but early_stop discarded it → predictions.jsonl got empty patch.
             _scope = early_stop_scope(_esv.reason)
             if _scope == "attempt_terminal":
-                print(
-                    f"  [cp] no_signal attempt={attempt}/{max_attempts}"
-                    f" — attempt-terminal, resetting cp_state for next attempt",
-                    flush=True,
-                )
-                cp_state_holder[0] = initial_reasoning_state("OBSERVE")
-                continue  # → next attempt with last_failure hint already set above
+                if patch:
+                    # Agent submitted before no_signal fired — preserve submission.
+                    # Reset cp_state so any subsequent attempt starts clean.
+                    cp_state_holder[0] = initial_reasoning_state("OBSERVE")
+                    print(
+                        f"  [cp] no_signal attempt={attempt}/{max_attempts}"
+                        f" — submission preserved ({len(patch)}c patch),"
+                        f" falling through to gate (p24 submission persistence)",
+                        flush=True,
+                    )
+                    # Fall through to gate logic below (do NOT continue)
+                else:
+                    print(
+                        f"  [cp] no_signal attempt={attempt}/{max_attempts}"
+                        f" — attempt-terminal (no patch), resetting cp_state for next attempt",
+                        flush=True,
+                    )
+                    cp_state_holder[0] = initial_reasoning_state("OBSERVE")
+                    continue  # → next attempt with last_failure hint already set above
 
         # p179: record test counts for this attempt (used later for tests_delta)
         _test_counts_by_attempt[attempt] = extract_test_counts(jingu_body)
