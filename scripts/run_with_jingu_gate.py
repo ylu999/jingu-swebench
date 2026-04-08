@@ -536,7 +536,7 @@ def _step_verify_if_needed(
             _base_commit = state.instance.get("base_commit", "HEAD")
             _git_diff_result = _sp_iv.run(
                 ["docker", "exec", "-w", "/testbed", cid, "git", "diff", _base_commit],
-                capture_output=True, text=True, timeout=10,
+                capture_output=True, text=True, timeout=30,  # Bug F fix (p20): 10s too short under 30-worker load
             )
             current_patch = (
                 _git_diff_result.stdout.strip()
@@ -1630,7 +1630,7 @@ def run_controlled_verify(
         # Copy patch into container
         cp_result = _sp.run(
             ["docker", "cp", host_patch_path, f"{container_id}:/tmp/jingu_verify.patch"],
-            capture_output=True, text=True, timeout=10,
+            capture_output=True, text=True, timeout=30,  # Bug F fix (p20): 10s too short under load
         )
         os.unlink(host_patch_path)
         if cp_result.returncode != 0:
@@ -2832,7 +2832,7 @@ def run_agent(
             _base_c = instance.get("base_commit", "HEAD")
             _diff_r = _sp.run(
                 ["docker", "exec", "-w", "/testbed", _cid, "git", "diff", _base_c],
-                capture_output=True, text=True, timeout=10,
+                capture_output=True, text=True, timeout=30,  # Bug F fix (p20): 10s too short under load
             )
             _diff_patch = _diff_r.stdout.strip() if _diff_r.returncode == 0 else ""
             if _diff_patch:
