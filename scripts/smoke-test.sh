@@ -61,7 +61,8 @@ LAUNCH_OUT=$(python "$SCRIPT_DIR/ops.py" run \
     --dataset "$DATASET" \
     --mode "$MODE" \
     --max-attempts "$MAX_ATTEMPTS" \
-    --workers "$WORKERS" 2>&1)
+    --workers "$WORKERS" \
+    --runbook-ack 2>&1)
 
 echo "$LAUNCH_OUT"
 
