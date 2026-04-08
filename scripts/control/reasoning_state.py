@@ -245,6 +245,14 @@ def decide_next(state: ReasoningState) -> ControlVerdict:
         # EXECUTE with no new patch means the agent doesn't know what to write;
         # advancing to JUDGE would verify nothing. Route back to DECIDE to re-plan.
         if state.phase == "EXECUTE":
+            # Bug G fix (p22): only redirect if no patch exists.
+            # If actionability > 0 (patch written), agent is actively trying to fix;
+            # no-progress just means tests haven't passed yet. Redirecting to DECIDE
+            # in that case is counterproductive — let inner_verify + max_attempts handle it.
+            # execute_no_progress redirect is only meaningful when patch is absent
+            # (agent is stuck in EXECUTE without producing any code).
+            if state.actionability > 0:
+                return VerdictContinue()
             return VerdictRedirect(to="DECIDE", reason="execute_no_progress")
         next_phase = _ADVANCE_TABLE.get(state.phase)
         if next_phase is None or state.phase == "JUDGE":

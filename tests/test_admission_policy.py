@@ -502,3 +502,48 @@ def test_bugE_phase_advance_no_progress_reset_is_in_advance_block():
         "handling block, not elsewhere. The cascading stagnation happens immediately "
         "after phase transition, so the reset must co-occur with the phase update."
     )
+
+
+def test_bugG_execute_with_patch_does_not_trigger_stagnation_redirect():
+    """EXECUTE phase with actionability>0 (patch exists) must NOT trigger execute_no_progress.
+
+    Root cause (p22): when inner_verify runs (background thread), it stashes agent's patch
+    temporarily. The step during which stash is active sees patch_non_empty=False, causing
+    actionability=0. Combined with heartbeat PEE, no_progress increments. After 4 increments,
+    execute_no_progress redirect fires — even though agent has a real patch.
+
+    Fix: decide_next in EXECUTE phase only redirects when actionability==0 (no patch).
+    If actionability>0, return VerdictContinue (agent is actively patching, let it run).
+    """
+    from control.reasoning_state import (
+        ReasoningState, decide_next, VerdictContinue, VerdictRedirect, NO_PROGRESS_THRESHOLD
+    )
+
+    # EXECUTE with patch + stagnation → must NOT redirect (Bug G fix)
+    state_with_patch = ReasoningState(
+        phase="EXECUTE",
+        no_progress_steps=NO_PROGRESS_THRESHOLD,  # stagnation threshold reached
+        actionability=1,  # patch exists
+    )
+    verdict = decide_next(state_with_patch)
+    assert isinstance(verdict, VerdictContinue), (
+        f"Bug G fix: EXECUTE with actionability=1 and no_progress={NO_PROGRESS_THRESHOLD} "
+        f"must return VerdictContinue, not {type(verdict).__name__}({getattr(verdict, 'reason', '')}). "
+        "Agent has a patch — stagnation here means tests haven't passed yet, not that agent is stuck."
+    )
+
+    # EXECUTE without patch + stagnation → MUST redirect (original behavior preserved)
+    state_no_patch = ReasoningState(
+        phase="EXECUTE",
+        no_progress_steps=NO_PROGRESS_THRESHOLD,
+        actionability=0,  # no patch — genuinely stuck
+    )
+    verdict_no_patch = decide_next(state_no_patch)
+    assert isinstance(verdict_no_patch, VerdictRedirect), (
+        f"Bug G fix: EXECUTE with actionability=0 and no_progress={NO_PROGRESS_THRESHOLD} "
+        f"must still return VerdictRedirect(execute_no_progress), got {type(verdict_no_patch).__name__}. "
+        "No patch in EXECUTE is the real stagnation case."
+    )
+    assert verdict_no_patch.reason == "execute_no_progress", (
+        f"Redirect reason must be 'execute_no_progress', got '{verdict_no_patch.reason}'"
+    )
