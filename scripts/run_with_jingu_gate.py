@@ -878,7 +878,21 @@ def _step_cp_update_and_verdict(
                     _loop_count = state._retryable_loop_counts[_loop_key]
                     _RETRYABLE_LOOP_LIMIT = 3
                     _contract_bypass = False
-                    if _loop_count >= _RETRYABLE_LOOP_LIMIT:
+                    # p23: structured output violations are NOT eligible for contract_bypass.
+                    # missing_root_cause / missing_plan / plan_not_grounded represent cognition
+                    # quality requirements — agent must produce structured reasoning to proceed.
+                    # contract_bypass applies only to principal declaration gaps (capability mismatch),
+                    # not to structural reasoning failures.
+                    _STRUCTURED_BYPASS_EXEMPT = {
+                        "missing_root_cause",
+                        "missing_plan",
+                        "plan_not_grounded_in_root_cause",
+                    }
+                    _has_structured_violation = any(
+                        r in _STRUCTURED_BYPASS_EXEMPT
+                        for r in (_admission.reasons or [])
+                    )
+                    if _loop_count >= _RETRYABLE_LOOP_LIMIT and not _has_structured_violation:
                         # Bug C fix (p18): ESCALATE_CONTRACT_BUG should NOT stop the instance.
                         # When agent consistently fails to declare required principals, this is
                         # a contract-vs-agent-capability gap, not an agent logic error.

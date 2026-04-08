@@ -553,3 +553,84 @@ def test_bugG_execute_with_patch_does_not_trigger_stagnation_redirect():
     assert verdict_no_patch.reason == "execute_no_progress", (
         f"Redirect reason must be 'execute_no_progress', got '{verdict_no_patch.reason}'"
     )
+
+
+# ── p23 policy hole fix: structured output violations exempt from contract_bypass ─
+#
+# Root cause (smoke test 2026-04-07): missing_root_cause triggered RETRYABLE REDIRECT
+# correctly, but after 3 consecutive REDIRECTs the contract_bypass escape hatch fired,
+# setting admission=ADMITTED and letting the agent continue to EXECUTE without ever
+# producing a ROOT_CAUSE section. This hollowed out the p23 enforcement.
+#
+# Fix: structured output violations (missing_root_cause, missing_plan,
+# plan_not_grounded_in_root_cause) are exempt from contract_bypass. They represent
+# cognition quality requirements, not principal declaration capability gaps.
+# contract_bypass only applies to principal declaration failures.
+
+def test_p23_missing_root_cause_exempt_from_contract_bypass():
+    """missing_root_cause must NOT trigger contract_bypass even after 3+ RETRYABLE loops.
+
+    contract_bypass was designed for principal declaration gaps (agent capability mismatch).
+    Structured output requirements (ROOT_CAUSE, PLAN) are cognition quality gates —
+    the agent must produce them; bypass would hollow out p23 enforcement.
+    """
+    import inspect
+    import run_with_jingu_gate as rwjg
+
+    src = inspect.getsource(rwjg)
+
+    # The exempt set must exist and contain all three structured output violation codes
+    assert "_STRUCTURED_BYPASS_EXEMPT" in src, (
+        "p23 fix: _STRUCTURED_BYPASS_EXEMPT set must exist in run_with_jingu_gate.py. "
+        "Structured output violations must be exempt from contract_bypass."
+    )
+    assert '"missing_root_cause"' in src, (
+        "p23 fix: 'missing_root_cause' must be in _STRUCTURED_BYPASS_EXEMPT."
+    )
+    assert '"missing_plan"' in src, (
+        "p23 fix: 'missing_plan' must be in _STRUCTURED_BYPASS_EXEMPT."
+    )
+    assert '"plan_not_grounded_in_root_cause"' in src, (
+        "p23 fix: 'plan_not_grounded_in_root_cause' must be in _STRUCTURED_BYPASS_EXEMPT."
+    )
+
+    # The guard condition must check both loop count AND structured violation exemption
+    assert "not _has_structured_violation" in src, (
+        "p23 fix: contract_bypass condition must include 'not _has_structured_violation'. "
+        "Without this, 3 missing_root_cause REDIRECTs will bypass to ADMITTED."
+    )
+    assert "_has_structured_violation = any(" in src, (
+        "p23 fix: _has_structured_violation must be computed from admission.reasons."
+    )
+
+
+def test_p23_contract_bypass_still_fires_for_principal_only_violations():
+    """contract_bypass must still work for pure principal declaration failures.
+
+    The exemption is for structured output violations only. If the only violations
+    are principal declaration gaps (missing_required_principal:X), contract_bypass
+    must still fire after 3 loops to prevent infinite stagnation.
+    """
+    import inspect
+    import run_with_jingu_gate as rwjg
+
+    src = inspect.getsource(rwjg)
+
+    # Original contract_bypass logic must still exist (not deleted)
+    assert "ESCALATE_CONTRACT_BUG" in src, (
+        "contract_bypass (Bug C fix) must still exist for principal declaration failures."
+    )
+    assert "contract_bypass ADMITTED" in src, (
+        "contract_bypass ADMITTED path must still exist."
+    )
+    # The condition is now gated on _has_structured_violation = False
+    # For principal-only violations (missing_required_principal:X), no structured
+    # violation is present → _has_structured_violation=False → bypass still fires.
+    # We verify the logic structure: bypass fires when NOT has_structured_violation.
+    bypass_block = src[src.find("_has_structured_violation = any("):]
+    bypass_cond_idx = bypass_block.find("if _loop_count >= _RETRYABLE_LOOP_LIMIT and not _has_structured_violation")
+    assert bypass_cond_idx != -1, (
+        "contract_bypass condition must be: "
+        "'if _loop_count >= _RETRYABLE_LOOP_LIMIT and not _has_structured_violation'. "
+        "This ensures bypass fires for principal gaps but not for structured output gaps."
+    )
