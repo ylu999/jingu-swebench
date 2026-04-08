@@ -20,6 +20,31 @@ _FIX_TYPE_RE = re.compile(r"FIX_TYPE:\s*([a-z_]+)", re.IGNORECASE)
 _PRINCIPALS_RE = re.compile(r"PRINCIPALS:\s*([^\n]+)", re.IGNORECASE)
 _PHASE_RE = re.compile(r"PHASE:\s*([a-z_]+)", re.IGNORECASE)
 
+# Structured field regexes for causal binding (p23)
+# Matches "FIELD_NAME:\n<content>" until the next ALL_CAPS_FIELD: or end of string
+_STRUCTURED_FIELD_RE = re.compile(
+    r"^([A-Z_]{3,}):\s*\n(.*?)(?=\n[A-Z_]{3,}:|\Z)",
+    re.MULTILINE | re.DOTALL,
+)
+
+
+def extract_structured_fields(text: str) -> dict[str, str]:
+    """Extract structured output sections (ROOT_CAUSE, CAUSAL_CHAIN, PLAN, etc.).
+
+    Parses "FIELD_NAME:\n<content>" blocks from agent output.
+    Returns dict of field_name (lowercased) -> stripped content.
+    Never raises.
+    """
+    if not text:
+        return {}
+    result: dict[str, str] = {}
+    for m in _STRUCTURED_FIELD_RE.finditer(text):
+        key = m.group(1).strip().lower()
+        val = m.group(2).strip()
+        if val:
+            result[key] = val
+    return result
+
 
 def extract_declaration(agent_output: str) -> Declaration:
     """
@@ -205,14 +230,18 @@ def extract_phase_record(agent_message: str, phase: str, from_steps: list[int] |
     principals = _extract_principals_from_message(agent_message)
     evidence_refs = _extract_evidence_refs(agent_message)
 
+    structured = extract_structured_fields(agent_message or "")
     return PhaseRecord(
         phase=phase_upper or phase,
         subtype=subtype,
         principals=principals,
-        claims=[],           # p191 will populate claims from structured analysis
+        claims=[],
         evidence_refs=evidence_refs,
         from_steps=from_steps if from_steps is not None else [],
         content=(agent_message or "")[:500],
+        root_cause=structured.get("root_cause", ""),
+        causal_chain=structured.get("causal_chain", ""),
+        plan=structured.get("plan", ""),
     )
 
 
@@ -274,6 +303,7 @@ def extract_record_for_phase(
         evidence_refs = _extract_evidence_refs(agent_message)
         content = (agent_message or "")[:500]
 
+    structured = extract_structured_fields(agent_message or "") if not foreign_phase_declared else {}
     record = PhaseRecord(
         phase=target_upper or target_phase,
         subtype=subtype,
@@ -282,5 +312,8 @@ def extract_record_for_phase(
         evidence_refs=evidence_refs,
         from_steps=from_steps if from_steps is not None else [],
         content=content,
+        root_cause=structured.get("root_cause", ""),
+        causal_chain=structured.get("causal_chain", ""),
+        plan=structured.get("plan", ""),
     )
     return record, declared_phase, foreign_phase_declared

@@ -21,7 +21,8 @@ import pytest
 
 class _FakePR:
     """Minimal PhaseRecord stub."""
-    def __init__(self, phase="ANALYZE", principals=None, evidence_refs=None, from_steps=None, subtype=""):
+    def __init__(self, phase="ANALYZE", principals=None, evidence_refs=None, from_steps=None, subtype="",
+                 root_cause="", causal_chain="", plan=""):
         self.phase = phase
         self.principals = principals or []
         self.evidence_refs = evidence_refs or []
@@ -29,6 +30,9 @@ class _FakePR:
         self.subtype = subtype
         self.content = ""
         self.claims = []
+        self.root_cause = root_cause
+        self.causal_chain = causal_chain
+        self.plan = plan
 
 
 # ── Bug B: foreign_phase_declared must result in ADMITTED ──────────────────────
@@ -103,9 +107,10 @@ def test_bugB_foreign_phase_declared_does_not_loop():
 
     # ANALYZE with empty principals — foreign context (agent declared OBSERVE)
     pr_foreign = _FakePR(phase="ANALYZE", principals=[], evidence_refs=["file.py:10"])
-    # ANALYZE with correct principals — normal case
+    # ANALYZE with correct principals + root_cause — normal case (p23: root_cause now required)
     pr_normal = _FakePR(phase="ANALYZE", principals=["causal_grounding", "evidence_linkage"],
-                        evidence_refs=["file.py:10"])
+                        evidence_refs=["file.py:10"],
+                        root_cause="The validator does not handle timezone-aware datetimes.")
 
     admission_foreign = evaluate_admission(pr_foreign, "ANALYZE")
     admission_normal = evaluate_admission(pr_normal, "ANALYZE")
@@ -390,10 +395,11 @@ def test_analyze_with_required_principals_is_admitted():
         phase="ANALYZE",
         principals=["causal_grounding", "evidence_linkage"],
         evidence_refs=["file.py:10"],
+        root_cause="The validator does not handle timezone-aware datetimes correctly.",
     )
     admission = evaluate_admission(pr, "ANALYZE")
     assert admission.status == "ADMITTED", (
-        f"ANALYZE with required principals should be ADMITTED, got {admission}"
+        f"ANALYZE with required principals + root_cause should be ADMITTED, got {admission}"
     )
 
 

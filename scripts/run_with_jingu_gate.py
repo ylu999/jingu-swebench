@@ -284,6 +284,8 @@ class StepMonitorState:
         # Tools (Read/Grep/Search/Bash) in OBSERVE phase constitute implicit evidence basis.
         # Reset to False on each new LLM step (when _last_assistant_text changes).
         self._observe_tool_signal: bool = False
+        # p23: causal binding — last ANALYZE root_cause, passed to EXECUTE gate.
+        self.last_analyze_root_cause: str = ""
 
     def update_cp_with_step_signals(
         self,
@@ -782,7 +784,17 @@ def _step_cp_update_and_verdict(
             # Rule 1: evaluate against _old_phase (the phase being completed), not _pr.phase
             # (which may differ if the record was extracted with wrong phase in prior sessions).
             _obs_tool_sig = getattr(getattr(agent_self, "_jingu_monitor_state", None), "_observe_tool_signal", False)
-            _admission = _eval_admission(_pr, _eval_phase, observe_tool_signal=_obs_tool_sig)
+            # p23: save ANALYZE root_cause for EXECUTE causal binding check
+            if _eval_phase == "ANALYZE" and _pr is not None:
+                _rc = getattr(_pr, "root_cause", "") or ""
+                if _rc:
+                    state.last_analyze_root_cause = _rc
+                    print(f"    [phase_record] root_cause saved ({len(_rc)} chars)", flush=True)
+            _admission = _eval_admission(
+                _pr, _eval_phase,
+                observe_tool_signal=_obs_tool_sig,
+                last_analyze_root_cause=state.last_analyze_root_cause if _eval_phase == "EXECUTE" else "",
+            )
             # 改动10: if agent declared a foreign phase, prepend the reason so gate output
             # reflects the actual problem (phase boundary violation) rather than a misleading
             # missing_required_field:evidence_refs (which we no longer discard, but principals

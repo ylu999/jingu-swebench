@@ -30,25 +30,31 @@ except Exception:
 
 # Phase guidance = behavior text + principal guidance from contract (p193)
 _ANALYZE_GUIDANCE = (
-    "Form hypotheses. Identify root cause with causal evidence. Do NOT fix yet. "
+    "Identify the root cause with causal evidence. Do NOT write any fix yet.\n\n"
+    "You MUST produce your analysis in this exact format:\n\n"
+    "ROOT_CAUSE:\n<one specific root cause — not vague>\n\n"
+    "EVIDENCE:\n- file/path.py:line - what this shows\n- file/path.py:line - what this shows\n\n"
+    "CAUSAL_CHAIN:\n<step-by-step reasoning from evidence to root cause>\n\n"
+    "ALTERNATIVES:\n- <other hypothesis> — why ruled out\n\n"
+    "Rules: ROOT_CAUSE must be specific. EVIDENCE must reference real files. "
+    "CAUSAL_CHAIN must connect evidence → root cause. Do NOT propose fixes here.\n"
     + _ANALYZE_PRINCIPAL
-    + " Your response MUST include at least one file reference in the format"
-    " path/to/file.py:line — for example: EVIDENCE: django/core/validators.py:68."
-    " Output: your diagnosis, the causal chain, and why."
 )
 _EXECUTE_GUIDANCE = (
-    "ACTION REQUIRED NOW. You have already analyzed the problem. Stop analyzing. Write the patch.\n\n"
-    "BEFORE writing any code, output these two lines exactly:\n"
-    "  PHASE: execution\n"
-    "  PRINCIPALS: minimal_change\n\n"
-    "Then IMMEDIATELY write the code fix. Rules:\n"
-    "1. DO NOT re-read files to 'confirm' your understanding. You already know the root cause.\n"
-    "2. DO NOT re-run tests to 'see the current state'. Write the fix first.\n"
-    "3. DO NOT summarize the problem again. You already did that in ANALYZE.\n"
-    "4. Write the minimal patch to the specific file and line identified in ANALYZE/DECIDE.\n"
-    "5. If you do not produce a code change this step, this step counts as FAILED.\n\n"
+    "ACTION REQUIRED NOW. Write the patch. You MUST follow the root cause from ANALYZE.\n\n"
+    "You MUST produce your execution plan in this exact format BEFORE writing code:\n\n"
+    "PHASE: execution\n"
+    "PRINCIPALS: minimal_change\n\n"
+    "PLAN:\n<how you will fix it — MUST reference the ROOT_CAUSE from ANALYZE>\n\n"
+    "CHANGE_SCOPE:\n<which files/functions will change>\n\n"
+    "Then write the patch immediately.\n\n"
+    "Rules:\n"
+    "1. PLAN must explicitly reference the root cause identified in ANALYZE.\n"
+    "2. Do NOT re-analyze. Do NOT re-read files. You already know the root cause.\n"
+    "3. Write the minimal patch to the specific location identified in ANALYZE.\n"
+    "4. If no code change is produced this step, this step counts as FAILED.\n"
     + _EXECUTE_PRINCIPAL
-    + "\nSuccess condition: a file is edited with a concrete code change. Anything else is failure."
+    + "\nSuccess condition: a file is edited with a concrete, minimal code change."
 )
 _JUDGE_GUIDANCE = (
     "Verify your fix. Run tests. Check that invariants are preserved. "

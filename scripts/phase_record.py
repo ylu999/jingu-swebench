@@ -27,10 +27,14 @@ class PhaseRecord:
     evidence_refs: list[str]            # file:line or test name references found in agent output
     from_steps: list[int]               # step indices this record was derived from (for gate provenance)
     content: str                        # raw agent output for this phase (truncated to 500 chars)
+    # Structured output fields (p23: causal binding)
+    root_cause: str = ""                # ANALYZE: ROOT_CAUSE: section (required for analysis.root_cause)
+    causal_chain: str = ""              # ANALYZE: CAUSAL_CHAIN: section
+    plan: str = ""                      # EXECUTE: PLAN: section (must reference root_cause)
 
     def as_dict(self) -> dict:
         """Serialise to a plain dict for JSON output."""
-        return {
+        d = {
             "phase": self.phase,
             "subtype": self.subtype,
             "principals": self.principals,
@@ -39,3 +43,8 @@ class PhaseRecord:
             "from_steps": self.from_steps,
             "content_preview": self.content[:100],
         }
+        if self.root_cause:
+            d["root_cause"] = self.root_cause[:200]
+        if self.plan:
+            d["plan"] = self.plan[:200]
+        return d

@@ -77,6 +77,22 @@ _FEEDBACK: dict[str, str] = {
         "Your judge output must express honest uncertainty. "
         "Declare PRINCIPALS: uncertainty_honesty"
     ),
+    # p23: structured output / causal binding
+    "missing_root_cause": (
+        "Your ANALYZE output must include a ROOT_CAUSE: section.\n"
+        "Format:\nROOT_CAUSE:\n<one specific root cause>\n\n"
+        "EVIDENCE:\n- file.py:line - what this shows\n\n"
+        "CAUSAL_CHAIN:\n<reasoning from evidence to root cause>"
+    ),
+    "missing_plan": (
+        "Your EXECUTE output must include a PLAN: section.\n"
+        "Format:\nPLAN:\n<how you will fix the root cause from ANALYZE>\n\n"
+        "CHANGE_SCOPE:\n<which files/functions will change>"
+    ),
+    "plan_not_grounded_in_root_cause": (
+        "Your PLAN must explicitly reference the ROOT_CAUSE from your ANALYZE phase. "
+        "State the root cause in your PLAN before describing the fix."
+    ),
 }
 
 
@@ -218,7 +234,7 @@ class AdmissionResult:
         return f"AdmissionResult({self.status}, {self.reasons})"
 
 
-def evaluate_admission(phase_record, phase: str, next_phase: str = "", observe_tool_signal: bool = False) -> AdmissionResult:
+def evaluate_admission(phase_record, phase: str, next_phase: str = "", observe_tool_signal: bool = False, last_analyze_root_cause: str = "") -> AdmissionResult:
     """
     Full admission check for a PhaseRecord at phase boundary.
 
@@ -267,6 +283,25 @@ def evaluate_admission(phase_record, phase: str, next_phase: str = "", observe_t
             val = getattr(phase_record, field_name, None)
             if not val:  # None, [], "", 0 all count as missing
                 retryable.append(f"missing_required_field:{field_name}")
+
+        # 3a. structured fields check (RETRYABLE) — ANALYZE requires root_cause (p23)
+        # EXECUTE requires plan grounded in root_cause (causal binding)
+        if phase.upper() == "ANALYZE":
+            _rc = getattr(phase_record, "root_cause", None) or ""
+            if not _rc:
+                retryable.append("missing_root_cause")
+
+        if phase.upper() == "EXECUTE":
+            _plan = getattr(phase_record, "plan", None) or ""
+            if not _plan:
+                retryable.append("missing_plan")
+            elif last_analyze_root_cause:
+                # Causal binding: PLAN must reference (contain a substring of) the root cause.
+                # Use first 60 chars of root_cause as anchor — avoids false negatives from
+                # minor paraphrase while still catching completely ungrounded plans.
+                _rc_anchor = last_analyze_root_cause[:60].strip().lower()
+                if _rc_anchor and _rc_anchor not in _plan.lower():
+                    retryable.append("plan_not_grounded_in_root_cause")
 
         # 3b. has_evidence_basis check (RETRYABLE) — for phases that require evidence basis
         # but NOT specifically file.py:line regex matches (e.g. ANALYZE, OBSERVE).
