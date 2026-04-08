@@ -3084,25 +3084,36 @@ def run_with_jingu(instance_id: str, output_dir: Path, max_attempts: int = 3,
                     "make the minimal edit, then call submit IMMEDIATELY."
                 )
             else:
-                # p24 Execution Materialization Gate: detect C-type failure
-                # (agent completed analysis with root cause but never wrote any file).
-                # This is the "Commit Avoidance" failure: Utility(ANALYZE) > Utility(EXECUTE)
-                # because analysis has zero risk while execution has high risk.
-                # Override generic hint with a forced-execute signal.
+                # p24 Execution Materialization Gate: detect C-type failure.
+                # C-type = agent was ready to execute (had plan or EXECUTE phase record)
+                #          but files_written == 0 → never materialized.
+                #
+                # Readiness signal (at least one required — prevents firing too early):
+                #   - phase_records contains EXECUTE entry (CP pushed to execution phase), OR
+                #   - ANALYZE record has non-empty plan (agent declared execution intent)
+                #
+                # This is tighter than "any ANALYZE record exists" to avoid false positives
+                # on cases where analysis was incomplete (not yet ready to execute).
                 _jb = jingu_body or {}
                 _files_written_count = len(_jb.get("files_written", []))
                 _phase_recs = _jb.get("phase_records", [])
                 _analyze_rec = next((r for r in _phase_recs if r.get("phase") == "ANALYZE"), None)
+                _execute_rec = next((r for r in _phase_recs if r.get("phase") == "EXECUTE"), None)
                 _has_root_cause = bool(_analyze_rec and _analyze_rec.get("root_cause"))
-                if _files_written_count == 0 and _analyze_rec:
-                    # Agent analyzed but never wrote a file — Commit Avoidance detected
+                _has_plan = bool(_analyze_rec and _analyze_rec.get("plan")) or bool(_execute_rec and _execute_rec.get("plan"))
+                # Ready-to-execute signal: CP entered EXECUTE phase, OR agent declared a plan
+                _execution_ready = bool(_execute_rec or _has_plan)
+                if _files_written_count == 0 and _analyze_rec and _execution_ready:
+                    # C-type Commit Avoidance: ready to execute but no file written
                     _rc_snippet = ""
                     if _has_root_cause:
                         _rc_snippet = f" Root cause from your analysis: {_analyze_rec['root_cause'][:120]}"
                     print(
                         f"    [execution-gate] EXECUTION_NO_MATERIALIZATION"
                         f" files_written={_files_written_count}"
-                        f" has_root_cause={_has_root_cause}",
+                        f" has_root_cause={_has_root_cause}"
+                        f" has_plan={_has_plan}"
+                        f" execute_rec={_execute_rec is not None}",
                         flush=True,
                     )
                     last_failure = (
@@ -3117,6 +3128,17 @@ def run_with_jingu(instance_id: str, output_dir: Path, max_attempts: int = 3,
                         "Failure to edit at least one file = attempt counts as FAILED."
                         + (_rc_snippet if _rc_snippet else "")
                     )
+                elif _files_written_count == 0 and _analyze_rec and not _execution_ready:
+                    # Analysis present but no readiness signal — agent not yet ready.
+                    # Log for observability; use standard hint (do not force execute prematurely).
+                    print(
+                        f"    [execution-gate] ANALYZE_NOT_READY"
+                        f" files_written={_files_written_count}"
+                        f" has_root_cause={_has_root_cause}"
+                        f" has_plan={_has_plan}",
+                        flush=True,
+                    )
+                    last_failure = "No patch was generated"
                 else:
                     last_failure = "No patch was generated"
             t_gate.stop()
