@@ -683,11 +683,15 @@ def _step_cp_update_and_verdict(
         _old_phase = _cp_s.phase
         if _step_verdict.to is not None:
             import dataclasses as _dc_adv
+            # Bug E fix (p19): reset no_progress_steps=0 on phase transition.
+            # Stagnation-triggered advance carries no_progress_steps >= threshold into
+            # the new phase, causing immediate cascade: ANALYZE→DECIDE→EXECUTE in 2 steps.
+            # Each phase must start with a clean stagnation slate.
             if cp_state_holder is not None:
-                cp_state_holder[0] = _dc_adv.replace(cp_state_holder[0], phase=_step_verdict.to)
+                cp_state_holder[0] = _dc_adv.replace(cp_state_holder[0], phase=_step_verdict.to, no_progress_steps=0)
                 _cp_s = cp_state_holder[0]
             else:
-                state.cp_state = _dc_adv.replace(state.cp_state, phase=_step_verdict.to)
+                state.cp_state = _dc_adv.replace(state.cp_state, phase=_step_verdict.to, no_progress_steps=0)
                 _cp_s = state.cp_state
         # Log agent declared phase at advance time — key for misalignment diagnosis.
         try:

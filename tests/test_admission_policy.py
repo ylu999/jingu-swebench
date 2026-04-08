@@ -451,3 +451,54 @@ def test_bugC_contract_bypass_skips_retryable_redirect():
         "Bug C fix: redirect injection guard must check _contract_bypass. "
         "Without this, RETRYABLE redirect fires even after contract_bypass."
     )
+
+
+# ── Bug E: phase advance must reset no_progress_steps ─────────────────────────
+#
+# Root cause (p19): when stagnation (no_progress_steps >= 4) triggers OBSERVE→ANALYZE
+# advance, no_progress_steps is NOT reset to 0. The next decide_next() call sees
+# no_progress_steps=4 in ANALYZE phase and immediately stagnation-advances ANALYZE→DECIDE,
+# then DECIDE→EXECUTE, then execute_no_progress_redirect loop → StopExecution in ~5 steps.
+# Agent never gets to write a patch.
+#
+# Fix: VerdictAdvance handling must reset no_progress_steps=0 when updating cp_state phase.
+# This gives each new phase a clean stagnation slate.
+
+def test_bugE_phase_advance_resets_no_progress_steps():
+    """VerdictAdvance must reset no_progress_steps to 0 on phase transition.
+
+    Without this, stagnation-triggered advance from OBSERVE instantly cascades:
+    OBSERVE→ANALYZE→DECIDE→EXECUTE→execute_no_progress_redirect→StopExecution.
+    The agent never writes a patch.
+    """
+    import inspect
+    import run_with_jingu_gate as rwjg
+
+    src = inspect.getsource(rwjg)
+    # The VerdictAdvance block must reset no_progress_steps when replacing phase.
+    assert "no_progress_steps=0" in src, (
+        "Bug E fix: VerdictAdvance must reset no_progress_steps=0 on phase transition. "
+        "Without this, stagnation from OBSERVE cascades through all phases in 3 steps."
+    )
+
+
+def test_bugE_phase_advance_no_progress_reset_is_in_advance_block():
+    """no_progress_steps=0 must appear inside the VerdictAdvance handling block.
+
+    A reset elsewhere (e.g. in update_reasoning_state) would not fix the bug
+    because the stagnation state is carried over from the previous phase.
+    """
+    import inspect
+    import run_with_jingu_gate as rwjg
+
+    src = inspect.getsource(rwjg)
+    # Find VerdictAdvance block and confirm no_progress_steps=0 appears within it
+    advance_idx = src.find("isinstance(_step_verdict, VerdictAdvance)")
+    assert advance_idx != -1, "VerdictAdvance block not found"
+    # The reset must appear in the ~40 lines after VerdictAdvance check
+    block = src[advance_idx:advance_idx + 600]
+    assert "no_progress_steps=0" in block, (
+        "Bug E fix: no_progress_steps=0 reset must be inside the VerdictAdvance "
+        "handling block, not elsewhere. The cascading stagnation happens immediately "
+        "after phase transition, so the reset must co-occur with the phase update."
+    )
