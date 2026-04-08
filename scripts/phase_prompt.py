@@ -53,6 +53,8 @@ _EXECUTE_GUIDANCE = (
     "2. Do NOT re-analyze. Do NOT re-read files. You already know the root cause.\n"
     "3. Write the minimal patch to the specific location identified in ANALYZE.\n"
     "4. If no code change is produced this step, this step counts as FAILED.\n"
+    "5. If this entire attempt ends without editing any file, the attempt is DISCARDED\n"
+    "   and you will be asked to redo it with a stronger penalty. Execute NOW.\n"
     + _EXECUTE_PRINCIPAL
     + "\nSuccess condition: a file is edited with a concrete, minimal code change."
 )

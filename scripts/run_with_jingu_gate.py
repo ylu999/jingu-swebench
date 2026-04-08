@@ -3084,7 +3084,41 @@ def run_with_jingu(instance_id: str, output_dir: Path, max_attempts: int = 3,
                     "make the minimal edit, then call submit IMMEDIATELY."
                 )
             else:
-                last_failure = "No patch was generated"
+                # p24 Execution Materialization Gate: detect C-type failure
+                # (agent completed analysis with root cause but never wrote any file).
+                # This is the "Commit Avoidance" failure: Utility(ANALYZE) > Utility(EXECUTE)
+                # because analysis has zero risk while execution has high risk.
+                # Override generic hint with a forced-execute signal.
+                _jb = jingu_body or {}
+                _files_written_count = len(_jb.get("files_written", []))
+                _phase_recs = _jb.get("phase_records", [])
+                _analyze_rec = next((r for r in _phase_recs if r.get("phase") == "ANALYZE"), None)
+                _has_root_cause = bool(_analyze_rec and _analyze_rec.get("root_cause"))
+                if _files_written_count == 0 and _analyze_rec:
+                    # Agent analyzed but never wrote a file — Commit Avoidance detected
+                    _rc_snippet = ""
+                    if _has_root_cause:
+                        _rc_snippet = f" Root cause from your analysis: {_analyze_rec['root_cause'][:120]}"
+                    print(
+                        f"    [execution-gate] EXECUTION_NO_MATERIALIZATION"
+                        f" files_written={_files_written_count}"
+                        f" has_root_cause={_has_root_cause}",
+                        flush=True,
+                    )
+                    last_failure = (
+                        "EXECUTION REQUIRED: You identified the root cause but never edited any file. "
+                        "Analysis is complete. You MUST write the patch NOW.\n\n"
+                        "MANDATORY this attempt:\n"
+                        "1. Do NOT re-read files or re-analyze.\n"
+                        "2. Open the exact file identified in your analysis.\n"
+                        "3. Make the minimal code change to fix the root cause.\n"
+                        "4. Run the required tests.\n"
+                        "5. Call submit.\n\n"
+                        "Failure to edit at least one file = attempt counts as FAILED."
+                        + (_rc_snippet if _rc_snippet else "")
+                    )
+                else:
+                    last_failure = "No patch was generated"
             t_gate.stop()
             continue
 
