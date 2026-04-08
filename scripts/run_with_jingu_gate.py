@@ -286,6 +286,12 @@ class StepMonitorState:
         self._observe_tool_signal: bool = False
         # p23: causal binding — last ANALYZE root_cause, passed to EXECUTE gate.
         self.last_analyze_root_cause: str = ""
+        # p25 Materialization Gate Layer 1 (in-loop liveness):
+        # When ADVANCE_TO_EXECUTE fires, agent MUST write a patch within K=2 steps.
+        # _execute_entry_step: n_calls when EXECUTE phase was entered (-1 = not yet entered)
+        # _execute_write_seen: True once a write/patch signal is observed in EXECUTE phase
+        self._execute_entry_step: int = -1
+        self._execute_write_seen: bool = False
 
     def update_cp_with_step_signals(
         self,
@@ -1165,6 +1171,42 @@ def _install_step_monitor(
 
         _step_inject_phase(self, cp_state_holder=_cp_holder, state=_state)
 
+        # p25 Materialization Gate Layer 1 (in-loop liveness, K=2):
+        # Once EXECUTE phase is entered, agent MUST write a patch within 2 steps.
+        # If no write happens in K steps, inject a strong forcing hint.
+        _mat_phase = str((_cp_holder[0] if _cp_holder else _state.cp_state).phase).upper()
+        _mat_step = getattr(self, "n_calls", -1)
+        if _mat_phase == "EXECUTE":
+            if _state._execute_entry_step < 0:
+                # First step in EXECUTE — record entry
+                _state._execute_entry_step = _mat_step
+                _state._execute_write_seen = False
+                print(f"    [mat-gate] EXECUTE entered at step={_mat_step}", flush=True)
+            if _patch_non_empty:
+                _state._execute_write_seen = True
+            _MAT_GATE_K = 2
+            _steps_since_entry = _mat_step - _state._execute_entry_step
+            if _steps_since_entry >= _MAT_GATE_K and not _state._execute_write_seen:
+                print(
+                    f"    [mat-gate] FORCE: {_steps_since_entry} steps in EXECUTE, no patch written",
+                    flush=True,
+                )
+                self.messages.append({
+                    "role": "user",
+                    "content": (
+                        "[MATERIALIZATION GATE] You have been in the EXECUTE phase for "
+                        f"{_steps_since_entry} steps without writing any code. "
+                        "You MUST write a patch NOW. "
+                        "Do not read more files. Do not analyze further. "
+                        "Write the fix to the file immediately using str_replace or write_file."
+                    ),
+                })
+        else:
+            # Phase changed away from EXECUTE — reset tracking
+            if _state._execute_entry_step >= 0:
+                _state._execute_entry_step = -1
+                _state._execute_write_seen = False
+
         return result
 
     # Return (state, ScopedPatch) — caller uses ScopedPatch as a context manager.
@@ -1239,6 +1281,30 @@ def patch_fingerprint(patch: str) -> dict:
     removed = sum(1 for l in lines if l.startswith("-") and not l.startswith("---"))
     return {"files": sorted(set(files)), "hunks": hunks,
             "lines_added": added, "lines_removed": removed}
+
+
+def patch_content_hash(patch: str) -> str:
+    """
+    p25 Outcome Gate: semantic-lite fingerprint for same-patch detection across attempts.
+    Extracts logical content lines (added/removed, stripped of whitespace and comments),
+    sorts for order-independence, returns short hash.
+    Used to distinguish stuck (same content) vs exploring (different content).
+    """
+    if not patch:
+        return "empty"
+    import hashlib
+    content_lines = []
+    touched_files = []
+    for line in patch.splitlines():
+        if line.startswith("+++ b/"):
+            touched_files.append(line[6:].strip())
+        elif line.startswith(("+", "-")) and not line.startswith(("+++", "---")):
+            content = line[1:].strip()
+            if content and not content.startswith("#"):
+                content_lines.append(content)
+    content_lines.sort()
+    fingerprint_str = "|".join(sorted(set(touched_files))) + "\n" + "\n".join(content_lines)
+    return hashlib.sha256(fingerprint_str.encode()).hexdigest()[:16]
 
 
 # Tool names (structured tool calls) that produce a meaningful write/submit signal
@@ -2909,6 +2975,7 @@ def run_with_jingu(instance_id: str, output_dir: Path, max_attempts: int = 3,
     candidates = []
     attempts_log: list[dict] = []   # telemetry: one entry per attempt
     last_failure = ""
+    _prev_raw_patch = ""            # p25 Outcome Gate: raw patch from previous attempt for hash comparison
     total_llm_calls = 0
     # p178: per-attempt strategy metadata (populated when retry_controller runs)
     _strategy_entries: list[dict] = []
@@ -3318,18 +3385,48 @@ def run_with_jingu(instance_id: str, output_dir: Path, max_attempts: int = 3,
                                 principal_violations=retry_plan.principal_violations,
                             )
                         elif not _progress_ok and _progress_code == "NO_TEST_PROGRESS":
-                            # Ensure ADJUST — don't let unknown classification leave it at CONTINUE
-                            if retry_plan.control_action == "CONTINUE":
-                                print(f"    [test-progress-gate] NO_PROGRESS — upgrading CONTINUE → ADJUST")
+                            # p25 Outcome Gate: distinguish stuck (same patch) vs exploring (different patch).
+                            # SWE-bench has sparse rewards — delta==0 does NOT mean wrong direction.
+                            # A different patch with delta==0 may still converge; only same patch is stuck.
+                            _curr_hash = patch_content_hash(patch)
+                            _prev_hash = patch_content_hash(_prev_raw_patch) if _prev_raw_patch else None
+                            _same_patch = (_prev_hash is not None and _curr_hash == _prev_hash)
+                            _patch_direction = "stuck" if _same_patch else "exploring"
+                            print(f"    [outcome-gate] NO_PROGRESS direction={_patch_direction} "
+                                  f"curr_hash={_curr_hash} prev_hash={_prev_hash}")
+                            if _same_patch:
+                                # Same patch content, no improvement → force strategy change
+                                print(f"    [test-progress-gate] NO_PROGRESS stuck — overriding to ADJUST (force change)")
                                 retry_plan = RetryPlan(
-                                    root_causes=retry_plan.root_causes + [f"invariant=NO_TEST_PROGRESS"],
-                                    must_do=retry_plan.must_do,
-                                    must_not_do=retry_plan.must_not_do,
-                                    validation_requirement=retry_plan.validation_requirement,
-                                    next_attempt_prompt=retry_plan.next_attempt_prompt,
+                                    root_causes=retry_plan.root_causes + ["invariant=NO_TEST_PROGRESS", "direction=stuck"],
+                                    must_do=["Write a completely different patch — different approach or different file"],
+                                    must_not_do=["Do not reuse any part of your previous patch"],
+                                    validation_requirement="Run required tests and confirm delta > 0",
+                                    next_attempt_prompt=(
+                                        "NO PROGRESS + SAME PATCH: Your approach is stuck. "
+                                        "You must write a fundamentally different fix. "
+                                        "Abandon your current hypothesis entirely. "
+                                        "Reread the failing tests with fresh eyes and form a new hypothesis."
+                                    )[:600],
                                     control_action="ADJUST",
                                     principal_violations=retry_plan.principal_violations,
                                 )
+                            else:
+                                # Different patch content, no improvement yet → exploring, allow continue
+                                print(f"    [test-progress-gate] NO_PROGRESS exploring — gentle ADJUST")
+                                if retry_plan.control_action == "CONTINUE":
+                                    retry_plan = RetryPlan(
+                                        root_causes=retry_plan.root_causes + ["invariant=NO_TEST_PROGRESS", "direction=exploring"],
+                                        must_do=retry_plan.must_do,
+                                        must_not_do=retry_plan.must_not_do,
+                                        validation_requirement=retry_plan.validation_requirement,
+                                        next_attempt_prompt=(
+                                            retry_plan.next_attempt_prompt
+                                            + "\n[Tests not yet improving — keep iterating, change approach if needed]"
+                                        ),
+                                        control_action="ADJUST",
+                                        principal_violations=retry_plan.principal_violations,
+                                    )
                         print(f"    [retry-ctrl] action={retry_plan.control_action}  "
                               f"root_causes={retry_plan.root_causes}")
                         print(f"    [retry-ctrl] must_not_do={retry_plan.must_not_do}")
@@ -3473,6 +3570,7 @@ def run_with_jingu(instance_id: str, output_dir: Path, max_attempts: int = 3,
                             break
 
                         # next_attempt_prompt already merges hint_prefix + exec_feedback
+                        _prev_raw_patch = patch  # p25: save for Outcome Gate hash comparison
                         last_failure = retry_plan.next_attempt_prompt[:600]
                     else:
                         last_failure = exec_feedback[:400]
