@@ -593,16 +593,91 @@ def cmd_eval(args) -> None:
     print(f"[ops] logs: python scripts/ops.py logs --task-id {task_id}")
 
 
+def _get_task_progress(task_id: str) -> str:
+    """Extract latest progress signal from CloudWatch logs tail."""
+    logs = boto3.client("logs", region_name=REGION)
+    stream = f"runner/runner/{task_id}"
+    try:
+        resp = logs.get_log_events(
+            logGroupName=LOG_GROUP, logStreamName=stream,
+            limit=200, startFromHead=False,
+        )
+        events = resp.get("events", [])
+        # Scan backwards for progress signals
+        progress_signals = []
+        for e in reversed(events):
+            msg = e["message"]
+            # Eval progress: instance completion
+            for pat in [
+                r"(\d+)\s+instances?\s+completed",
+                r"Resolved\s+(\d+)\s+instances",
+                r'"resolved_instances":\s*(\d+)',
+                r"(\d+)/(\d+)\s+resolved",
+                r"\[eval\].*?(\d+)/(\d+)",
+                r"Instance\s+\S+\s+(PASSED|FAILED)",
+                r"Gold.*?(PASSED|FAILED)",
+            ]:
+                import re as _re
+                m = _re.search(pat, msg)
+                if m:
+                    # Return the matching line (trimmed)
+                    clean = msg.strip()[:120]
+                    return clean
+            # Agent run progress
+            for pat in [
+                r"\[jingu\]\s+(DONE|FAILED|ACCEPTED|REJECTED)",
+                r"result\]\s+(ACCEPTED|REJECTED|FAILED)",
+                r"\[attempt\s+\d+/\d+\]",
+            ]:
+                m = _re.search(pat, msg)
+                if m:
+                    return msg.strip()[:120]
+        # Fallback: last non-empty, non-noise line
+        for e in reversed(events):
+            line = e["message"].strip()
+            if (line and len(line) > 5
+                    and 'level=info msg="' not in line
+                    and 'Generating ' not in line
+                    and not line.startswith('time="')):
+                return line[:120]
+        return "(no logs yet)"
+    except Exception:
+        return "(logs unavailable)"
+
+
 def cmd_list_tasks(args) -> None:
-    """List currently RUNNING/PENDING ECS tasks."""
+    """List currently RUNNING/PENDING ECS tasks with progress."""
     tasks = _get_running_tasks()
     if not tasks:
         print("[ops] no running/pending tasks", flush=True)
         return
-    print(f"{'TASK ID':<44} {'STATUS':<10} {'BATCH':<30} STARTED", flush=True)
+
+    show_progress = getattr(args, "progress", True)
+
+    print(f"{'TASK ID':<40} {'STATUS':<10} {'BATCH':<30} {'ELAPSED':>8} STARTED", flush=True)
     print("─" * 110, flush=True)
     for t in tasks:
-        print(f"{t['task_id']:<44} {t['status']:<10} {t['batch']:<30} {t['started']}", flush=True)
+        # Calculate elapsed time
+        started = t.get("started", "")
+        elapsed_str = ""
+        try:
+            if hasattr(started, "timestamp"):
+                # datetime object
+                elapsed = time.time() - started.timestamp()
+            else:
+                from datetime import datetime as _dt, timezone as _tz
+                dt = _dt.fromisoformat(str(started).replace("+00:00", "+00:00"))
+                elapsed = time.time() - dt.timestamp()
+            mins = int(elapsed // 60)
+            elapsed_str = f"{mins}m"
+        except Exception:
+            elapsed_str = "?"
+
+        print(f"{t['task_id']:<40} {t['status']:<10} {t['batch']:<30} {elapsed_str:>8} {str(started)[:19]}", flush=True)
+
+        if show_progress:
+            progress = _get_task_progress(t["task_id"])
+            print(f"  └─ {progress}", flush=True)
 
 
 def cmd_smoke(args) -> None:
