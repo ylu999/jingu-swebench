@@ -62,6 +62,10 @@ COPY scripts/run_with_jingu_gate.py \
      scripts/phase_record.py \
      scripts/in_loop_judge.py \
      scripts/verification_evidence.py \
+     scripts/governance_pack.py \
+     scripts/governance_runtime.py \
+     scripts/swebench_failure_reroute_pack.py \
+     scripts/f2p_failure_router.py \
      /app/scripts/
 # B1-CP: reasoning control plane Python module
 COPY scripts/control/ /app/scripts/control/
