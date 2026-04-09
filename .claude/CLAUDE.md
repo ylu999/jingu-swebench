@@ -31,7 +31,7 @@ STOP — 未经用户批准，不得 launch 超过 3 个 instance
 
 **查看汇总：**
 ```bash
-python scripts/ops.py summary        # repo 维度汇总表
+python scripts/ops.py summary        # repo 维度汇总表（含 eval resolved 列）
 python scripts/ops.py history        # batch 维度历史表（resolved rate）
 ```
 
@@ -51,8 +51,8 @@ python scripts/ops.py backfill --batches batch-pXX-name   # 只处理指定 batc
 | `ops.py watch --batch-name NAME --instance-id ID` | 只 tail 单个 instance |
 | `ops.py status --task-id ID` | 查 ECS task 状态（只支持近期 task） |
 | `ops.py eval --predictions-path KEY --run-id ID` | 跑 SWE-bench eval |
-| `ops.py backfill` | 把所有历史 batch traj 写入 per-instance records |
-| `ops.py summary` | 显示 per-instance 汇总表（按 repo） |
+| `ops.py backfill` | 把所有历史 batch traj + eval 数据写入 per-instance records |
+| `ops.py summary` | 显示 per-instance 汇总表（按 repo，含 eval resolved） |
 | `ops.py history` | 显示 pipeline 历史（resolved rate 趋势） |
 
 ---

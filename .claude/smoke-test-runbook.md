@@ -285,13 +285,13 @@ python scripts/ops.py status --task-id <task-id>
 所有历史数据统一存储在 `s3://jingu-swebench-results/pipeline-results/instances/`。
 
 ```bash
-# repo 维度汇总表（ran / accepted / not accepted）
+# repo 维度汇总表（ran / accepted / not accepted / eval resolved）
 python scripts/ops.py summary
 
 # batch 历史表（resolved rate 趋势）
 python scripts/ops.py history
 
-# 新 batch 跑完后，同步 traj 数据进 per-instance records
+# 新 batch 跑完后，同步 traj + eval 数据进 per-instance records
 python scripts/ops.py backfill
 # 只处理指定 batch：
 python scripts/ops.py backfill --batches batch-p26-xxx
@@ -304,14 +304,19 @@ python scripts/ops.py backfill --batches batch-p26-xxx
   "last_batch": "batch-p25-b10",
   "last_commit": "5bee637a1b36",
   "accepted": true,
+  "eval_resolved": true,
   "runs": [
-    {"batch": "...", "git_commit": "...", "accepted": true, "attempts": 1},
+    {"batch": "...", "git_commit": "...", "accepted": true, "eval_resolved": true},
     ...
   ]
 }
 ```
 
-**注意：** `eval_resolved` per-instance 数据当前为 null。batch 级别 eval 数据（如 17/30）存在各 run 的 `batch_eval_resolved/total` 字段中。
+**Eval 数据来源：**
+- 新 pipeline 跑完 → `docker-entrypoint.sh` 生成 `eval_results.json`（含 `resolved_ids`/`unresolved_ids`）→ 上传 S3
+- `cmd_pipeline` Step 3 自动读取 → 写入 per-instance `eval_resolved=true/false`
+- `cmd_backfill` 也会尝试读取 `eval-<batch>/eval_results.json`
+- 历史 batch（无 `eval_results.json`）的 eval 数据为 `null`（只有 batch 级别的 `_KNOWN_EVAL_RESULTS`）
 
 ---
 
