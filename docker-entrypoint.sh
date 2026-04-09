@@ -39,10 +39,45 @@ echo "[entrypoint] S3 bucket: ${S3_RESULTS_BUCKET:-not set}"
 echo "[entrypoint] docker info:"
 docker info 2>&1 | grep -E 'Storage Driver|Server Version|Cgroup'
 
-# Run pipeline
-cd /app
-python scripts/run_with_jingu_gate.py "$@"
-EXIT_CODE=$?
+# Detect eval mode (--eval flag as first arg)
+if [ "$1" = "--eval" ]; then
+    shift
+    # args: --predictions-s3 <s3-key> --run-id <id> --workers <n> --dataset <name> --output <dir>
+    PREDICTIONS_S3=""
+    RUN_ID="eval-run"
+    WORKERS=4
+    DATASET="SWE-bench/SWE-bench_Verified"
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --predictions-s3) PREDICTIONS_S3="$2"; shift 2 ;;
+            --run-id) RUN_ID="$2"; shift 2 ;;
+            --workers) WORKERS="$2"; shift 2 ;;
+            --dataset) DATASET="$2"; shift 2 ;;
+            --output) OUTPUT_DIR="$2"; shift 2 ;;
+            *) shift ;;
+        esac
+    done
+    echo "[entrypoint] eval mode: predictions-s3=$PREDICTIONS_S3 run-id=$RUN_ID workers=$WORKERS"
+    # Download predictions from S3
+    python3 -c "
+import boto3, os
+s3 = boto3.client('s3', region_name='us-west-2')
+bucket, key = '${S3_RESULTS_BUCKET}', '$PREDICTIONS_S3'
+s3.download_file(bucket, key, '/tmp/eval-predictions.jsonl')
+print(f'[entrypoint] downloaded predictions from s3://{bucket}/{key}')
+"
+    cd /app
+    python3 -m swebench.harness.run_evaluation         --dataset_name "$DATASET"         --predictions_path /tmp/eval-predictions.jsonl         --max_workers "$WORKERS"         --run_id "$RUN_ID"         --cache_level env
+    EXIT_CODE=$?
+    # Copy report to output dir for S3 upload
+    mkdir -p "$OUTPUT_DIR"
+    cp -r "evaluation_results/${RUN_ID}"* "$OUTPUT_DIR/" 2>/dev/null || true
+else
+    # Run pipeline
+    cd /app
+    python scripts/run_with_jingu_gate.py "$@"
+    EXIT_CODE=$?
+fi
 
 # Upload results to S3 using Python boto3
 if [ -n "$S3_RESULTS_BUCKET" ] && [ -d "$OUTPUT_DIR" ]; then

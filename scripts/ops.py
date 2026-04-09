@@ -520,6 +520,59 @@ def _get_running_tasks() -> list[dict]:
     return result
 
 
+def cmd_eval(args) -> None:
+    """Launch ECS task to run SWE-bench eval on an S3 predictions file."""
+    _check_runbook_ack(args)
+    ecs = boto3.client("ecs", region_name=REGION)
+
+    # predictions_path is either a full s3://bucket/key or just the S3 key
+    pred_path = args.predictions_path
+    if pred_path.startswith("s3://"):
+        pred_path = pred_path[len(f"s3://{S3_BUCKET}/"):]
+
+    eval_name = args.run_id
+    output_path = f"/app/results/{eval_name}"
+
+    cmd_parts = [
+        "--eval",
+        "--predictions-s3", pred_path,
+        "--run-id", args.run_id,
+        "--workers", str(args.workers),
+        "--dataset", args.dataset,
+        "--output", output_path,
+    ]
+
+    print(f"[ops] launching eval task: {eval_name}")
+    print(f"[ops] predictions-s3: {pred_path}")
+    print(f"[ops] workers={args.workers} dataset={args.dataset}")
+
+    resp = ecs.run_task(
+        cluster=ECS_CLUSTER,
+        taskDefinition=ECS_TASK_DEF,
+        launchType="EC2",
+        overrides={
+            "containerOverrides": [{
+                "name": "runner",
+                "command": cmd_parts,
+                "environment": [
+                    {"name": "BATCH_NAME", "value": eval_name},
+                ],
+            }]
+        },
+    )
+
+    failures = resp.get("failures", [])
+    if failures:
+        print(f"[ops] FAILED to launch: {failures}")
+        sys.exit(1)
+
+    task = resp["tasks"][0]
+    task_id = task["taskArn"].split("/")[-1]
+    print(f"[ops] ECS eval task launched: {task_id}")
+    print(f"[ops] status: python scripts/ops.py status --task-id {task_id}")
+    print(f"[ops] logs: python scripts/ops.py logs --task-id {task_id}")
+
+
 def cmd_list_tasks(args) -> None:
     """List currently RUNNING/PENDING ECS tasks."""
     tasks = _get_running_tasks()
@@ -788,6 +841,17 @@ def main():
     p_smoke.add_argument("--runbook-ack", action="store_true",
                          help=f"Required for all launches: confirms runbook ({_RUNBOOK_PATH}) was read this session")
 
+    # eval — run SWE-bench evaluation on predictions via ECS
+    p_eval = sub.add_parser("eval", help="Run SWE-bench eval on S3 predictions via ECS")
+    p_eval.add_argument("--predictions-path", required=True,
+                        help="S3 key or s3://bucket/key of predictions.jsonl")
+    p_eval.add_argument("--run-id", required=True,
+                        help="Eval run ID (used for report naming)")
+    p_eval.add_argument("--workers", type=int, default=4)
+    p_eval.add_argument("--dataset", default="SWE-bench/SWE-bench_Verified")
+    p_eval.add_argument("--runbook-ack", action="store_true",
+                        help="Required: confirms runbook was read this session")
+
     # list-tasks — show currently running/pending ECS tasks
     sub.add_parser("list-tasks", help="List currently RUNNING/PENDING ECS tasks")
 
@@ -808,6 +872,8 @@ def main():
         cmd_run(args)
     elif args.cmd == "smoke":
         cmd_smoke(args)
+    elif args.cmd == "eval":
+        cmd_eval(args)
     elif args.cmd == "list-tasks":
         cmd_list_tasks(args)
     elif args.cmd == "logs":
