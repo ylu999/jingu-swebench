@@ -6,6 +6,7 @@ Subcommands:
   build       Build + push Docker image to ECR via SSM on EC2
   run         Launch ECS batch task (no tailing)
   smoke       Launch ECS task + live-tail ALL instance logs in real time
+  watch       Real-time log tail for a batch or single instance (attach anytime)
   logs        Tail a single ECS task log (CloudWatch)
   status      Show ECS task status
   pipeline    Run full pipeline: smoke → batch → eval → store results
@@ -15,6 +16,8 @@ Usage:
   python scripts/ops.py build
   python scripts/ops.py smoke --batch-name b5-smoke --instance-ids django__django-11039 django__django-12470
   python scripts/ops.py run --instance-ids django__django-11039 --batch-name b2-test --workers 3
+  python scripts/ops.py watch --batch-name p12-cv-fallback
+  python scripts/ops.py watch --batch-name p12-cv-fallback --instance-id django__django-11095
   python scripts/ops.py logs --task-id <ecs_task_id> --follow
   python scripts/ops.py status --task-id <ecs_task_id>
   python scripts/ops.py pipeline --batch-name p12-cv-fallback --smoke-instance django__django-11095
@@ -267,8 +270,20 @@ def cmd_run(args) -> None:
     task = resp["tasks"][0]
     task_arn = task["taskArn"]
     task_id = task_arn.split("/")[-1]
+
+    # Store task_id → batch mapping in S3 so `watch` can look it up by batch name
+    try:
+        s3 = boto3.client("s3", region_name=REGION)
+        s3.put_object(
+            Bucket=S3_BUCKET,
+            Key=f"{batch_name}/task_id.txt",
+            Body=task_id.encode(),
+        )
+    except Exception as e:
+        print(f"[ops] warning: could not store task_id in S3: {e}")
+
     print(f"[ops] ECS task launched: {task_id}")
-    print(f"[ops] logs: python scripts/ops.py logs --task-id {task_id}")
+    print(f"[ops] watch: python scripts/ops.py watch --batch-name {batch_name}")
     print(f"[ops] status: python scripts/ops.py status --task-id {task_id}")
 
 
@@ -768,6 +783,148 @@ def cmd_smoke(args) -> None:
         pass
 
 
+# ── watch ──────────────────────────────────────────────────────────────────────
+
+def _resolve_task_id(batch_name: str | None, task_id: str | None) -> tuple[str, list[str]]:
+    """
+    Resolve task_id and instance_ids from either --task-id or --batch-name.
+    Returns (task_id, instance_ids).
+    """
+    if task_id:
+        # Try to discover instance_ids from task description
+        ecs = boto3.client("ecs", region_name=REGION)
+        instance_ids = []
+        try:
+            resp = ecs.describe_tasks(cluster=ECS_CLUSTER, tasks=[task_id])
+            tasks = resp.get("tasks", [])
+            if tasks:
+                for ov in tasks[0].get("overrides", {}).get("containerOverrides", []):
+                    cmd = ov.get("command", [])
+                    if "--instance-ids" in cmd:
+                        idx = cmd.index("--instance-ids") + 1
+                        while idx < len(cmd) and not cmd[idx].startswith("--"):
+                            instance_ids.append(cmd[idx])
+                            idx += 1
+        except Exception:
+            pass
+        return task_id, instance_ids
+
+    if batch_name:
+        s3 = boto3.client("s3", region_name=REGION)
+        # Read task_id from S3
+        try:
+            resp = s3.get_object(Bucket=S3_BUCKET, Key=f"{batch_name}/task_id.txt")
+            tid = resp["Body"].read().decode().strip()
+        except Exception:
+            print(f"[watch] no task_id found for batch={batch_name}")
+            print(f"[watch] either the batch hasn't started yet, or use --task-id directly")
+            sys.exit(1)
+
+        # Read instance_ids from run_report if available, else from ECS task
+        instance_ids = []
+        try:
+            resp2 = s3.get_object(Bucket=S3_BUCKET, Key=f"{batch_name}/run_report.json")
+            report = json.loads(resp2["Body"].read())
+            instance_ids = list(report.get("model_usage", {}).get("per_instance", {}).keys())
+        except Exception:
+            pass
+
+        if not instance_ids:
+            # Fall back to ECS task description
+            ecs = boto3.client("ecs", region_name=REGION)
+            try:
+                resp3 = ecs.describe_tasks(cluster=ECS_CLUSTER, tasks=[tid])
+                tasks = resp3.get("tasks", [])
+                if tasks:
+                    for ov in tasks[0].get("overrides", {}).get("containerOverrides", []):
+                        cmd = ov.get("command", [])
+                        if "--instance-ids" in cmd:
+                            idx = cmd.index("--instance-ids") + 1
+                            while idx < len(cmd) and not cmd[idx].startswith("--"):
+                                instance_ids.append(cmd[idx])
+                                idx += 1
+            except Exception:
+                pass
+
+        return tid, instance_ids
+
+    print("[watch] must provide --batch-name or --task-id")
+    sys.exit(1)
+
+
+def cmd_watch(args) -> None:
+    """
+    Real-time log tail for a batch or single instance.
+
+    --batch-name NAME              tail all instances in the batch (color-coded)
+    --batch-name NAME --instance-id ID   tail only one instance
+    --task-id TASK_ID              attach directly by task ID
+    --all                          show all lines (no filter)
+    --filter REGEX                 custom filter
+    """
+    task_id, instance_ids = _resolve_task_id(
+        getattr(args, "batch_name", None),
+        getattr(args, "task_id", None),
+    )
+
+    # If filtering to a single instance, narrow the instance_ids list so color
+    # assignment is stable, and add the instance_id as an extra filter term.
+    focus = getattr(args, "instance_id", None)
+    if focus:
+        if focus not in instance_ids:
+            instance_ids = [focus]
+        else:
+            instance_ids = [focus]
+
+    # Build filter pattern
+    if getattr(args, "all", False):
+        filter_pat = re.compile(r".")
+        filter_desc = "all lines"
+    elif getattr(args, "filter", None):
+        base = args.filter
+        if focus:
+            base = f"({base}).*{re.escape(focus)}|{re.escape(focus)}.*({base})"
+        filter_pat = re.compile(base)
+        filter_desc = f"filter: {args.filter}"
+    else:
+        # Default: signal lines only; if focus, also require instance_id in line
+        if focus:
+            filter_pat = re.compile(
+                f"({_DEFAULT_FILTER.pattern}).*{re.escape(focus)}"
+                f"|{re.escape(focus)}.*({_DEFAULT_FILTER.pattern})"
+                f"|\\[jingu\\].*{re.escape(focus)}"
+                f"|instance={re.escape(focus)}"
+            )
+        else:
+            filter_pat = _DEFAULT_FILTER
+        filter_desc = f"default signals{' for ' + focus if focus else ''}"
+
+    print(f"[watch] task={task_id}", flush=True)
+    print(f"[watch] instances={len(instance_ids)}{' focus=' + focus if focus else ''}", flush=True)
+    print(f"[watch] {filter_desc}", flush=True)
+    print(f"[watch] log stream: runner/runner/{task_id}", flush=True)
+    print("─" * 70, flush=True)
+
+    try:
+        _tail_shared_stream(task_id, instance_ids, filter_pat)
+    except KeyboardInterrupt:
+        print("\n[watch] interrupted", flush=True)
+
+    print("─" * 70, flush=True)
+
+    # Show final task status
+    try:
+        ecs = boto3.client("ecs", region_name=REGION)
+        resp = ecs.describe_tasks(cluster=ECS_CLUSTER, tasks=[task_id])
+        tasks = resp.get("tasks", [])
+        if tasks:
+            t = tasks[0]
+            exit_code = t.get("containers", [{}])[0].get("exitCode", "?")
+            print(f"[watch] final status={t.get('lastStatus')}  exit={exit_code}", flush=True)
+    except Exception:
+        pass
+
+
 # ── pipeline ───────────────────────────────────────────────────────────────────
 
 PIPELINE_HISTORY_KEY = "pipeline-results/history.json"
@@ -1211,6 +1368,14 @@ def main():
     p_eval.add_argument("--runbook-ack", action="store_true",
                         help="Required: confirms runbook was read this session")
 
+    # watch — real-time log tail for a batch or single instance
+    p_watch = sub.add_parser("watch", help="Real-time log tail for a batch or instance")
+    p_watch.add_argument("--batch-name", default=None, help="Batch name (looks up task_id from S3)")
+    p_watch.add_argument("--task-id", default=None, help="ECS task ID (direct attach)")
+    p_watch.add_argument("--instance-id", default=None, help="Focus on a single instance")
+    p_watch.add_argument("--filter", "-f", default=None, help="Custom regex filter")
+    p_watch.add_argument("--all", "-a", action="store_true", help="Show all lines (no filter)")
+
     # pipeline — full automated pipeline: smoke → batch → eval → store results
     p_pipeline = sub.add_parser("pipeline", help="Full pipeline: smoke → batch → eval → store results")
     p_pipeline.add_argument("--batch-name", required=True,
@@ -1252,6 +1417,8 @@ def main():
         cmd_smoke(args)
     elif args.cmd == "eval":
         cmd_eval(args)
+    elif args.cmd == "watch":
+        cmd_watch(args)
     elif args.cmd == "pipeline":
         _check_runbook_ack(args)
         cmd_pipeline(args)
