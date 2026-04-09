@@ -8,6 +8,8 @@ Subcommands:
   smoke       Launch ECS task + live-tail ALL instance logs in real time
   logs        Tail a single ECS task log (CloudWatch)
   status      Show ECS task status
+  pipeline    Run full pipeline: smoke → batch → eval → store results
+  history     Show pipeline run history (resolved rates)
 
 Usage:
   python scripts/ops.py build
@@ -15,12 +17,15 @@ Usage:
   python scripts/ops.py run --instance-ids django__django-11039 --batch-name b2-test --workers 3
   python scripts/ops.py logs --task-id <ecs_task_id> --follow
   python scripts/ops.py status --task-id <ecs_task_id>
+  python scripts/ops.py pipeline --batch-name p12-cv-fallback --smoke-instance django__django-11095
+  python scripts/ops.py history
 
 Environment:
   AWS_DEFAULT_REGION  (default: us-west-2)
 """
 
 import argparse
+import datetime
 import json
 import re
 import sys
@@ -763,6 +768,360 @@ def cmd_smoke(args) -> None:
         pass
 
 
+# ── pipeline ───────────────────────────────────────────────────────────────────
+
+PIPELINE_HISTORY_KEY = "pipeline-results/history.json"
+
+# 30 standard django instances used for all pipeline runs
+PIPELINE_DEFAULT_INSTANCES = [
+    "django__django-10097", "django__django-10554", "django__django-10880",
+    "django__django-10914", "django__django-10973", "django__django-10999",
+    "django__django-11066", "django__django-11087", "django__django-11095",
+    "django__django-11099", "django__django-11119", "django__django-11133",
+    "django__django-11138", "django__django-11141", "django__django-11149",
+    "django__django-11163", "django__django-11179", "django__django-11206",
+    "django__django-11211", "django__django-11239", "django__django-11265",
+    "django__django-11276", "django__django-11292", "django__django-11299",
+    "django__django-11333", "django__django-11400", "django__django-11433",
+    "django__django-11451", "django__django-11477", "django__django-11490",
+]
+
+
+def _wait_for_task(task_id: str, label: str, poll_interval: int = 30, timeout_s: int = 7200) -> dict:
+    """Poll ECS until task STOPPED. Returns final task dict."""
+    ecs = boto3.client("ecs", region_name=REGION)
+    deadline = time.monotonic() + timeout_s
+    dots = 0
+    while time.monotonic() < deadline:
+        resp = ecs.describe_tasks(cluster=ECS_CLUSTER, tasks=[task_id])
+        tasks = resp.get("tasks", [])
+        if not tasks:
+            print(f"\n[pipeline] {label}: task {task_id} not found", flush=True)
+            sys.exit(1)
+        task = tasks[0]
+        status = task.get("lastStatus", "?")
+        if status == "STOPPED":
+            exit_code = task.get("containers", [{}])[0].get("exitCode", "?")
+            elapsed = int(time.monotonic() - (deadline - timeout_s))
+            print(f"\n[pipeline] {label}: STOPPED exit={exit_code} elapsed={elapsed}s", flush=True)
+            return task
+        dots += 1
+        if dots % 4 == 0:
+            elapsed = int(time.monotonic() - (deadline - timeout_s))
+            print(f"\r[pipeline] {label}: {status} ... {elapsed}s", end="", flush=True)
+        time.sleep(poll_interval)
+    raise TimeoutError(f"{label} did not complete within {timeout_s}s")
+
+
+def _launch_ecs_task(batch_name: str, instance_ids: list[str], max_attempts: int,
+                     workers: int, mode: str = "jingu", model: str | None = None) -> str:
+    """Launch an ECS run task and return task_id."""
+    ecs = boto3.client("ecs", region_name=REGION)
+    output_path = f"/app/results/{batch_name}"
+    cmd_parts = [
+        "--instance-ids", *instance_ids,
+        "--dataset", "Verified",
+        "--mode", mode,
+        "--max-attempts", str(max_attempts),
+        "--workers", str(workers),
+        "--output", output_path,
+    ]
+    env = [{"name": "BATCH_NAME", "value": batch_name}]
+    if model:
+        env.append({"name": "JINGU_MODEL", "value": model})
+    resp = ecs.run_task(
+        cluster=ECS_CLUSTER,
+        taskDefinition=ECS_TASK_DEF,
+        launchType="EC2",
+        overrides={"containerOverrides": [{"name": "runner", "command": cmd_parts, "environment": env}]},
+    )
+    failures = resp.get("failures", [])
+    if failures:
+        print(f"[pipeline] FAILED to launch: {failures}", flush=True)
+        sys.exit(1)
+    return resp["tasks"][0]["taskArn"].split("/")[-1]
+
+
+def _launch_eval_task(predictions_key: str, run_id: str, workers: int = 4) -> str:
+    """Launch an ECS eval task and return task_id."""
+    ecs = boto3.client("ecs", region_name=REGION)
+    output_path = f"/app/results/{run_id}"
+    cmd_parts = [
+        "--eval",
+        "--predictions-s3", predictions_key,
+        "--run-id", run_id,
+        "--workers", str(workers),
+        "--dataset", "SWE-bench/SWE-bench_Verified",
+        "--output", output_path,
+    ]
+    resp = ecs.run_task(
+        cluster=ECS_CLUSTER,
+        taskDefinition=ECS_TASK_DEF,
+        launchType="EC2",
+        overrides={"containerOverrides": [{
+            "name": "runner",
+            "command": cmd_parts,
+            "environment": [{"name": "BATCH_NAME", "value": run_id}],
+        }]},
+    )
+    failures = resp.get("failures", [])
+    if failures:
+        print(f"[pipeline] FAILED to launch eval: {failures}", flush=True)
+        sys.exit(1)
+    return resp["tasks"][0]["taskArn"].split("/")[-1]
+
+
+def _parse_resolved_from_cw(task_id: str) -> tuple[int, int]:
+    """
+    Parse resolved/total from CloudWatch logs of an eval task.
+    Returns (resolved, total). Returns (-1, -1) if not found.
+    """
+    logs = boto3.client("logs", region_name=REGION)
+    stream = f"runner/runner/{task_id}"
+    try:
+        all_events = []
+        token = None
+        while True:
+            kwargs = dict(logGroupName=LOG_GROUP, logStreamName=stream, limit=500, startFromHead=True)
+            if token:
+                kwargs["nextToken"] = token
+            resp = logs.get_log_events(**kwargs)
+            new = resp["events"]
+            if not new:
+                break
+            all_events.extend(new)
+            new_token = resp.get("nextForwardToken")
+            if new_token == token:
+                break
+            token = new_token
+
+        # Look for lines like: "Resolved 17 instances" or "resolved_instances: 17"
+        resolved = total = -1
+        for e in all_events:
+            msg = e["message"]
+            # SWE-bench eval output patterns
+            m = re.search(r"Resolved\s+(\d+)\s+instances", msg)
+            if m:
+                resolved = int(m.group(1))
+            m2 = re.search(r'"resolved_instances":\s*(\d+)', msg)
+            if m2:
+                resolved = int(m2.group(1))
+            m3 = re.search(r'"total_instances":\s*(\d+)', msg)
+            if m3:
+                total = int(m3.group(1))
+            m4 = re.search(r'(\d+)/(\d+)\s+resolved', msg, re.IGNORECASE)
+            if m4:
+                resolved, total = int(m4.group(1)), int(m4.group(2))
+        return resolved, total
+    except Exception as e:
+        print(f"[pipeline] warning: could not parse eval logs: {e}", flush=True)
+        return -1, -1
+
+
+def _get_git_commit_from_s3(batch_name: str) -> str:
+    """Read git commit from run_report.json in S3."""
+    s3 = boto3.client("s3", region_name=REGION)
+    try:
+        resp = s3.get_object(Bucket=S3_BUCKET, Key=f"{batch_name}/run_report.json")
+        report = json.loads(resp["Body"].read())
+        return report.get("execution_identity", {}).get("git_commit", "unknown")[:12]
+    except Exception:
+        return "unknown"
+
+
+def _get_cost_from_s3(batch_name: str) -> float:
+    """Read total cost from run_report.json in S3."""
+    s3 = boto3.client("s3", region_name=REGION)
+    try:
+        resp = s3.get_object(Bucket=S3_BUCKET, Key=f"{batch_name}/run_report.json")
+        report = json.loads(resp["Body"].read())
+        return report.get("model_usage", {}).get("total_cost_usd", 0.0)
+    except Exception:
+        return 0.0
+
+
+def _append_pipeline_history(record: dict) -> None:
+    """Append a record to the pipeline history JSON in S3."""
+    s3 = boto3.client("s3", region_name=REGION)
+    history = []
+    try:
+        resp = s3.get_object(Bucket=S3_BUCKET, Key=PIPELINE_HISTORY_KEY)
+        history = json.loads(resp["Body"].read())
+    except s3.exceptions.NoSuchKey:
+        pass
+    except Exception:
+        pass
+    history.append(record)
+    s3.put_object(
+        Bucket=S3_BUCKET,
+        Key=PIPELINE_HISTORY_KEY,
+        Body=json.dumps(history, indent=2).encode(),
+        ContentType="application/json",
+    )
+
+
+def cmd_pipeline(args) -> None:
+    """
+    Full automated pipeline:
+      1. Smoke test (1 instance) — verify new behavior present
+      2. Batch run (30 instances)
+      3. Eval (SWE-bench official)
+      4. Store results to S3 pipeline-results/history.json
+    """
+    batch_name = args.batch_name
+    smoke_instance = args.smoke_instance
+    instance_ids = args.instance_ids or PIPELINE_DEFAULT_INSTANCES
+    max_attempts = args.max_attempts
+    workers = args.workers
+    model = getattr(args, "model", None)
+    skip_smoke = args.skip_smoke
+
+    timestamp = datetime.datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+    smoke_batch = f"smoke-{batch_name}"
+    eval_run_id = f"eval-{batch_name}"
+
+    print(f"[pipeline] ══════════════════════════════════════════", flush=True)
+    print(f"[pipeline] batch={batch_name}  instances={len(instance_ids)}", flush=True)
+    print(f"[pipeline] smoke_instance={smoke_instance}", flush=True)
+    print(f"[pipeline] max_attempts={max_attempts}  workers={workers}", flush=True)
+    print(f"[pipeline] timestamp={timestamp}", flush=True)
+    print(f"[pipeline] ══════════════════════════════════════════", flush=True)
+
+    # ── Step 1: Smoke test ────────────────────────────────────────────────────
+    if not skip_smoke:
+        print(f"\n[pipeline] STEP 1/3: smoke test ({smoke_instance})", flush=True)
+        smoke_task_id = _launch_ecs_task(
+            smoke_batch, [smoke_instance], max_attempts=2, workers=3, model=model
+        )
+        print(f"[pipeline] smoke task_id={smoke_task_id}", flush=True)
+        smoke_task = _wait_for_task(smoke_task_id, "smoke", poll_interval=20, timeout_s=1800)
+        smoke_exit = smoke_task.get("containers", [{}])[0].get("exitCode", 1)
+
+        if smoke_exit != 0:
+            print(f"[pipeline] SMOKE FAILED (exit={smoke_exit}) — aborting pipeline", flush=True)
+            sys.exit(1)
+
+        # Check smoke logs for ACCEPTED signal
+        logs_client = boto3.client("logs", region_name=REGION)
+        stream = f"runner/runner/{smoke_task_id}"
+        accepted = False
+        try:
+            resp = logs_client.get_log_events(logGroupName=LOG_GROUP, logStreamName=stream, limit=500, startFromHead=False)
+            for e in resp["events"]:
+                if "ACCEPTED" in e["message"] or "result] ACCEPTED" in e["message"]:
+                    accepted = True
+                    break
+        except Exception:
+            pass
+
+        if not accepted:
+            print(f"[pipeline] SMOKE WARNING: no ACCEPTED signal in logs (task may have run but not resolved)", flush=True)
+            print(f"[pipeline] Check manually: python scripts/ops.py logs --task-id {smoke_task_id}", flush=True)
+            answer = input("[pipeline] Continue to batch anyway? [y/N] ").strip().lower()
+            if answer != "y":
+                print("[pipeline] aborted", flush=True)
+                sys.exit(0)
+        else:
+            print(f"[pipeline] smoke PASSED (ACCEPTED signal found)", flush=True)
+    else:
+        print(f"\n[pipeline] STEP 1/3: smoke test SKIPPED (--skip-smoke)", flush=True)
+        smoke_task_id = None
+
+    # ── Step 2: Batch run ─────────────────────────────────────────────────────
+    print(f"\n[pipeline] STEP 2/3: batch run ({len(instance_ids)} instances)", flush=True)
+    batch_task_id = _launch_ecs_task(
+        batch_name, instance_ids, max_attempts=max_attempts, workers=workers, model=model
+    )
+    print(f"[pipeline] batch task_id={batch_task_id}", flush=True)
+    print(f"[pipeline] monitor: python scripts/ops.py logs --task-id {batch_task_id}", flush=True)
+    batch_task = _wait_for_task(batch_task_id, "batch", poll_interval=30, timeout_s=14400)
+    batch_exit = batch_task.get("containers", [{}])[0].get("exitCode", 1)
+
+    if batch_exit != 0:
+        print(f"[pipeline] BATCH FAILED (exit={batch_exit}) — skipping eval", flush=True)
+        sys.exit(1)
+
+    # Read run stats from S3
+    git_commit = _get_git_commit_from_s3(batch_name)
+    cost_usd = _get_cost_from_s3(batch_name)
+    predictions_key = f"{batch_name}/jingu-predictions.jsonl"
+    print(f"[pipeline] batch done. commit={git_commit} cost=${cost_usd:.2f}", flush=True)
+
+    # ── Step 3: Eval ──────────────────────────────────────────────────────────
+    print(f"\n[pipeline] STEP 3/3: eval (run_id={eval_run_id})", flush=True)
+    eval_task_id = _launch_eval_task(predictions_key, eval_run_id, workers=4)
+    print(f"[pipeline] eval task_id={eval_task_id}", flush=True)
+    eval_task = _wait_for_task(eval_task_id, "eval", poll_interval=30, timeout_s=7200)
+    eval_exit = eval_task.get("containers", [{}])[0].get("exitCode", 1)
+
+    resolved = total = -1
+    if eval_exit == 0:
+        resolved, total = _parse_resolved_from_cw(eval_task_id)
+    else:
+        print(f"[pipeline] EVAL task exit={eval_exit}", flush=True)
+
+    if total <= 0:
+        total = len(instance_ids)
+
+    # ── Store results ─────────────────────────────────────────────────────────
+    record = {
+        "timestamp": timestamp,
+        "batch_name": batch_name,
+        "git_commit": git_commit,
+        "resolved": resolved,
+        "total": total,
+        "resolve_rate": round(resolved / total, 4) if resolved >= 0 and total > 0 else None,
+        "cost_usd": cost_usd,
+        "max_attempts": max_attempts,
+        "smoke_task_id": smoke_task_id,
+        "batch_task_id": batch_task_id,
+        "eval_task_id": eval_task_id,
+        "eval_exit": eval_exit,
+    }
+    _append_pipeline_history(record)
+
+    rate_str = f"{resolved}/{total} ({100*resolved/total:.1f}%)" if resolved >= 0 and total > 0 else "unknown"
+    print(f"\n[pipeline] ══════════════════════════════════════════", flush=True)
+    print(f"[pipeline] DONE  batch={batch_name}  commit={git_commit}", flush=True)
+    print(f"[pipeline] resolved={rate_str}  cost=${cost_usd:.2f}", flush=True)
+    print(f"[pipeline] stored in s3://{S3_BUCKET}/{PIPELINE_HISTORY_KEY}", flush=True)
+    print(f"[pipeline] ══════════════════════════════════════════", flush=True)
+
+
+# ── history ────────────────────────────────────────────────────────────────────
+
+def cmd_history(args) -> None:
+    """Show pipeline run history from S3."""
+    s3 = boto3.client("s3", region_name=REGION)
+    try:
+        resp = s3.get_object(Bucket=S3_BUCKET, Key=PIPELINE_HISTORY_KEY)
+        history = json.loads(resp["Body"].read())
+    except Exception:
+        print("[history] no pipeline history found yet")
+        print(f"[history] (expected at s3://{S3_BUCKET}/{PIPELINE_HISTORY_KEY})")
+        return
+
+    if not history:
+        print("[history] history is empty")
+        return
+
+    print(f"\n{'Timestamp':<20} {'Batch':<35} {'Commit':<14} {'Resolved':>10} {'Rate':>7} {'Cost':>8}")
+    print("─" * 100)
+    for r in history:
+        ts = r.get("timestamp", "?")[:16]
+        batch = r.get("batch_name", "?")[:34]
+        commit = r.get("git_commit", "?")[:12]
+        resolved = r.get("resolved", -1)
+        total = r.get("total", -1)
+        rate = r.get("resolve_rate")
+        cost = r.get("cost_usd", 0)
+        res_str = f"{resolved}/{total}" if resolved >= 0 else "?"
+        rate_str = f"{rate*100:.1f}%" if rate is not None else "?"
+        cost_str = f"${cost:.2f}"
+        print(f"{ts:<20} {batch:<35} {commit:<14} {res_str:>10} {rate_str:>7} {cost_str:>8}")
+    print()
+
+
 # ── status ─────────────────────────────────────────────────────────────────────
 
 def cmd_status(args) -> None:
@@ -852,6 +1211,25 @@ def main():
     p_eval.add_argument("--runbook-ack", action="store_true",
                         help="Required: confirms runbook was read this session")
 
+    # pipeline — full automated pipeline: smoke → batch → eval → store results
+    p_pipeline = sub.add_parser("pipeline", help="Full pipeline: smoke → batch → eval → store results")
+    p_pipeline.add_argument("--batch-name", required=True,
+                            help="Name for this pipeline run (used for batch and eval IDs)")
+    p_pipeline.add_argument("--smoke-instance", default="django__django-11095",
+                            help="Instance to use for smoke test (default: django__django-11095)")
+    p_pipeline.add_argument("--instance-ids", nargs="+", default=None,
+                            help="Instances for batch run (default: 30 standard django instances)")
+    p_pipeline.add_argument("--max-attempts", type=int, default=2)
+    p_pipeline.add_argument("--workers", type=int, default=10)
+    p_pipeline.add_argument("--model", default=None)
+    p_pipeline.add_argument("--skip-smoke", action="store_true",
+                            help="Skip smoke test and go directly to batch")
+    p_pipeline.add_argument("--runbook-ack", action="store_true",
+                            help="Required: confirms runbook was read this session")
+
+    # history — show pipeline run history
+    sub.add_parser("history", help="Show pipeline run history (resolved rates)")
+
     # list-tasks — show currently running/pending ECS tasks
     sub.add_parser("list-tasks", help="List currently RUNNING/PENDING ECS tasks")
 
@@ -874,6 +1252,11 @@ def main():
         cmd_smoke(args)
     elif args.cmd == "eval":
         cmd_eval(args)
+    elif args.cmd == "pipeline":
+        _check_runbook_ack(args)
+        cmd_pipeline(args)
+    elif args.cmd == "history":
+        cmd_history(args)
     elif args.cmd == "list-tasks":
         cmd_list_tasks(args)
     elif args.cmd == "logs":
