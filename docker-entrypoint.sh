@@ -71,20 +71,34 @@ print(f'[entrypoint] downloaded predictions from s3://{bucket}/{key}')
     EXIT_CODE=$?
     # Copy report to output dir for S3 upload
     mkdir -p "$OUTPUT_DIR"
-    echo "[entrypoint] evaluation_results contents:"
-    ls -la evaluation_results/ 2>/dev/null || echo "  (no evaluation_results dir)"
-    ls -la "evaluation_results/${RUN_ID}"* 2>/dev/null || echo "  (no ${RUN_ID} results)"
+    echo "[entrypoint] searching for eval report (run_id=${RUN_ID}):"
+    # SWE-bench writes report as <model>.<run_id>.json in cwd or evaluation_results/
+    ls -la evaluation_results/ 2>/dev/null || echo "  (no evaluation_results/ dir)"
+    ls -la *"${RUN_ID}"*.json 2>/dev/null || echo "  (no ${RUN_ID} json in cwd)"
     cp -r "evaluation_results/${RUN_ID}"* "$OUTPUT_DIR/" 2>/dev/null || true
+    cp *"${RUN_ID}"*.json "$OUTPUT_DIR/" 2>/dev/null || true
     # Generate unified eval_results.json with per-instance resolved/unresolved lists
     python3 - "$RUN_ID" "$OUTPUT_DIR" <<'EVALEOF'
 import json, glob, sys, os
 run_id, output_dir = sys.argv[1], sys.argv[2]
 results = {}
-for f in sorted(glob.glob(f"evaluation_results/{run_id}*.json")):
+# Search both evaluation_results/ and cwd for report JSON
+search_patterns = [
+    f"evaluation_results/{run_id}*.json",
+    f"evaluation_results/*{run_id}*.json",
+    f"*{run_id}*.json",
+]
+found_files = set()
+for pattern in search_patterns:
+    found_files.update(glob.glob(pattern))
+for f in sorted(found_files):
     try:
         data = json.load(open(f))
-        results.update(data)
-        print(f"[entrypoint] loaded eval from {f}: resolved={len(data.get('resolved_ids', []))}")
+        if "resolved_ids" in data or "unresolved_ids" in data:
+            results.update(data)
+            print(f"[entrypoint] loaded eval from {f}: resolved={len(data.get('resolved_ids', []))}")
+        else:
+            print(f"[entrypoint] skipped {f} (no resolved_ids key)")
     except Exception as e:
         print(f"[entrypoint] warning: could not read {f}: {e}")
 if results:
