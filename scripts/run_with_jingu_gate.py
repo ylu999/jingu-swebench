@@ -37,7 +37,13 @@ from jingu_gate_bridge import evaluate_patch_from_traj, build_support_pool, run_
 from patch_reviewer import review_patch_bedrock, ReviewResult
 # B3: retry controller (failure → diagnosis → next strategy)
 from retry_controller import build_retry_plan, RetryPlan
-from f2p_failure_router import apply_f2p_override
+from governance_runtime import (
+    install_governance_pack,
+    run_governance_packs,
+    override_retry_plan_from_pack,
+    ExecutionContext as GovExecutionContext,
+)
+from swebench_failure_reroute_pack import SWEBENCH_FAILURE_REROUTE_PACK
 from strategy_logger import log_strategy_entry, make_entry as make_strategy_entry
 # B4: cognition gate (declaration-vs-patch consistency check)
 from declaration_extractor import extract_declaration, extract_last_agent_message
@@ -99,6 +105,11 @@ RETRY_CONTROLLER_ENABLED = True  # B3 retry-controller — diagnoses attempt 1, 
 # p178: strategy learning — set paths to enable log + table
 STRATEGY_LOG_PATH = os.environ.get("STRATEGY_LOG_PATH")   # e.g. /root/results/strategy_log.jsonl
 STRATEGY_TABLE_PATH = os.environ.get("STRATEGY_TABLE_PATH")  # e.g. /root/results/strategy_table.json
+
+# ── Governance packs (p27 ADR: GovernancePack onboarding pipeline) ────────────
+# Install packs at module load. Each pack declares its 5 onboarding steps.
+# Missing steps are logged as warnings (v0). Future: hard error.
+install_governance_pack(SWEBENCH_FAILURE_REROUTE_PACK)
 
 # ── Execution Identity (RT1/RT6: artifact provenance) ─────────────────────────
 
@@ -3428,24 +3439,21 @@ def run_with_jingu(instance_id: str, output_dir: Path, max_attempts: int = 3,
                                         control_action="ADJUST",
                                         principal_violations=retry_plan.principal_violations,
                                     )
-                        # ── p26 F2P failure router (SWE-bench specialized) ────────────────
-                        # Detect F2P_ALL_FAIL / F2P_PARTIAL from controlled_verify counts.
-                        # Overrides retry_plan.next_attempt_prompt with phase-reroute directive.
-                        # Architecture: swe-bench specialized — do not lift to generic until proven.
-                        _cv_tr = (jingu_body or {}).get("test_results", {})
-                        _f2p_controlled_passed = _cv_tr.get("controlled_passed", -1)
-                        _f2p_controlled_failed = _cv_tr.get("controlled_failed", -1)
-                        if _f2p_controlled_passed >= 0 or _f2p_controlled_failed >= 0:
-                            retry_plan, _f2p_class = apply_f2p_override(
-                                retry_plan=retry_plan,
-                                controlled_passed=_f2p_controlled_passed,
-                                controlled_failed=_f2p_controlled_failed,
-                                fail_to_pass_tests=fail_to_pass,
-                                attempt=attempt,
-                            )
-                            print(f"    [f2p-router] class={_f2p_class} "
-                                  f"controlled_passed={_f2p_controlled_passed} "
-                                  f"controlled_failed={_f2p_controlled_failed}")
+                        # ── p27 GovernancePack pipeline ───────────────────────────────────
+                        # Run all installed packs: parse_failure → recognize → route.
+                        # First REROUTE decision overrides retry_plan.
+                        # Architecture (p27 ADR): packs declared at module level via
+                        # install_governance_pack(); no per-attempt wiring needed.
+                        _gov_ctx = GovExecutionContext(
+                            jingu_body=jingu_body or {},
+                            fail_to_pass=fail_to_pass,
+                            attempt=attempt,
+                            instance_id=instance_id,
+                            patch_text=patch,
+                        )
+                        _pack_decision = run_governance_packs(_gov_ctx)
+                        if _pack_decision and _pack_decision.action == "REROUTE":
+                            retry_plan = override_retry_plan_from_pack(retry_plan, _pack_decision)
                         # ─────────────────────────────────────────────────────────────────
                         print(f"    [retry-ctrl] action={retry_plan.control_action}  "
                               f"root_causes={retry_plan.root_causes}")
