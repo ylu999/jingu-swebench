@@ -1076,6 +1076,37 @@ def _parse_resolved_from_cw(task_id: str) -> tuple[int, int]:
         return -1, -1
 
 
+def _read_eval_results_from_s3(eval_run_id: str) -> dict:
+    """
+    Read eval_results.json from S3 for a given eval run.
+    Returns dict with 'resolved_ids' and 'unresolved_ids' lists.
+    Returns {} if not found.
+    """
+    s3 = boto3.client("s3", region_name=REGION)
+    # Try multiple path patterns:
+    # 1. <eval_run_id>/eval_results.json (eval task output dir)
+    # 2. eval-<batch>/eval_results.json
+    candidates = [
+        f"{eval_run_id}/eval_results.json",
+    ]
+    # If eval_run_id doesn't start with "eval-", also try with prefix
+    if not eval_run_id.startswith("eval-"):
+        candidates.append(f"eval-{eval_run_id}/eval_results.json")
+
+    for key in candidates:
+        try:
+            resp = s3.get_object(Bucket=S3_BUCKET, Key=key)
+            data = json.loads(resp["Body"].read())
+            resolved = data.get("resolved_ids", [])
+            unresolved = data.get("unresolved_ids", [])
+            print(f"[eval] loaded eval_results from s3://{S3_BUCKET}/{key}: "
+                  f"{len(resolved)} resolved, {len(unresolved)} unresolved", flush=True)
+            return data
+        except Exception:
+            continue
+    return {}
+
+
 def _get_git_commit_from_s3(batch_name: str) -> str:
     """Read git commit from run_report.json in S3."""
     s3 = boto3.client("s3", region_name=REGION)
@@ -1213,15 +1244,72 @@ def cmd_pipeline(args) -> None:
     eval_exit = eval_task.get("containers", [{}])[0].get("exitCode", 1)
 
     resolved = total = -1
+    resolved_ids: list[str] = []
+    unresolved_ids: list[str] = []
+
     if eval_exit == 0:
-        resolved, total = _parse_resolved_from_cw(eval_task_id)
+        # Primary: read eval_results.json from S3 (written by docker-entrypoint.sh)
+        eval_data = _read_eval_results_from_s3(eval_run_id)
+        if eval_data:
+            resolved_ids = eval_data.get("resolved_ids", [])
+            unresolved_ids = eval_data.get("unresolved_ids", [])
+            resolved = len(resolved_ids)
+            total = resolved + len(unresolved_ids)
+        else:
+            # Fallback: parse from CloudWatch logs (batch-level totals only)
+            print(f"[pipeline] eval_results.json not found in S3, falling back to CW logs", flush=True)
+            resolved, total = _parse_resolved_from_cw(eval_task_id)
     else:
         print(f"[pipeline] EVAL task exit={eval_exit}", flush=True)
 
     if total <= 0:
         total = len(instance_ids)
 
-    # ── Store results ─────────────────────────────────────────────────────────
+    # ── Write per-instance records ─────────────────────────────────────────────
+    s3_client = boto3.client("s3", region_name=REGION)
+    resolved_set = set(resolved_ids)
+    unresolved_set = set(unresolved_ids)
+
+    print(f"[pipeline] writing per-instance records for {len(instance_ids)} instances...", flush=True)
+    for iid in instance_ids:
+        existing = _read_instance_record(s3_client, iid)
+        # Determine eval_resolved per instance
+        if iid in resolved_set:
+            eval_resolved = True
+        elif iid in unresolved_set:
+            eval_resolved = False
+        else:
+            eval_resolved = None  # not in eval output (e.g., not submitted)
+
+        run_entry = {
+            "batch": batch_name,
+            "git_commit": git_commit,
+            "accepted": True,  # pipeline only evals accepted predictions
+            "eval_resolved": eval_resolved,
+        }
+
+        if existing:
+            existing.setdefault("runs", []).append(run_entry)
+            existing["last_batch"] = batch_name
+            existing["last_commit"] = git_commit
+            existing["accepted"] = True
+            if eval_resolved is not None:
+                existing["eval_resolved"] = eval_resolved
+            _write_instance_record(s3_client, iid, existing)
+        else:
+            record_data = {
+                "instance_id": iid,
+                "last_batch": batch_name,
+                "last_commit": git_commit,
+                "accepted": True,
+                "eval_resolved": eval_resolved,
+                "runs": [run_entry],
+            }
+            _write_instance_record(s3_client, iid, record_data)
+
+    print(f"[pipeline] per-instance records written ({len(resolved_ids)} resolved, {len(unresolved_ids)} unresolved)", flush=True)
+
+    # ── Store pipeline history ─────────────────────────────────────────────────
     record = {
         "timestamp": timestamp,
         "batch_name": batch_name,
@@ -1235,6 +1323,7 @@ def cmd_pipeline(args) -> None:
         "batch_task_id": batch_task_id,
         "eval_task_id": eval_task_id,
         "eval_exit": eval_exit,
+        "resolved_ids": resolved_ids,
     }
     _append_pipeline_history(record)
 
@@ -1410,7 +1499,18 @@ def cmd_backfill(args) -> None:
 
         # Determine per-instance resolved status for this batch
         eval_resolved_set: set[str] = set()
+        eval_unresolved_set: set[str] = set()
         eval_known = _KNOWN_EVAL_RESULTS.get(batch_name)
+
+        # Try reading eval_results.json from S3 (per-instance resolved data)
+        for eval_prefix in [f"eval-{batch_name}", batch_name]:
+            eval_data = _read_eval_results_from_s3(eval_prefix)
+            if eval_data:
+                eval_resolved_set = set(eval_data.get("resolved_ids", []))
+                eval_unresolved_set = set(eval_data.get("unresolved_ids", []))
+                print(f"[backfill]   eval_results: {len(eval_resolved_set)} resolved, "
+                      f"{len(eval_unresolved_set)} unresolved", flush=True)
+                break
 
         # Load traj files for this batch
         traj_accepted: dict[str, tuple[bool, int]] = {}  # instance_id → (accepted, attempts)
@@ -1438,7 +1538,15 @@ def cmd_backfill(args) -> None:
         # Merge into per-instance records
         for iid in batch_instances:
             accepted, attempts = traj_accepted.get(iid, (False, 1))
-            eval_resolved = iid in eval_resolved_set if eval_resolved_set else None
+            if eval_resolved_set or eval_unresolved_set:
+                if iid in eval_resolved_set:
+                    eval_resolved = True
+                elif iid in eval_unresolved_set:
+                    eval_resolved = False
+                else:
+                    eval_resolved = None  # not in eval output
+            else:
+                eval_resolved = None
 
             run_entry = {
                 "batch": batch_name,
@@ -1535,7 +1643,7 @@ def cmd_summary(args) -> None:
     from collections import defaultdict
     repo_stats: dict[str, dict] = defaultdict(lambda: {
         "ran": 0, "accepted": 0, "not_accepted": 0,
-        "eval_known": 0, "eval_resolved": 0,
+        "eval_resolved": 0, "eval_not_resolved": 0, "eval_unknown": 0,
     })
 
     for iid, r in records.items():
@@ -1547,22 +1655,32 @@ def cmd_summary(args) -> None:
             stats["accepted"] += 1
         else:
             stats["not_accepted"] += 1
-        if r.get("batch_eval_resolved") is not None:
-            stats["eval_known"] += 1
-            # Per-instance eval not available yet — skip resolved column
+        eval_r = r.get("eval_resolved")
+        if eval_r is True:
+            stats["eval_resolved"] += 1
+        elif eval_r is False:
+            stats["eval_not_resolved"] += 1
+        else:
+            stats["eval_unknown"] += 1
 
-    print(f"\n{'Repo':<35} {'Ran':>5} {'Accepted':>10} {'Not Acc':>9}", flush=True)
-    print("─" * 65, flush=True)
-    total_ran = total_acc = total_not = 0
+    print(f"\n{'Repo':<35} {'Ran':>5} {'Acc':>5} {'!Acc':>5} {'Res':>5} {'!Res':>5} {'?':>3}", flush=True)
+    print("─" * 70, flush=True)
+    total_ran = total_acc = total_not = total_res = total_nres = total_unk = 0
     for repo, s in sorted(repo_stats.items(), key=lambda x: -x[1]["ran"]):
-        print(f"{repo:<35} {s['ran']:>5} {s['accepted']:>10} {s['not_accepted']:>9}")
+        print(f"{repo:<35} {s['ran']:>5} {s['accepted']:>5} {s['not_accepted']:>5} "
+              f"{s['eval_resolved']:>5} {s['eval_not_resolved']:>5} {s['eval_unknown']:>3}")
         total_ran += s["ran"]
         total_acc += s["accepted"]
         total_not += s["not_accepted"]
-    print("─" * 65)
-    print(f"{'TOTAL':<35} {total_ran:>5} {total_acc:>10} {total_not:>9}")
+        total_res += s["eval_resolved"]
+        total_nres += s["eval_not_resolved"]
+        total_unk += s["eval_unknown"]
+    print("─" * 70)
+    print(f"{'TOTAL':<35} {total_ran:>5} {total_acc:>5} {total_not:>5} "
+          f"{total_res:>5} {total_nres:>5} {total_unk:>3}")
     print(f"\n[summary] {len(records)} unique instances across {len(repo_stats)} repos")
-    print(f"[summary] eval per-instance data: not yet available (batch-level only)")
+    print(f"[summary] columns: Ran=ran, Acc=accepted, !Acc=not accepted, "
+          f"Res=eval resolved, !Res=eval not resolved, ?=eval unknown")
     print()
 
 

@@ -71,7 +71,29 @@ print(f'[entrypoint] downloaded predictions from s3://{bucket}/{key}')
     EXIT_CODE=$?
     # Copy report to output dir for S3 upload
     mkdir -p "$OUTPUT_DIR"
+    echo "[entrypoint] evaluation_results contents:"
+    ls -la evaluation_results/ 2>/dev/null || echo "  (no evaluation_results dir)"
+    ls -la "evaluation_results/${RUN_ID}"* 2>/dev/null || echo "  (no ${RUN_ID} results)"
     cp -r "evaluation_results/${RUN_ID}"* "$OUTPUT_DIR/" 2>/dev/null || true
+    # Generate unified eval_results.json with per-instance resolved/unresolved lists
+    python3 - "$RUN_ID" "$OUTPUT_DIR" <<'EVALEOF'
+import json, glob, sys, os
+run_id, output_dir = sys.argv[1], sys.argv[2]
+results = {}
+for f in sorted(glob.glob(f"evaluation_results/{run_id}*.json")):
+    try:
+        data = json.load(open(f))
+        results.update(data)
+        print(f"[entrypoint] loaded eval from {f}: resolved={len(data.get('resolved_ids', []))}")
+    except Exception as e:
+        print(f"[entrypoint] warning: could not read {f}: {e}")
+if results:
+    out_path = os.path.join(output_dir, "eval_results.json")
+    json.dump(results, open(out_path, "w"), indent=2)
+    print(f"[entrypoint] wrote {out_path} ({len(results.get('resolved_ids',[]))} resolved)")
+else:
+    print("[entrypoint] WARNING: no eval results found")
+EVALEOF
 else
     # Run pipeline
     cd /app
