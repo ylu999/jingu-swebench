@@ -2016,6 +2016,195 @@ def cmd_discover(args) -> None:
                 print(f"  {u['batch']}  ({u['instances']} instances)")
 
 
+# ── eval-all ──────────────────────────────────────────────────────────────────
+
+def _discover_unevaluated(min_size: int = 2000) -> list[dict]:
+    """Return list of unevaluated batches: [{batch, key, instances, size, modified}]."""
+    s3 = boto3.client("s3", region_name=REGION)
+    paginator = s3.get_paginator("list_objects_v2")
+
+    predictions: list[dict] = []
+    for page in paginator.paginate(Bucket=S3_BUCKET):
+        for obj in page.get("Contents", []):
+            key = obj["Key"]
+            if key.endswith("predictions.jsonl"):
+                predictions.append({
+                    "key": key, "size": obj["Size"],
+                    "modified": str(obj["LastModified"]),
+                    "batch": key.split("/")[0],
+                })
+
+    predictions = [p for p in predictions if p["size"] >= min_size]
+    predictions.sort(key=lambda p: p["modified"])
+
+    eval_done: set[str] = set()
+    for page in paginator.paginate(Bucket=S3_BUCKET):
+        for obj in page.get("Contents", []):
+            key = obj["Key"]
+            if key.endswith("eval_results.json"):
+                batch = key.split("/")[0]
+                eval_done.add(batch)
+                if batch.startswith("eval-"):
+                    eval_done.add(batch[5:])
+
+    unevaluated = []
+    for p in predictions:
+        batch = p["batch"]
+        has_eval = batch in eval_done or f"eval-{batch}" in eval_done
+        if has_eval:
+            continue
+        try:
+            resp = s3.get_object(Bucket=S3_BUCKET, Key=p["key"])
+            lines = resp["Body"].read().decode().strip().split("\n")
+            inst_count = sum(1 for l in lines if l.strip())
+        except Exception:
+            inst_count = -1
+        if inst_count >= 3:
+            unevaluated.append({
+                "batch": batch, "key": p["key"], "instances": inst_count,
+                "size": p["size"], "modified": p["modified"],
+            })
+    return unevaluated
+
+
+def _run_single_eval(batch_name: str, eval_workers: int = 4) -> dict:
+    """Run eval for a single batch. Returns result dict with resolved/total/error."""
+    eval_run_id = f"eval-{batch_name}"
+    predictions_key = f"{batch_name}/jingu-predictions.jsonl"
+    timestamp = datetime.datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+
+    s3_check = boto3.client("s3", region_name=REGION)
+    try:
+        resp = s3_check.get_object(Bucket=S3_BUCKET, Key=predictions_key)
+        pred_lines = resp["Body"].read().decode().strip().split("\n")
+        instance_ids = [json.loads(l).get("instance_id", "") for l in pred_lines if l.strip()]
+    except Exception as e:
+        return {"batch": batch_name, "error": str(e)}
+
+    git_commit = _get_git_commit_from_s3(batch_name)
+    cost_usd = _get_cost_from_s3(batch_name)
+
+    print(f"\n[eval-all] ── {batch_name} ({len(instance_ids)} instances) ──", flush=True)
+
+    try:
+        eval_task_id = _launch_eval_task(predictions_key, eval_run_id, workers=eval_workers)
+    except SystemExit:
+        return {"batch": batch_name, "error": "failed to launch ECS task"}
+
+    print(f"[eval-all] task_id={eval_task_id}", flush=True)
+    eval_task = _wait_for_task(eval_task_id, "eval", poll_interval=30, timeout_s=7200)
+    eval_exit = eval_task.get("containers", [{}])[0].get("exitCode", 1)
+
+    resolved = total = -1
+    resolved_ids: list[str] = []
+    unresolved_ids: list[str] = []
+
+    if eval_exit == 0:
+        eval_data = _read_eval_results_from_s3(eval_run_id)
+        if eval_data:
+            resolved_ids = eval_data.get("resolved_ids", [])
+            unresolved_ids = eval_data.get("unresolved_ids", [])
+            resolved = len(resolved_ids)
+            total = resolved + len(unresolved_ids)
+        else:
+            resolved, total = _parse_resolved_from_cw(eval_task_id)
+
+    if total <= 0:
+        total = len(instance_ids)
+
+    # Write per-instance records
+    s3_client = boto3.client("s3", region_name=REGION)
+    resolved_set = set(resolved_ids)
+    unresolved_set = set(unresolved_ids)
+
+    for iid in instance_ids:
+        existing = _read_instance_record(s3_client, iid)
+        if iid in resolved_set:
+            eval_resolved = True
+        elif iid in unresolved_set:
+            eval_resolved = False
+        else:
+            eval_resolved = None
+
+        run_entry = {
+            "batch": batch_name, "git_commit": git_commit,
+            "accepted": True, "eval_resolved": eval_resolved,
+        }
+        if existing:
+            existing.setdefault("runs", []).append(run_entry)
+            existing["last_batch"] = batch_name
+            existing["last_commit"] = git_commit
+            existing["accepted"] = True
+            if eval_resolved is not None:
+                existing["eval_resolved"] = eval_resolved
+            _write_instance_record(s3_client, iid, existing)
+        else:
+            _write_instance_record(s3_client, iid, {
+                "instance_id": iid, "last_batch": batch_name,
+                "last_commit": git_commit, "accepted": True,
+                "eval_resolved": eval_resolved, "runs": [run_entry],
+            })
+
+    # Store pipeline history
+    record = {
+        "timestamp": timestamp, "batch_name": batch_name,
+        "git_commit": git_commit, "resolved": resolved, "total": total,
+        "resolve_rate": round(resolved / total, 4) if resolved >= 0 and total > 0 else None,
+        "cost_usd": cost_usd, "max_attempts": 2,
+        "smoke_task_id": None, "batch_task_id": None,
+        "eval_task_id": eval_task_id, "eval_exit": eval_exit,
+        "resolved_ids": resolved_ids, "eval_only": True,
+    }
+    _append_pipeline_history(record)
+
+    rate_str = f"{resolved}/{total} ({100*resolved/total:.1f}%)" if resolved >= 0 and total > 0 else "unknown"
+    print(f"[eval-all] {batch_name}: {rate_str}", flush=True)
+
+    return {
+        "batch": batch_name, "resolved": resolved, "total": total,
+        "rate": rate_str, "eval_exit": eval_exit,
+    }
+
+
+def cmd_eval_all(args) -> None:
+    """Discover all unevaluated batches and run eval-only pipeline for each sequentially."""
+    min_size = args.min_size
+    eval_workers = args.eval_workers
+    max_batches = args.max_batches
+
+    print("[eval-all] discovering unevaluated batches...", flush=True)
+    batches = _discover_unevaluated(min_size=min_size)
+
+    if not batches:
+        print("[eval-all] no unevaluated batches found", flush=True)
+        return
+
+    if max_batches and len(batches) > max_batches:
+        print(f"[eval-all] found {len(batches)} batches, limiting to {max_batches}", flush=True)
+        batches = batches[:max_batches]
+
+    print(f"[eval-all] {len(batches)} batches to eval:", flush=True)
+    for b in batches:
+        print(f"  {b['batch']}  ({b['instances']} instances)", flush=True)
+    print(flush=True)
+
+    results = []
+    for i, b in enumerate(batches):
+        print(f"\n[eval-all] ═══ [{i+1}/{len(batches)}] {b['batch']} ═══", flush=True)
+        result = _run_single_eval(b["batch"], eval_workers=eval_workers)
+        results.append(result)
+
+    # Summary
+    print(f"\n[eval-all] ══════════════════════════════════════════", flush=True)
+    print(f"[eval-all] SUMMARY ({len(results)} batches evaluated):", flush=True)
+    for r in results:
+        if "error" in r:
+            print(f"  {r['batch']}: ERROR — {r['error']}", flush=True)
+        else:
+            print(f"  {r['batch']}: {r.get('rate', '?')}", flush=True)
+    print(f"[eval-all] ══════════════════════════════════════════", flush=True)
+
+
 # ── status ─────────────────────────────────────────────────────────────────────
 
 def cmd_status(args) -> None:
@@ -2144,6 +2333,17 @@ def main():
     # summary — per-instance summary table grouped by repo
     sub.add_parser("summary", help="Show per-instance summary table grouped by repo")
 
+    # eval-all — discover + eval all unevaluated batches sequentially
+    p_eval_all = sub.add_parser("eval-all", help="Eval all unevaluated batches sequentially")
+    p_eval_all.add_argument("--min-size", type=int, default=2000,
+                            help="Min predictions file size in bytes (default: 2000)")
+    p_eval_all.add_argument("--eval-workers", type=int, default=4,
+                            help="Number of eval workers per batch (default: 4)")
+    p_eval_all.add_argument("--max-batches", type=int, default=None,
+                            help="Max number of batches to eval (default: all)")
+    p_eval_all.add_argument("--runbook-ack", action="store_true",
+                            help="Required: confirms runbook was read this session")
+
     # discover — scan S3 for all predictions and eval status
     p_discover = sub.add_parser("discover", help="Scan S3 for all predictions and eval status")
     p_discover.add_argument("--min-size", type=int, default=2000,
@@ -2192,6 +2392,9 @@ def main():
         cmd_summary(args)
     elif args.cmd == "discover":
         cmd_discover(args)
+    elif args.cmd == "eval-all":
+        _check_runbook_ack(args)
+        cmd_eval_all(args)
 
 
 if __name__ == "__main__":
