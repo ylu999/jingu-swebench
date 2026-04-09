@@ -1164,10 +1164,140 @@ def cmd_pipeline(args) -> None:
     workers = args.workers
     model = getattr(args, "model", None)
     skip_smoke = args.skip_smoke
+    eval_only = getattr(args, "eval_only", False)
 
     timestamp = datetime.datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
     smoke_batch = f"smoke-{batch_name}"
     eval_run_id = f"eval-{batch_name}"
+
+    # ── eval-only mode: skip smoke + batch, go straight to eval ────────────
+    if eval_only:
+        predictions_key = f"{batch_name}/jingu-predictions.jsonl"
+        # Verify predictions exist in S3
+        s3_check = boto3.client("s3", region_name=REGION)
+        try:
+            head = s3_check.head_object(Bucket=S3_BUCKET, Key=predictions_key)
+            pred_size = head["ContentLength"]
+        except Exception:
+            print(f"[pipeline] ERROR: predictions not found at s3://{S3_BUCKET}/{predictions_key}", flush=True)
+            sys.exit(1)
+
+        # Count instances in predictions
+        try:
+            resp = s3_check.get_object(Bucket=S3_BUCKET, Key=predictions_key)
+            pred_lines = resp["Body"].read().decode().strip().split("\n")
+            pred_instances = [json.loads(l).get("instance_id", "") for l in pred_lines if l.strip()]
+            instance_ids = pred_instances
+        except Exception as e:
+            print(f"[pipeline] ERROR: could not read predictions: {e}", flush=True)
+            sys.exit(1)
+
+        git_commit = _get_git_commit_from_s3(batch_name)
+        cost_usd = _get_cost_from_s3(batch_name)
+
+        print(f"[pipeline] ══════════════════════════════════════════", flush=True)
+        print(f"[pipeline] EVAL-ONLY mode", flush=True)
+        print(f"[pipeline] batch={batch_name}  instances={len(instance_ids)}", flush=True)
+        print(f"[pipeline] predictions={predictions_key} ({pred_size} bytes)", flush=True)
+        print(f"[pipeline] commit={git_commit}  cost=${cost_usd:.2f}", flush=True)
+        print(f"[pipeline] ══════════════════════════════════════════", flush=True)
+
+        # Jump straight to eval (Step 3 below)
+        # We'll fall through to Step 3 by setting skip_smoke=True and
+        # skipping batch launch — use a goto-like structure
+        print(f"\n[pipeline] STEP 1/1: eval (run_id={eval_run_id})", flush=True)
+        eval_task_id = _launch_eval_task(predictions_key, eval_run_id, workers=args.eval_workers)
+        print(f"[pipeline] eval task_id={eval_task_id}", flush=True)
+        eval_task = _wait_for_task(eval_task_id, "eval", poll_interval=30, timeout_s=7200)
+        eval_exit = eval_task.get("containers", [{}])[0].get("exitCode", 1)
+
+        resolved = total = -1
+        resolved_ids: list[str] = []
+        unresolved_ids: list[str] = []
+
+        if eval_exit == 0:
+            eval_data = _read_eval_results_from_s3(eval_run_id)
+            if eval_data:
+                resolved_ids = eval_data.get("resolved_ids", [])
+                unresolved_ids = eval_data.get("unresolved_ids", [])
+                resolved = len(resolved_ids)
+                total = resolved + len(unresolved_ids)
+            else:
+                print(f"[pipeline] eval_results.json not found in S3, falling back to CW logs", flush=True)
+                resolved, total = _parse_resolved_from_cw(eval_task_id)
+        else:
+            print(f"[pipeline] EVAL task exit={eval_exit}", flush=True)
+
+        if total <= 0:
+            total = len(instance_ids)
+
+        # Write per-instance records
+        s3_client = boto3.client("s3", region_name=REGION)
+        resolved_set = set(resolved_ids)
+        unresolved_set = set(unresolved_ids)
+
+        print(f"[pipeline] writing per-instance records for {len(instance_ids)} instances...", flush=True)
+        for iid in instance_ids:
+            existing = _read_instance_record(s3_client, iid)
+            if iid in resolved_set:
+                eval_resolved = True
+            elif iid in unresolved_set:
+                eval_resolved = False
+            else:
+                eval_resolved = None
+
+            run_entry = {
+                "batch": batch_name,
+                "git_commit": git_commit,
+                "accepted": True,
+                "eval_resolved": eval_resolved,
+            }
+
+            if existing:
+                existing.setdefault("runs", []).append(run_entry)
+                existing["last_batch"] = batch_name
+                existing["last_commit"] = git_commit
+                existing["accepted"] = True
+                if eval_resolved is not None:
+                    existing["eval_resolved"] = eval_resolved
+                _write_instance_record(s3_client, iid, existing)
+            else:
+                record_data = {
+                    "instance_id": iid,
+                    "last_batch": batch_name,
+                    "last_commit": git_commit,
+                    "accepted": True,
+                    "eval_resolved": eval_resolved,
+                    "runs": [run_entry],
+                }
+                _write_instance_record(s3_client, iid, record_data)
+
+        # Store pipeline history
+        record = {
+            "timestamp": timestamp,
+            "batch_name": batch_name,
+            "git_commit": git_commit,
+            "resolved": resolved,
+            "total": total,
+            "resolve_rate": round(resolved / total, 4) if resolved >= 0 and total > 0 else None,
+            "cost_usd": cost_usd,
+            "max_attempts": max_attempts,
+            "smoke_task_id": None,
+            "batch_task_id": None,
+            "eval_task_id": eval_task_id,
+            "eval_exit": eval_exit,
+            "resolved_ids": resolved_ids,
+            "eval_only": True,
+        }
+        _append_pipeline_history(record)
+
+        rate_str = f"{resolved}/{total} ({100*resolved/total:.1f}%)" if resolved >= 0 and total > 0 else "unknown"
+        print(f"\n[pipeline] ══════════════════════════════════════════", flush=True)
+        print(f"[pipeline] DONE (eval-only)  batch={batch_name}  commit={git_commit}", flush=True)
+        print(f"[pipeline] resolved={rate_str}  cost=${cost_usd:.2f}", flush=True)
+        print(f"[pipeline] stored in s3://{S3_BUCKET}/{PIPELINE_HISTORY_KEY}", flush=True)
+        print(f"[pipeline] ══════════════════════════════════════════", flush=True)
+        return
 
     print(f"[pipeline] ══════════════════════════════════════════", flush=True)
     print(f"[pipeline] batch={batch_name}  instances={len(instance_ids)}", flush=True)
@@ -1706,6 +1836,84 @@ def cmd_summary(args) -> None:
     print()
 
 
+# ── discover ──────────────────────────────────────────────────────────────────
+
+def cmd_discover(args) -> None:
+    """
+    Scan S3 bucket for all batches that have jingu-predictions.jsonl.
+    Show which ones already have eval results and which ones don't.
+    Filter by min size (to skip empty/single-instance smoke tests).
+    """
+    s3 = boto3.client("s3", region_name=REGION)
+    min_size = args.min_size
+    only_unevaluated = args.unevaluated
+
+    # 1. Find all predictions files
+    paginator = s3.get_paginator("list_objects_v2")
+    predictions: list[dict] = []
+    for page in paginator.paginate(Bucket=S3_BUCKET):
+        for obj in page.get("Contents", []):
+            key = obj["Key"]
+            if key.endswith("predictions.jsonl"):
+                predictions.append({
+                    "key": key,
+                    "size": obj["Size"],
+                    "modified": str(obj["LastModified"]),
+                    "batch": key.split("/")[0],
+                })
+
+    # 2. Filter by size
+    predictions = [p for p in predictions if p["size"] >= min_size]
+    predictions.sort(key=lambda p: p["modified"])
+
+    # 3. Check which have eval_results.json
+    eval_done: set[str] = set()
+    for page in paginator.paginate(Bucket=S3_BUCKET):
+        for obj in page.get("Contents", []):
+            key = obj["Key"]
+            if key.endswith("eval_results.json"):
+                # eval-<batch>/eval_results.json → batch
+                batch = key.split("/")[0]
+                eval_done.add(batch)
+                if batch.startswith("eval-"):
+                    eval_done.add(batch[5:])  # also mark the batch itself
+
+    # 4. Count instances per predictions file
+    print(f"\n{'Batch':<50} {'Inst':>5} {'Size':>8} {'Eval':>6} {'Date':<20}")
+    print("─" * 95)
+    unevaluated = []
+    for p in predictions:
+        batch = p["batch"]
+        # Count instances by reading the file
+        try:
+            resp = s3.get_object(Bucket=S3_BUCKET, Key=p["key"])
+            lines = resp["Body"].read().decode().strip().split("\n")
+            inst_count = sum(1 for l in lines if l.strip())
+        except Exception:
+            inst_count = -1
+
+        has_eval = batch in eval_done or f"eval-{batch}" in eval_done
+        eval_str = "yes" if has_eval else "NO"
+        date_str = p["modified"][:16]
+
+        if only_unevaluated and has_eval:
+            continue
+
+        if not has_eval:
+            unevaluated.append({"batch": batch, "key": p["key"], "instances": inst_count})
+
+        print(f"{batch:<50} {inst_count:>5} {p['size']:>8} {eval_str:>6} {date_str:<20}")
+
+    print(f"\n[discover] {len(predictions)} predictions files (>= {min_size} bytes)")
+    print(f"[discover] {len(unevaluated)} unevaluated batches")
+
+    if unevaluated and not only_unevaluated:
+        print(f"\n[discover] unevaluated batch names (for --eval-only pipeline):")
+        for u in unevaluated:
+            if u["instances"] >= 3:  # skip tiny smoke tests
+                print(f"  {u['batch']}  ({u['instances']} instances)")
+
+
 # ── status ─────────────────────────────────────────────────────────────────────
 
 def cmd_status(args) -> None:
@@ -1816,6 +2024,10 @@ def main():
     p_pipeline.add_argument("--model", default=None)
     p_pipeline.add_argument("--skip-smoke", action="store_true",
                             help="Skip smoke test and go directly to batch")
+    p_pipeline.add_argument("--eval-only", action="store_true",
+                            help="Skip smoke + batch; eval existing S3 predictions only")
+    p_pipeline.add_argument("--eval-workers", type=int, default=4,
+                            help="Number of workers for eval task (default: 4)")
     p_pipeline.add_argument("--runbook-ack", action="store_true",
                             help="Required: confirms runbook was read this session")
 
@@ -1829,6 +2041,13 @@ def main():
 
     # summary — per-instance summary table grouped by repo
     sub.add_parser("summary", help="Show per-instance summary table grouped by repo")
+
+    # discover — scan S3 for all predictions and eval status
+    p_discover = sub.add_parser("discover", help="Scan S3 for all predictions and eval status")
+    p_discover.add_argument("--min-size", type=int, default=2000,
+                            help="Min predictions file size in bytes (default: 2000, filters out empty smoke tests)")
+    p_discover.add_argument("--unevaluated", "-u", action="store_true",
+                            help="Show only batches without eval results")
 
     # list-tasks — show currently running/pending ECS tasks
     sub.add_parser("list-tasks", help="List currently RUNNING/PENDING ECS tasks")
@@ -1869,6 +2088,8 @@ def main():
         cmd_backfill(args)
     elif args.cmd == "summary":
         cmd_summary(args)
+    elif args.cmd == "discover":
+        cmd_discover(args)
 
 
 if __name__ == "__main__":
