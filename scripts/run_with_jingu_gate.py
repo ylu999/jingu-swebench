@@ -37,6 +37,7 @@ from jingu_gate_bridge import evaluate_patch_from_traj, build_support_pool, run_
 from patch_reviewer import review_patch_bedrock, ReviewResult
 # B3: retry controller (failure → diagnosis → next strategy)
 from retry_controller import build_retry_plan, RetryPlan
+from f2p_failure_router import apply_f2p_override
 from strategy_logger import log_strategy_entry, make_entry as make_strategy_entry
 # B4: cognition gate (declaration-vs-patch consistency check)
 from declaration_extractor import extract_declaration, extract_last_agent_message
@@ -3427,6 +3428,25 @@ def run_with_jingu(instance_id: str, output_dir: Path, max_attempts: int = 3,
                                         control_action="ADJUST",
                                         principal_violations=retry_plan.principal_violations,
                                     )
+                        # ── p26 F2P failure router (SWE-bench specialized) ────────────────
+                        # Detect F2P_ALL_FAIL / F2P_PARTIAL from controlled_verify counts.
+                        # Overrides retry_plan.next_attempt_prompt with phase-reroute directive.
+                        # Architecture: swe-bench specialized — do not lift to generic until proven.
+                        _cv_tr = (jingu_body or {}).get("test_results", {})
+                        _f2p_controlled_passed = _cv_tr.get("controlled_passed", -1)
+                        _f2p_controlled_failed = _cv_tr.get("controlled_failed", -1)
+                        if _f2p_controlled_passed >= 0 or _f2p_controlled_failed >= 0:
+                            retry_plan, _f2p_class = apply_f2p_override(
+                                retry_plan=retry_plan,
+                                controlled_passed=_f2p_controlled_passed,
+                                controlled_failed=_f2p_controlled_failed,
+                                fail_to_pass_tests=fail_to_pass,
+                                attempt=attempt,
+                            )
+                            print(f"    [f2p-router] class={_f2p_class} "
+                                  f"controlled_passed={_f2p_controlled_passed} "
+                                  f"controlled_failed={_f2p_controlled_failed}")
+                        # ─────────────────────────────────────────────────────────────────
                         print(f"    [retry-ctrl] action={retry_plan.control_action}  "
                               f"root_causes={retry_plan.root_causes}")
                         print(f"    [retry-ctrl] must_not_do={retry_plan.must_not_do}")
