@@ -31,7 +31,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-from governance_pack import ExecutionContext, GovernancePack, RouteDecision
+from governance_pack import ExecutionContext, GovernancePack, RouteDecision  # re-exported for consumers
 from retry_controller import RetryPlan
 
 
@@ -108,6 +108,7 @@ def run_governance_packs(ctx: ExecutionContext) -> Optional[RouteDecision]:
         if decision.action == "REROUTE":
             return decision
 
+    print(f"    [governance] all packs returned CONTINUE — no reroute")
     return None
 
 
@@ -149,7 +150,7 @@ def override_retry_plan_from_pack(
         must_do = retry_plan.must_do
         must_not_do = retry_plan.must_not_do
 
-    return RetryPlan(
+    updated = RetryPlan(
         root_causes=retry_plan.root_causes + [
             f"governance_pack={decision.pack_name}",
             f"target_phase={decision.target_phase}",
@@ -163,3 +164,11 @@ def override_retry_plan_from_pack(
         control_action="ADJUST",
         principal_violations=retry_plan.principal_violations,
     )
+    contains_hint = "[JINGU ROUTING]" in updated.next_attempt_prompt
+    print(
+        f"    [governance] retry_plan_overridden_by_pack={decision.pack_name} "
+        f"original_action={retry_plan.control_action} new_action=ADJUST "
+        f"original_phase=EXECUTION new_phase={decision.target_phase} "
+        f"next_attempt_prompt_contains_routing_hint={contains_hint}"
+    )
+    return updated
