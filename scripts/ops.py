@@ -972,8 +972,9 @@ def _wait_for_task(task_id: str, label: str, poll_interval: int = 30, timeout_s:
 
 
 def _launch_ecs_task(batch_name: str, instance_ids: list[str], max_attempts: int,
-                     workers: int, mode: str = "jingu", model: str | None = None) -> str:
-    """Launch an ECS run task and return task_id."""
+                     workers: int, mode: str = "jingu", model: str | None = None,
+                     max_retries: int = 10, retry_interval: int = 120) -> str:
+    """Launch an ECS run task and return task_id. Retries on resource failures."""
     ecs = boto3.client("ecs", region_name=REGION)
     output_path = f"/app/results/{batch_name}"
     cmd_parts = [
@@ -987,21 +988,37 @@ def _launch_ecs_task(batch_name: str, instance_ids: list[str], max_attempts: int
     env = [{"name": "BATCH_NAME", "value": batch_name}]
     if model:
         env.append({"name": "JINGU_MODEL", "value": model})
-    resp = ecs.run_task(
-        cluster=ECS_CLUSTER,
-        taskDefinition=ECS_TASK_DEF,
-        launchType="EC2",
-        overrides={"containerOverrides": [{"name": "runner", "command": cmd_parts, "environment": env}]},
-    )
-    failures = resp.get("failures", [])
-    if failures:
+    overrides = {"containerOverrides": [{"name": "runner", "command": cmd_parts, "environment": env}]}
+
+    for attempt in range(max_retries + 1):
+        resp = ecs.run_task(
+            cluster=ECS_CLUSTER,
+            taskDefinition=ECS_TASK_DEF,
+            launchType="EC2",
+            overrides=overrides,
+        )
+        failures = resp.get("failures", [])
+        if not failures:
+            return resp["tasks"][0]["taskArn"].split("/")[-1]
+        if _is_resource_failure(failures) and attempt < max_retries:
+            print(f"[pipeline] resource unavailable (attempt {attempt+1}/{max_retries+1}), "
+                  f"retrying in {retry_interval}s...", flush=True)
+            time.sleep(retry_interval)
+            continue
         print(f"[pipeline] FAILED to launch: {failures}", flush=True)
         sys.exit(1)
-    return resp["tasks"][0]["taskArn"].split("/")[-1]
+    # unreachable
+    sys.exit(1)
 
 
-def _launch_eval_task(predictions_key: str, run_id: str, workers: int = 4) -> str:
-    """Launch an ECS eval task and return task_id."""
+def _is_resource_failure(failures: list[dict]) -> bool:
+    """Check if ECS run_task failures are resource-related (retryable)."""
+    return any("RESOURCE:" in f.get("reason", "") for f in failures)
+
+
+def _launch_eval_task(predictions_key: str, run_id: str, workers: int = 4,
+                      max_retries: int = 10, retry_interval: int = 120) -> str:
+    """Launch an ECS eval task and return task_id. Retries on resource failures."""
     ecs = boto3.client("ecs", region_name=REGION)
     output_path = f"/app/results/{run_id}"
     cmd_parts = [
@@ -1012,21 +1029,31 @@ def _launch_eval_task(predictions_key: str, run_id: str, workers: int = 4) -> st
         "--dataset", "SWE-bench/SWE-bench_Verified",
         "--output", output_path,
     ]
-    resp = ecs.run_task(
-        cluster=ECS_CLUSTER,
-        taskDefinition=ECS_TASK_DEF,
-        launchType="EC2",
-        overrides={"containerOverrides": [{
-            "name": "runner",
-            "command": cmd_parts,
-            "environment": [{"name": "BATCH_NAME", "value": run_id}],
-        }]},
-    )
-    failures = resp.get("failures", [])
-    if failures:
+    overrides = {"containerOverrides": [{
+        "name": "runner",
+        "command": cmd_parts,
+        "environment": [{"name": "BATCH_NAME", "value": run_id}],
+    }]}
+
+    for attempt in range(max_retries + 1):
+        resp = ecs.run_task(
+            cluster=ECS_CLUSTER,
+            taskDefinition=ECS_TASK_DEF,
+            launchType="EC2",
+            overrides=overrides,
+        )
+        failures = resp.get("failures", [])
+        if not failures:
+            return resp["tasks"][0]["taskArn"].split("/")[-1]
+        if _is_resource_failure(failures) and attempt < max_retries:
+            print(f"[pipeline] resource unavailable (attempt {attempt+1}/{max_retries+1}), "
+                  f"retrying in {retry_interval}s...", flush=True)
+            time.sleep(retry_interval)
+            continue
         print(f"[pipeline] FAILED to launch eval: {failures}", flush=True)
         sys.exit(1)
-    return resp["tasks"][0]["taskArn"].split("/")[-1]
+    # unreachable
+    sys.exit(1)
 
 
 def _parse_resolved_from_cw(task_id: str) -> tuple[int, int]:
