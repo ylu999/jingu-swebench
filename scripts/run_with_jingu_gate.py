@@ -2814,26 +2814,39 @@ def run_agent(
             # Priority: final verify (step=-1) > last inner-loop verify > nothing.
             # verify_history[-1] is the end-of-attempt verify (most accurate).
             _final_cv = None
+            _fallback_cv = None
             if _monitor.verify_history:
                 # Use the last controlled_fail_to_pass result (final verify or last mid-run)
                 for _vh in reversed(_monitor.verify_history):
                     if _vh["kind"] == "controlled_fail_to_pass":
                         _final_cv = _vh
                         break
-            if _final_cv:
+                # Fallback: if no controlled_fail_to_pass but controlled_error exists,
+                # treat as F2P_ALL_FAIL: controlled_passed=0, controlled_failed=N.
+                # This allows governance pack to classify and reroute these cases.
+                if _final_cv is None:
+                    for _vh in reversed(_monitor.verify_history):
+                        if _vh["kind"] == "controlled_error" and _vh.get("tests_failed", 0) > 0:
+                            _fallback_cv = _vh
+                            break
+            _cv_source = _final_cv or _fallback_cv
+            if _cv_source:
                 cv_flat = {
-                    "verification_kind": _final_cv["kind"],
-                    "tests_passed": _final_cv["tests_passed"],
-                    "tests_failed": _final_cv["tests_failed"],
-                    "exit_code": _final_cv["exit_code"],
-                    "elapsed_ms": _final_cv["elapsed_ms"],
-                    "step": _final_cv["step"],
+                    "verification_kind": _cv_source["kind"],
+                    "tests_passed": _cv_source["tests_passed"],
+                    "tests_failed": _cv_source["tests_failed"],
+                    "exit_code": _cv_source["exit_code"],
+                    "elapsed_ms": _cv_source["elapsed_ms"],
+                    "step": _cv_source["step"],
                 }
                 jingu_body["controlled_verify"] = cv_flat
                 jingu_body["test_results"]["ran_tests"] = True
-                jingu_body["test_results"]["controlled_passed"] = _final_cv["tests_passed"]
-                jingu_body["test_results"]["controlled_failed"] = _final_cv["tests_failed"]
-                jingu_body["test_results"]["controlled_exit_code"] = _final_cv["exit_code"]
+                jingu_body["test_results"]["controlled_passed"] = _cv_source["tests_passed"]
+                jingu_body["test_results"]["controlled_failed"] = _cv_source["tests_failed"]
+                jingu_body["test_results"]["controlled_exit_code"] = _cv_source["exit_code"]
+                if _fallback_cv and _final_cv is None:
+                    print(f"    [cv-fallback] F2P_ALL_FAIL inferred from controlled_error: "
+                          f"passed={_cv_source['tests_passed']} failed={_cv_source['tests_failed']}")
             # Store full verify_history for observability
             jingu_body["verify_history"] = _monitor.verify_history
             # p190: per-phase records — one entry per VerdictAdvance during this attempt
