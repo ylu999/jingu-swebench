@@ -1405,11 +1405,13 @@ _KNOWN_EVAL_RESULTS: dict[str, tuple[int, int]] = {
 }
 
 
-def _parse_traj_for_accepted(traj: dict) -> tuple[bool, int]:
+def _parse_traj_for_accepted(traj: dict) -> tuple[bool, int, float, int]:
     """
-    Parse a traj.json to determine (accepted, attempt_count).
+    Parse a traj.json to determine (accepted, attempt_count, cost_usd, api_calls).
     accepted = True if exit_status is 'submitted' (case-insensitive).
     attempt_count = number of attempt_* keys in traj or info section.
+    cost_usd = from info.model_stats.instance_cost.
+    api_calls = from info.model_stats.api_calls.
     """
     exit_status = traj.get("exit_status", "")
     # Also check nested info dict
@@ -1422,7 +1424,12 @@ def _parse_traj_for_accepted(traj: dict) -> tuple[bool, int]:
     if attempt_count == 0:
         attempt_count = 1  # at minimum 1 attempt ran if traj exists
 
-    return accepted, attempt_count
+    # Cost and API calls from model_stats
+    ms = traj.get("info", {}).get("model_stats", {})
+    cost_usd = ms.get("instance_cost", 0.0)
+    api_calls = ms.get("api_calls", 0)
+
+    return accepted, attempt_count, cost_usd, api_calls
 
 
 def _get_run_report_meta(s3, batch_name: str) -> dict:
@@ -1513,7 +1520,7 @@ def cmd_backfill(args) -> None:
                 break
 
         # Load traj files for this batch
-        traj_accepted: dict[str, tuple[bool, int]] = {}  # instance_id → (accepted, attempts)
+        traj_data: dict[str, tuple[bool, int, float, int]] = {}  # iid → (accepted, attempts, cost, calls)
         paginator = s3.get_paginator("list_objects_v2")
         for attempt_prefix_page in paginator.paginate(
             Bucket=S3_BUCKET, Prefix=f"{batch_name}/attempt_1/"
@@ -1530,14 +1537,14 @@ def cmd_backfill(args) -> None:
                 try:
                     traj_obj = s3.get_object(Bucket=S3_BUCKET, Key=key)
                     traj = json.loads(traj_obj["Body"].read())
-                    accepted, attempts = _parse_traj_for_accepted(traj)
-                    traj_accepted[iid] = (accepted, attempts)
+                    accepted, attempts, cost, calls = _parse_traj_for_accepted(traj)
+                    traj_data[iid] = (accepted, attempts, cost, calls)
                 except Exception as e:
                     print(f"[backfill]   warning: could not read traj for {iid}: {e}", flush=True)
 
         # Merge into per-instance records
         for iid in batch_instances:
-            accepted, attempts = traj_accepted.get(iid, (False, 1))
+            accepted, attempts, inst_cost, inst_calls = traj_data.get(iid, (False, 1, 0.0, 0))
             if eval_resolved_set or eval_unresolved_set:
                 if iid in eval_resolved_set:
                     eval_resolved = True
@@ -1554,6 +1561,8 @@ def cmd_backfill(args) -> None:
                 "accepted": accepted,
                 "attempts": attempts,
                 "eval_resolved": eval_resolved,
+                "cost_usd": round(inst_cost, 4),
+                "api_calls": inst_calls,
             }
 
             if iid not in records:
@@ -1644,6 +1653,7 @@ def cmd_summary(args) -> None:
     repo_stats: dict[str, dict] = defaultdict(lambda: {
         "ran": 0, "accepted": 0, "not_accepted": 0,
         "eval_resolved": 0, "eval_not_resolved": 0, "eval_unknown": 0,
+        "total_runs": 0, "total_cost": 0.0,
     })
 
     for iid, r in records.items():
@@ -1651,6 +1661,10 @@ def cmd_summary(args) -> None:
         repo = re.sub(r"-\d+$", "", iid)
         stats = repo_stats[repo]
         stats["ran"] += 1
+        runs = r.get("runs", [])
+        stats["total_runs"] += len(runs)
+        for run in runs:
+            stats["total_cost"] += run.get("cost_usd", 0.0)
         if r.get("accepted"):
             stats["accepted"] += 1
         else:
@@ -1663,24 +1677,32 @@ def cmd_summary(args) -> None:
         else:
             stats["eval_unknown"] += 1
 
-    print(f"\n{'Repo':<35} {'Ran':>5} {'Acc':>5} {'!Acc':>5} {'Res':>5} {'!Res':>5} {'?':>3}", flush=True)
-    print("─" * 70, flush=True)
+    print(f"\n{'Repo':<35} {'Inst':>5} {'Runs':>5} {'Acc':>5} {'!Acc':>5} "
+          f"{'Res':>5} {'!Res':>5} {'?':>3} {'Cost':>8}", flush=True)
+    print("─" * 82, flush=True)
     total_ran = total_acc = total_not = total_res = total_nres = total_unk = 0
+    total_runs = 0
+    total_cost = 0.0
     for repo, s in sorted(repo_stats.items(), key=lambda x: -x[1]["ran"]):
-        print(f"{repo:<35} {s['ran']:>5} {s['accepted']:>5} {s['not_accepted']:>5} "
-              f"{s['eval_resolved']:>5} {s['eval_not_resolved']:>5} {s['eval_unknown']:>3}")
+        print(f"{repo:<35} {s['ran']:>5} {s['total_runs']:>5} {s['accepted']:>5} {s['not_accepted']:>5} "
+              f"{s['eval_resolved']:>5} {s['eval_not_resolved']:>5} {s['eval_unknown']:>3} "
+              f"${s['total_cost']:>7.1f}")
         total_ran += s["ran"]
+        total_runs += s["total_runs"]
         total_acc += s["accepted"]
         total_not += s["not_accepted"]
         total_res += s["eval_resolved"]
         total_nres += s["eval_not_resolved"]
         total_unk += s["eval_unknown"]
-    print("─" * 70)
-    print(f"{'TOTAL':<35} {total_ran:>5} {total_acc:>5} {total_not:>5} "
-          f"{total_res:>5} {total_nres:>5} {total_unk:>3}")
-    print(f"\n[summary] {len(records)} unique instances across {len(repo_stats)} repos")
-    print(f"[summary] columns: Ran=ran, Acc=accepted, !Acc=not accepted, "
-          f"Res=eval resolved, !Res=eval not resolved, ?=eval unknown")
+        total_cost += s["total_cost"]
+    print("─" * 82)
+    print(f"{'TOTAL':<35} {total_ran:>5} {total_runs:>5} {total_acc:>5} {total_not:>5} "
+          f"{total_res:>5} {total_nres:>5} {total_unk:>3} "
+          f"${total_cost:>7.1f}")
+    print(f"\n[summary] {len(records)} unique instances across {len(repo_stats)} repos, "
+          f"{total_runs} total runs, ${total_cost:.2f} total cost")
+    print(f"[summary] columns: Inst=unique instances, Runs=total runs, Acc=accepted, !Acc=not accepted, "
+          f"Res=eval resolved, !Res=not resolved, ?=unknown, Cost=total USD")
     print()
 
 
