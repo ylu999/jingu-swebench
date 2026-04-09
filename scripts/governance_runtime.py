@@ -166,9 +166,10 @@ def override_retry_plan_from_pack(
     )
     contains_hint = "[JINGU ROUTING]" in updated.next_attempt_prompt
     print(
-        f"    [governance] retry_plan_overridden_by_pack={decision.pack_name} "
-        f"original_action={retry_plan.control_action} new_action=ADJUST "
-        f"original_phase=EXECUTION new_phase={decision.target_phase} "
-        f"next_attempt_prompt_contains_routing_hint={contains_hint}"
+        f"    [governance] reroute_applied=true "
+        f"pack={decision.pack_name} "
+        f"retry_plan_before={retry_plan.control_action} retry_plan_after=ADJUST "
+        f"phase_before=EXECUTION phase_after={decision.target_phase} "
+        f"routing_hint_present={contains_hint}"
     )
     return updated
