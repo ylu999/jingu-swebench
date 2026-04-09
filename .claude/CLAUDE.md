@@ -25,6 +25,38 @@ STOP — 先读 .claude/smoke-test-runbook.md
 STOP — 未经用户批准，不得 launch 超过 3 个 instance
 ```
 
+## Per-Instance 进度追踪
+
+历史数据已统一存储在 S3：`s3://jingu-swebench-results/pipeline-results/instances/<instance_id>.json`
+
+**查看汇总：**
+```bash
+python scripts/ops.py summary        # repo 维度汇总表
+python scripts/ops.py history        # batch 维度历史表（resolved rate）
+```
+
+**backfill（新 batch 跑完后同步数据）：**
+```bash
+python scripts/ops.py backfill       # 全量 backfill 所有历史 batch
+python scripts/ops.py backfill --batches batch-pXX-name   # 只处理指定 batch
+```
+
+**ops.py 主要命令速查：**
+| 命令 | 作用 |
+|------|------|
+| `ops.py build` | Build + push Docker 镜像 |
+| `ops.py smoke --batch-name NAME --instance-ids ID` | Launch + 实时 tail |
+| `ops.py run --batch-name NAME --instance-ids IDs` | Launch（不 tail） |
+| `ops.py watch --batch-name NAME` | Attach tail 到已跑 batch |
+| `ops.py watch --batch-name NAME --instance-id ID` | 只 tail 单个 instance |
+| `ops.py status --task-id ID` | 查 ECS task 状态（只支持近期 task） |
+| `ops.py eval --predictions-path KEY --run-id ID` | 跑 SWE-bench eval |
+| `ops.py backfill` | 把所有历史 batch traj 写入 per-instance records |
+| `ops.py summary` | 显示 per-instance 汇总表（按 repo） |
+| `ops.py history` | 显示 pipeline 历史（resolved rate 趋势） |
+
+---
+
 不读 runbook 直接操作 = 必然犯错。历史案例：
 - 手动 SSM build 没 push ECR → ECS 用旧镜像 → fix 不生效，无报错
 - instance IDs 拼成单个字符串 → ValueError，batch 0 秒 exit=1

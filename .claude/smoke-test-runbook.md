@@ -280,6 +280,41 @@ python scripts/ops.py status --task-id <task-id>
 
 ---
 
+## 查看进度（Per-Instance 追踪）
+
+所有历史数据统一存储在 `s3://jingu-swebench-results/pipeline-results/instances/`。
+
+```bash
+# repo 维度汇总表（ran / accepted / not accepted）
+python scripts/ops.py summary
+
+# batch 历史表（resolved rate 趋势）
+python scripts/ops.py history
+
+# 新 batch 跑完后，同步 traj 数据进 per-instance records
+python scripts/ops.py backfill
+# 只处理指定 batch：
+python scripts/ops.py backfill --batches batch-p26-xxx
+```
+
+**per-instance record 结构：**
+```json
+{
+  "instance_id": "django__django-10097",
+  "last_batch": "batch-p25-b10",
+  "last_commit": "5bee637a1b36",
+  "accepted": true,
+  "runs": [
+    {"batch": "...", "git_commit": "...", "accepted": true, "attempts": 1},
+    ...
+  ]
+}
+```
+
+**注意：** `eval_resolved` per-instance 数据当前为 null。batch 级别 eval 数据（如 17/30）存在各 run 的 `batch_eval_resolved/total` 字段中。
+
+---
+
 ## 读结果
 
 ### 从 S3 下载
