@@ -928,6 +928,7 @@ def cmd_watch(args) -> None:
 # ── pipeline ───────────────────────────────────────────────────────────────────
 
 PIPELINE_HISTORY_KEY = "pipeline-results/history.json"
+INSTANCE_RECORDS_PREFIX = "pipeline-results/instances"
 
 # 30 standard django instances used for all pipeline runs
 PIPELINE_DEFAULT_INSTANCES = [
@@ -1279,6 +1280,292 @@ def cmd_history(args) -> None:
     print()
 
 
+# ── backfill ───────────────────────────────────────────────────────────────────
+
+# All production batch prefixes to backfill (chronological order)
+_BACKFILL_BATCHES = [
+    "batch-p8-verified-b1",
+    "batch-p9-admission-b1",
+    "batch-p10-scan-fixed",
+    "batch-p11-gd8",
+    "batch-p11-gov-pack",
+    "batch-p12-gd9",
+    "batch-p13-gd9b",
+    "batch-p14-gd10",
+    "batch-p15-ylite",
+    "batch-p16-ylite",
+    "batch-p18-attempt-terminal",
+    "batch-p19-bugABC",
+    "batch-p20",
+    "batch-p21",
+    "batch-p22",
+    "batch-p25-b2",
+    "batch-p25-b3",
+    "batch-p25-b4",
+    "batch-p25-b5",
+    "batch-p25-b6",
+    "batch-p25-b7",
+    "batch-p25-b8",
+    "batch-p25-b10",
+]
+
+# Eval results known from CloudWatch (batch → resolved/total)
+_KNOWN_EVAL_RESULTS: dict[str, tuple[int, int]] = {
+    "batch-p11-gov-pack": (17, 30),
+    "batch-p25-b10": (17, 30),
+}
+
+
+def _parse_traj_for_accepted(traj: dict) -> tuple[bool, int]:
+    """
+    Parse a traj.json to determine (accepted, attempt_count).
+    accepted = True if exit_status is 'submitted' (case-insensitive).
+    attempt_count = number of attempt_* keys in traj or info section.
+    """
+    exit_status = traj.get("exit_status", "")
+    # Also check nested info dict
+    if not exit_status:
+        exit_status = traj.get("info", {}).get("exit_status", "")
+    accepted = str(exit_status).lower() == "submitted"
+
+    # Count attempts from traj keys like attempt_1, attempt_2 ...
+    attempt_count = sum(1 for k in traj if re.match(r"^attempt_\d+$", k))
+    if attempt_count == 0:
+        attempt_count = 1  # at minimum 1 attempt ran if traj exists
+
+    return accepted, attempt_count
+
+
+def _get_run_report_meta(s3, batch_name: str) -> dict:
+    """Read commit + cost from run_report.json for a batch. Returns {} on miss."""
+    try:
+        resp = s3.get_object(Bucket=S3_BUCKET, Key=f"{batch_name}/run_report.json")
+        report = json.loads(resp["Body"].read())
+        commit = report.get("execution_identity", {}).get("git_commit", "unknown")[:12]
+        cost = report.get("model_usage", {}).get("total_cost_usd", 0.0)
+        return {"git_commit": commit, "cost_usd": cost}
+    except Exception:
+        return {}
+
+
+def _write_instance_record(s3, instance_id: str, record: dict) -> None:
+    key = f"{INSTANCE_RECORDS_PREFIX}/{instance_id}.json"
+    s3.put_object(
+        Bucket=S3_BUCKET,
+        Key=key,
+        Body=json.dumps(record, indent=2).encode(),
+        ContentType="application/json",
+    )
+
+
+def _read_instance_record(s3, instance_id: str) -> dict:
+    key = f"{INSTANCE_RECORDS_PREFIX}/{instance_id}.json"
+    try:
+        resp = s3.get_object(Bucket=S3_BUCKET, Key=key)
+        return json.loads(resp["Body"].read())
+    except Exception:
+        return {}
+
+
+def cmd_backfill(args) -> None:
+    """
+    Backfill per-instance records from all historical batches.
+
+    For each batch, reads traj files to determine accepted/attempt_count,
+    then writes/merges into pipeline-results/instances/<instance_id>.json.
+    Eval resolved info is applied from known results (_KNOWN_EVAL_RESULTS).
+    """
+    s3 = boto3.client("s3", region_name=REGION)
+    dry_run = getattr(args, "dry_run", False)
+
+    batches = getattr(args, "batches", None) or _BACKFILL_BATCHES
+    print(f"[backfill] processing {len(batches)} batches...", flush=True)
+    if dry_run:
+        print("[backfill] DRY RUN — no writes", flush=True)
+
+    # instance_id → merged record (built across all batches)
+    records: dict[str, dict] = {}
+
+    for batch_name in batches:
+        meta = _get_run_report_meta(s3, batch_name)
+        git_commit = meta.get("git_commit", "unknown")
+        cost_usd = meta.get("cost_usd", 0.0)
+
+        # Load predictions.jsonl to get the instance list for this batch
+        try:
+            obj = s3.get_object(Bucket=S3_BUCKET, Key=f"{batch_name}/jingu-predictions.jsonl")
+            pred_lines = obj["Body"].read().decode().strip().split("\n")
+            batch_instances = []
+            for line in pred_lines:
+                if line.strip():
+                    d = json.loads(line)
+                    iid = d.get("instance_id", "")
+                    if iid:
+                        batch_instances.append(iid)
+        except Exception as e:
+            print(f"[backfill] {batch_name}: no predictions.jsonl ({e})", flush=True)
+            continue
+
+        print(f"[backfill] {batch_name}: {len(batch_instances)} instances  commit={git_commit}", flush=True)
+
+        # Determine per-instance resolved status for this batch
+        eval_resolved_set: set[str] = set()
+        eval_known = _KNOWN_EVAL_RESULTS.get(batch_name)
+
+        # Load traj files for this batch
+        traj_accepted: dict[str, tuple[bool, int]] = {}  # instance_id → (accepted, attempts)
+        paginator = s3.get_paginator("list_objects_v2")
+        for attempt_prefix_page in paginator.paginate(
+            Bucket=S3_BUCKET, Prefix=f"{batch_name}/attempt_1/"
+        ):
+            for obj_meta in attempt_prefix_page.get("Contents", []):
+                key = obj_meta["Key"]
+                if not key.endswith(".traj.json"):
+                    continue
+                # Path: <batch>/attempt_1/<instance_id>/<instance_id>.traj.json
+                parts = key.split("/")
+                if len(parts) < 4:
+                    continue
+                iid = parts[2]  # <instance_id>
+                try:
+                    traj_obj = s3.get_object(Bucket=S3_BUCKET, Key=key)
+                    traj = json.loads(traj_obj["Body"].read())
+                    accepted, attempts = _parse_traj_for_accepted(traj)
+                    traj_accepted[iid] = (accepted, attempts)
+                except Exception as e:
+                    print(f"[backfill]   warning: could not read traj for {iid}: {e}", flush=True)
+
+        # Merge into per-instance records
+        for iid in batch_instances:
+            accepted, attempts = traj_accepted.get(iid, (False, 1))
+            eval_resolved = iid in eval_resolved_set if eval_resolved_set else None
+
+            run_entry = {
+                "batch": batch_name,
+                "git_commit": git_commit,
+                "accepted": accepted,
+                "attempts": attempts,
+                "eval_resolved": eval_resolved,
+            }
+
+            if iid not in records:
+                records[iid] = {
+                    "instance_id": iid,
+                    "last_batch": batch_name,
+                    "last_commit": git_commit,
+                    "accepted": accepted,
+                    "eval_resolved": eval_resolved,
+                    "runs": [run_entry],
+                }
+            else:
+                # Merge: add this run, update last_batch
+                records[iid]["runs"].append(run_entry)
+                records[iid]["last_batch"] = batch_name
+                records[iid]["last_commit"] = git_commit
+                # accepted = True if any run was accepted
+                if accepted:
+                    records[iid]["accepted"] = True
+                # eval_resolved: use latest known value
+                if eval_resolved is not None:
+                    records[iid]["eval_resolved"] = eval_resolved
+
+    # Apply known eval results (batch-level → per-instance, approximate)
+    # For batches where we know resolved/total, mark accepted instances as resolved
+    # Note: without per-instance eval data we can only say "batch resolved N/30"
+    # We store batch-level eval on the record for known batches
+    for batch_name, (resolved, total) in _KNOWN_EVAL_RESULTS.items():
+        for iid, record in records.items():
+            for run in record["runs"]:
+                if run["batch"] == batch_name:
+                    run["batch_eval_resolved"] = resolved
+                    run["batch_eval_total"] = total
+            # Store on top-level for last known eval
+            if record["last_batch"] == batch_name:
+                record["batch_eval_resolved"] = resolved
+                record["batch_eval_total"] = total
+
+    # Write to S3
+    print(f"\n[backfill] writing {len(records)} instance records...", flush=True)
+    written = 0
+    for iid, record in records.items():
+        if not dry_run:
+            _write_instance_record(s3, iid, record)
+        written += 1
+        if written % 10 == 0:
+            print(f"[backfill]   {written}/{len(records)}...", flush=True)
+
+    print(f"[backfill] done. wrote {written} records to s3://{S3_BUCKET}/{INSTANCE_RECORDS_PREFIX}/", flush=True)
+
+    # Print summary
+    total_accepted = sum(1 for r in records.values() if r.get("accepted"))
+    total_runs = sum(len(r["runs"]) for r in records.values())
+    print(f"\n[backfill] Summary:", flush=True)
+    print(f"  unique instances: {len(records)}", flush=True)
+    print(f"  total runs:       {total_runs}", flush=True)
+    print(f"  ever accepted:    {total_accepted}/{len(records)}", flush=True)
+
+
+def cmd_summary(args) -> None:
+    """
+    Show per-instance summary table grouped by repo.
+    Reads from pipeline-results/instances/ in S3.
+    """
+    s3 = boto3.client("s3", region_name=REGION)
+
+    # Load all instance records
+    records = {}
+    paginator = s3.get_paginator("list_objects_v2")
+    for page in paginator.paginate(Bucket=S3_BUCKET, Prefix=f"{INSTANCE_RECORDS_PREFIX}/"):
+        for obj_meta in page.get("Contents", []):
+            key = obj_meta["Key"]
+            if not key.endswith(".json"):
+                continue
+            try:
+                resp = s3.get_object(Bucket=S3_BUCKET, Key=key)
+                r = json.loads(resp["Body"].read())
+                records[r["instance_id"]] = r
+            except Exception:
+                pass
+
+    if not records:
+        print("[summary] no instance records found. Run: python scripts/ops.py backfill")
+        return
+
+    # Group by repo prefix (e.g. django__django-10097 → django__django)
+    from collections import defaultdict
+    repo_stats: dict[str, dict] = defaultdict(lambda: {
+        "ran": 0, "accepted": 0, "not_accepted": 0,
+        "eval_known": 0, "eval_resolved": 0,
+    })
+
+    for iid, r in records.items():
+        # repo = everything before the last hyphen+digits
+        repo = re.sub(r"-\d+$", "", iid)
+        stats = repo_stats[repo]
+        stats["ran"] += 1
+        if r.get("accepted"):
+            stats["accepted"] += 1
+        else:
+            stats["not_accepted"] += 1
+        if r.get("batch_eval_resolved") is not None:
+            stats["eval_known"] += 1
+            # Per-instance eval not available yet — skip resolved column
+
+    print(f"\n{'Repo':<35} {'Ran':>5} {'Accepted':>10} {'Not Acc':>9}", flush=True)
+    print("─" * 65, flush=True)
+    total_ran = total_acc = total_not = 0
+    for repo, s in sorted(repo_stats.items(), key=lambda x: -x[1]["ran"]):
+        print(f"{repo:<35} {s['ran']:>5} {s['accepted']:>10} {s['not_accepted']:>9}")
+        total_ran += s["ran"]
+        total_acc += s["accepted"]
+        total_not += s["not_accepted"]
+    print("─" * 65)
+    print(f"{'TOTAL':<35} {total_ran:>5} {total_acc:>10} {total_not:>9}")
+    print(f"\n[summary] {len(records)} unique instances across {len(repo_stats)} repos")
+    print(f"[summary] eval per-instance data: not yet available (batch-level only)")
+    print()
+
+
 # ── status ─────────────────────────────────────────────────────────────────────
 
 def cmd_status(args) -> None:
@@ -1395,6 +1682,14 @@ def main():
     # history — show pipeline run history
     sub.add_parser("history", help="Show pipeline run history (resolved rates)")
 
+    # backfill — populate per-instance records from all historical batches
+    p_backfill = sub.add_parser("backfill", help="Backfill per-instance records from historical batches")
+    p_backfill.add_argument("--dry-run", action="store_true", help="Parse only, don't write to S3")
+    p_backfill.add_argument("--batches", nargs="+", default=None, help="Specific batch prefixes to process")
+
+    # summary — per-instance summary table grouped by repo
+    sub.add_parser("summary", help="Show per-instance summary table grouped by repo")
+
     # list-tasks — show currently running/pending ECS tasks
     sub.add_parser("list-tasks", help="List currently RUNNING/PENDING ECS tasks")
 
@@ -1430,6 +1725,10 @@ def main():
         cmd_logs(args)
     elif args.cmd == "status":
         cmd_status(args)
+    elif args.cmd == "backfill":
+        cmd_backfill(args)
+    elif args.cmd == "summary":
+        cmd_summary(args)
 
 
 if __name__ == "__main__":
