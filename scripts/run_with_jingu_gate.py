@@ -44,6 +44,7 @@ from governance_runtime import (
     ExecutionContext as GovExecutionContext,
 )
 from swebench_failure_reroute_pack import SWEBENCH_FAILURE_REROUTE_PACK
+from phase_record_pack import PHASE_RECORD_PACK
 from strategy_logger import log_strategy_entry, make_entry as make_strategy_entry
 # B4: cognition gate (declaration-vs-patch consistency check)
 from declaration_extractor import extract_declaration, extract_last_agent_message
@@ -110,6 +111,7 @@ STRATEGY_TABLE_PATH = os.environ.get("STRATEGY_TABLE_PATH")  # e.g. /root/result
 # Install packs at module load. Each pack declares its 5 onboarding steps.
 # Missing steps are logged as warnings (v0). Future: hard error.
 install_governance_pack(SWEBENCH_FAILURE_REROUTE_PACK)
+install_governance_pack(PHASE_RECORD_PACK)
 
 # ── Execution Identity (RT1/RT6: artifact provenance) ─────────────────────────
 
@@ -1074,6 +1076,90 @@ def _step_cp_update_and_verdict(
             pass
 
 
+# ── Per-step structure validation (p207-P2) ──────────────────────────────────
+# Required structured fields per phase, derived from phase_prompt.py templates.
+# Keys are phase names (uppercase), values are lists of field markers to check.
+# Check is lightweight: looks for "FIELD_NAME:" in agent output (not full parsing).
+PHASE_REQUIRED_FIELDS: dict[str, list[str]] = {
+    "UNDERSTAND": ["PROBLEM_STATEMENT", "EXPECTED_BEHAVIOR", "ACTUAL_BEHAVIOR", "SCOPE"],
+    "OBSERVE":    ["EVIDENCE"],
+    "ANALYZE":    ["ROOT_CAUSE", "EVIDENCE", "CAUSAL_CHAIN"],
+    "DECIDE":     ["OPTIONS", "SELECTED", "CONSTRAINTS"],
+    "EXECUTE":    ["PLAN", "CHANGE_SCOPE"],
+    "JUDGE":      ["VERDICT", "TEST_RESULTS", "CONFIDENCE"],
+}
+
+
+def _step_check_structure(
+    agent_self,
+    *,
+    cp_state_holder: "list | None",
+    state: "StepMonitorState",
+    latest_assistant_text: str,
+) -> None:
+    """
+    p207-P2: per-step structure validation with correction hints.
+
+    After each agent step, check if the current phase's required structured fields
+    are present in the agent's latest output. If missing, inject a SOFT correction
+    hint into the next step's context.
+
+    Design decisions:
+    - Check ONLY the current phase's required fields (not all fields)
+    - Correction is a HINT (soft), not a REJECT (hard)
+    - Only inject correction ONCE per missing field per attempt (don't spam)
+    - Uses state._injected_signals with key "structure:<FIELD>" for dedup
+    - Log format: [structure-check] phase=X missing=FIELD injected=true|dedup
+
+    Does not block execution. Exception-safe — failure must not crash main flow.
+    """
+    try:
+        _cp_s = cp_state_holder[0] if cp_state_holder is not None else state.cp_state
+        _phase = str(_cp_s.phase).upper()
+
+        required = PHASE_REQUIRED_FIELDS.get(_phase)
+        if not required:
+            return  # unknown phase or no requirements — skip silently
+
+        if not latest_assistant_text:
+            return  # no output to check — skip
+
+        # Lightweight check: look for "FIELD_NAME:" pattern in output
+        missing: list[str] = []
+        for field in required:
+            if f"{field}:" not in latest_assistant_text and f"{field.lower()}:" not in latest_assistant_text:
+                # Check dedup: only report once per field per attempt
+                _dedup_key = f"structure:{field}"
+                if _dedup_key not in state._injected_signals:
+                    missing.append(field)
+
+        if not missing:
+            print(f"    [structure-check] phase={_phase} all_present=true", flush=True)
+            return
+
+        # Build correction hint for missing fields
+        _missing_str = ", ".join(missing)
+        _hint_parts = [
+            f"[STRUCTURE HINT] Your {_phase} output is missing required fields: {_missing_str}.",
+            f"Please include these fields in your next response using the format:",
+        ]
+        for field in missing:
+            _hint_parts.append(f"  {field}:")
+            _hint_parts.append(f"  <your {field.lower().replace('_', ' ')} here>")
+
+        _hint = "\n".join(_hint_parts)
+
+        # Inject hint and mark fields as corrected (dedup)
+        agent_self.messages.append({"role": "user", "content": _hint})
+        for field in missing:
+            _dedup_key = f"structure:{field}"
+            state._injected_signals.add(_dedup_key)
+            print(f"    [structure-check] phase={_phase} missing={field} injected=true", flush=True)
+
+    except Exception as _exc:
+        print(f"    [structure-check] error (non-fatal): {_exc}", flush=True)
+
+
 def _step_inject_phase(agent_self, *, cp_state_holder: "list | None", state: "StepMonitorState") -> None:
     """
     Section p189: inject current phase as a user message prefix.
@@ -1184,6 +1270,15 @@ def _install_step_monitor(
             raise
 
         _step_inject_phase(self, cp_state_holder=_cp_holder, state=_state)
+
+        # p207-P2: per-step structure validation — check if agent output has
+        # the current phase's required fields, inject soft correction hint if missing.
+        _step_check_structure(
+            self,
+            cp_state_holder=_cp_holder,
+            state=_state,
+            latest_assistant_text=_latest_assistant_text,
+        )
 
         # p25 Materialization Gate Layer 1 (in-loop liveness, K=2):
         # Once EXECUTE phase is entered, agent MUST write a patch within 2 steps.
