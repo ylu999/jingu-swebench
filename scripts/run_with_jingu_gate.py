@@ -4039,9 +4039,9 @@ def run_with_jingu(instance_id: str, output_dir: Path, max_attempts: int = 3,
                             controlled_verify=(jingu_body or {}).get("controlled_verify", {}),
                             # v2 (no-oracle) signals from inner-verify (apply_test_patch=False)
                             patch_exists=bool(patch and patch.strip()),
-                            inner_f2p_passed=_inner_cv.get("f2p_passed", -1),
-                            inner_f2p_total=(_inner_cv.get("f2p_passed", 0) or 0) + (_inner_cv.get("f2p_failed", 0) or 0),
-                            inner_new_failures=_inner_cv.get("p2p_failed", 0) or 0,
+                            inner_f2p_passed=_inner_cv.get("f2p_passed") if _inner_cv.get("f2p_passed") is not None else -1,
+                            inner_f2p_total=(_inner_cv.get("f2p_passed") or 0) + (_inner_cv.get("f2p_failed") or 0),
+                            inner_new_failures=_inner_cv.get("p2p_failed") or 0,
                         )
                         t_ctrl.stop()
                         # p179: override control_action based on TEST_PROGRESS_MONOTONICITY
