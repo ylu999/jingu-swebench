@@ -222,6 +222,9 @@ RE_FAKE_RETRYABLE = re.compile(
 RE_FAKE_LOOP_ESCALATE = re.compile(
     r"\[principal_inference\] ESCALATE_FAKE_LOOP:"
 )
+RE_FAKE_LOOP_SELECTIVE_BYPASS = re.compile(
+    r"\[principal_inference\] FAKE_LOOP_SELECTIVE_BYPASS:"
+)
 RE_VERIFY_GATE = re.compile(
     r"\[verify_gate\] prerequisite=(pass|fail\(\w+\))\s+controlled_verify=(run|skipped)"
 )
@@ -242,7 +245,7 @@ def parse_log_lines(lines: list[str]) -> dict:
     Returns gate fire metrics:
       {
         "principal_gate": {"ADMITTED": N, "RETRYABLE": N, "REJECTED": N, "ESCALATE_CONTRACT_BUG": N},
-        "principal_inference": {"FAKE_RETRYABLE": N, "ESCALATE_FAKE_LOOP": N},
+        "principal_inference": {"FAKE_RETRYABLE": N, "ESCALATE_FAKE_LOOP": N, "SELECTIVE_BYPASS": N},
         "verify_gate": {"pass_run": N, "pass_skipped": N, "fail_run": N, "fail_skipped": N},
         "phase_record_count": N,
         "cognition_check_count": N,
@@ -271,6 +274,10 @@ def parse_log_lines(lines: list[str]) -> dict:
         # ESCALATE_FAKE_LOOP
         if RE_FAKE_LOOP_ESCALATE.search(line):
             inference["ESCALATE_FAKE_LOOP"] += 1
+
+        # p207-P9: SELECTIVE_BYPASS
+        if RE_FAKE_LOOP_SELECTIVE_BYPASS.search(line):
+            inference["SELECTIVE_BYPASS"] += 1
 
         # verify_gate
         m = RE_VERIFY_GATE.search(line)
