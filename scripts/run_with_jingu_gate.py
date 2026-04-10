@@ -389,6 +389,8 @@ class StepMonitorState:
                 "elapsed_ms": result.get("elapsed_ms", 0),
                 "delta": delta,
                 "kind": result.get("verification_kind", "unknown"),
+                "stdout": result.get("stdout", "")[:10240],
+                "stderr": result.get("stderr", "")[:10240],
             }
             self.verify_history.append(entry)
             delta_str = f"  delta={delta:+d}" if delta is not None else ""
@@ -1715,6 +1717,7 @@ def run_controlled_verify(
             "verification_kind": "controlled_no_tests",
             "tests_passed": -1, "tests_failed": -1,
             "exit_code": -1, "elapsed_ms": 0.0, "output_tail": "",
+            "stdout": "", "stderr": "",
         }
 
     if not patch_text or not patch_text.strip():
@@ -1722,6 +1725,7 @@ def run_controlled_verify(
             "verification_kind": "controlled_error",
             "tests_passed": 0, "tests_failed": len(fail_to_pass),
             "exit_code": 1, "elapsed_ms": 0.0, "output_tail": "",
+            "stdout": "", "stderr": "",
             "error": "no patch to apply",
         }
 
@@ -1743,6 +1747,8 @@ def run_controlled_verify(
                 "tests_passed": -1, "tests_failed": -1,
                 "exit_code": -1, "elapsed_ms": round((time.monotonic() - t0) * 1000, 1),
                 "output_tail": "", "error": f"docker cp failed: {cp_result.stderr[:200]}",
+                "stdout": (cp_result.stdout or "")[:10240],
+                "stderr": (cp_result.stderr or "")[:10240],
             }
 
         # Step 2: reset to clean base_commit state before applying patch.
@@ -1784,6 +1790,8 @@ def run_controlled_verify(
                 "elapsed_ms": round((time.monotonic() - t0) * 1000, 1),
                 "output_tail": apply_result.stdout[-300:],
                 "error": f"git apply failed: {apply_result.stdout[:200]}",
+                "stdout": (apply_result.stdout or "")[:10240],
+                "stderr": (apply_result.stderr or "")[:10240],
             }
 
         # Step 4: run FAIL_TO_PASS tests using official harness command
@@ -1814,6 +1822,8 @@ def run_controlled_verify(
             "exit_code": test_result.returncode,
             "elapsed_ms": elapsed_ms,
             "output_tail": output_tail,
+            "stdout": (test_result.stdout or "")[:10240],
+            "stderr": (test_result.stderr or "")[:10240],
         }
 
     except _sp.TimeoutExpired:
@@ -1823,6 +1833,7 @@ def run_controlled_verify(
             "exit_code": -1,
             "elapsed_ms": round((time.monotonic() - t0) * 1000, 1),
             "output_tail": "", "error": "controlled verify timed out",
+            "stdout": "", "stderr": "",
         }
     except Exception as e:
         return {
@@ -1831,6 +1842,7 @@ def run_controlled_verify(
             "exit_code": -1,
             "elapsed_ms": round((time.monotonic() - t0) * 1000, 1),
             "output_tail": "", "error": str(e)[:200],
+            "stdout": "", "stderr": "",
         }
 
 
