@@ -1990,6 +1990,7 @@ def run_controlled_verify(
     container_id: str,
     timeout_s: int = 60,
     apply_test_patch: bool = True,
+    verify_scope: str = "targeted+sentinel",
 ) -> dict:
     """
     Orchestrator-controlled verification: apply patch + run FAIL_TO_PASS tests.
@@ -2150,8 +2151,17 @@ def run_controlled_verify(
                       f"{_tp_apply.stdout[:200]}", flush=True)
                 # Continue anyway — some test_patches may partially apply
 
-        # Step 4: run tests using official harness command
-        test_cmd = _build_test_command(instance)
+        # Step 4: run tests using targeted or module scope
+        test_cmd = _build_test_command(instance, verify_scope=verify_scope)
+        # Log verify scope for observability
+        _actual_scope = verify_scope
+        # Detect if targeted fell back to module (command contains directives)
+        if verify_scope in ("targeted", "targeted+sentinel"):
+            from swebench.harness.test_spec.python import get_test_directives as _gtd
+            _module_dirs = _gtd(instance)
+            if _module_dirs and _module_dirs[0] in test_cmd:
+                _actual_scope = f"module(fallback from {verify_scope})"
+        print(f"    [verify] scope={_actual_scope}  timeout={timeout_s}s", flush=True)
 
         test_result = _sp.run(
             ["docker", "exec", container_id, "bash", "-c", test_cmd],
@@ -2198,6 +2208,7 @@ def run_controlled_verify(
             "p2p_passed": p2p_pass,
             "p2p_failed": p2p_fail,
             "eval_resolved": eval_resolved,
+            "verify_scope": _actual_scope,
         }
 
     except _sp.TimeoutExpired:
@@ -2206,8 +2217,9 @@ def run_controlled_verify(
             "tests_passed": -1, "tests_failed": -1,
             "exit_code": -1,
             "elapsed_ms": round((time.monotonic() - t0) * 1000, 1),
-            "output_tail": "", "error": "controlled verify timed out",
+            "output_tail": "", "error": f"controlled verify timed out (scope={verify_scope})",
             "stdout": "", "stderr": "",
+            "verify_scope": verify_scope,
         }
     except Exception as e:
         return {
@@ -2220,26 +2232,91 @@ def run_controlled_verify(
         }
 
 
-def _build_test_command(instance: dict) -> str:
+def _extract_f2p_class_labels(f2p_tests: list) -> list:
     """
-    Build the exact test command used by the SWE-bench official harness.
+    Extract unique class-level test labels from FAIL_TO_PASS entries.
 
-    Uses MAP_REPO_VERSION_TO_SPECS[repo][version]["test_cmd"] + get_test_directives(instance),
-    wrapped in conda activate testbed — exactly what the official eval script does.
+    F2P format: 'test_method (module.submodule.ClassName)'
+    Returns: ['module.submodule.ClassName', ...] (deduplicated, sorted)
+
+    Django runtests.py accepts class-level labels, which is much narrower
+    than module-level directives and avoids running hundreds of unrelated tests.
+    """
+    import re as _re
+    classes = set()
+    for entry in f2p_tests:
+        m = _re.match(r'\w+\s+\((.+)\)', entry)
+        if m:
+            classes.add(m.group(1))
+    return sorted(classes)
+
+
+def _build_test_command(instance: dict, verify_scope: str = "module") -> str:
+    """
+    Build the test command for controlled verification.
+
+    verify_scope:
+      "targeted" — F2P class-level labels only (fast, for in-loop signal)
+      "targeted+sentinel" — F2P classes + a few P2P classes (fast + regression detection)
+      "module" — official directives (module-level, for eval alignment)
 
     Returns a bash string suitable for: docker exec ... bash -c "<this>"
     """
     from swebench.harness.constants import MAP_REPO_VERSION_TO_SPECS
     from swebench.harness.test_spec.python import get_test_directives
+    import json as _json
 
     repo = instance["repo"]
     version = instance["version"]
     specs = MAP_REPO_VERSION_TO_SPECS[repo][version]
     test_cmd = specs["test_cmd"]
+
+    if verify_scope in ("targeted", "targeted+sentinel"):
+        # Parse F2P test entries
+        f2p_raw = instance.get("FAIL_TO_PASS", [])
+        if isinstance(f2p_raw, str):
+            try:
+                f2p_raw = _json.loads(f2p_raw)
+            except Exception:
+                f2p_raw = []
+
+        f2p_labels = _extract_f2p_class_labels(f2p_raw)
+
+        # Add P2P sentinel classes for regression detection
+        sentinel_labels = []
+        if verify_scope == "targeted+sentinel":
+            p2p_raw = instance.get("PASS_TO_PASS", [])
+            if isinstance(p2p_raw, str):
+                try:
+                    p2p_raw = _json.loads(p2p_raw)
+                except Exception:
+                    p2p_raw = []
+            p2p_labels = _extract_f2p_class_labels(p2p_raw)
+            # Pick up to 3 P2P classes not already in F2P set
+            f2p_set = set(f2p_labels)
+            for lbl in p2p_labels:
+                if lbl not in f2p_set:
+                    sentinel_labels.append(lbl)
+                    if len(sentinel_labels) >= 3:
+                        break
+
+        all_labels = f2p_labels + sentinel_labels
+
+        # Guard: if too many classes (>20), targeted is not meaningfully narrower — fall back
+        if all_labels and len(all_labels) <= 20:
+            labels_str = " ".join(all_labels)
+            return (
+                "source /opt/miniconda3/bin/activate && "
+                "conda activate testbed && "
+                f"cd /testbed && "
+                f"{test_cmd} {labels_str} 2>&1"
+            )
+        # else: fall through to module-level
+
+    # Module-level: official directives (original behavior)
     directives = get_test_directives(instance)
     directives_str = " ".join(directives)
 
-    # Official harness wraps in: source activate + conda activate testbed + cd /testbed
     return (
         "source /opt/miniconda3/bin/activate && "
         "conda activate testbed && "
@@ -2273,7 +2350,7 @@ def _check_onboarding(instance: dict) -> tuple[bool, str]:
         return False, f"HARNESS_NOT_AVAILABLE: {e}"
 
     try:
-        cmd = _build_test_command(instance)
+        cmd = _build_test_command(instance, verify_scope="module")
         if "conda activate testbed" not in cmd:
             return False, "ASSUMED_ENV_BEHAVIOR: test command missing 'conda activate testbed'"
     except Exception as e:
