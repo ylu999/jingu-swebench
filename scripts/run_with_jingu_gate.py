@@ -4270,8 +4270,8 @@ def main():
                         help="Run official SWE-bench harness after inference (requires Docker)")
     parser.add_argument("--run-id", default=None,
                         help="Run ID for eval results (default: auto-generated from mode+timestamp)")
-    parser.add_argument("--dataset", choices=["Lite", "Verified"], default="Lite",
-                        help="SWE-bench dataset variant: Lite (300) or Verified (500) (default: Lite)")
+    parser.add_argument("--dataset", choices=["Lite", "Verified"], default="Verified",
+                        help="SWE-bench dataset variant: Lite (300) or Verified (500) (default: Verified)")
     args = parser.parse_args()
 
     global _timing_root
