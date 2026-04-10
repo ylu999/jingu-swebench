@@ -241,6 +241,160 @@ def classify_outcome(controlled_verify: dict) -> str:
     return "wrong_direction"
 
 
+# ── Outcome classification v2 (agent-visible signals only, no oracle) ────────
+#
+# Uses inner-verify (apply_test_patch=False) which runs F2P tests against the
+# EXISTING test suite. ~90% of F2P tests are pre-existing (not added by test_patch),
+# so f2p_passed/f2p_failed from inner-verify is a legitimate agent-visible signal.
+# Tests added by test_patch will be counted as "failed" (not found in output),
+# which is conservative but correct — the agent cannot see those tests.
+
+OUTCOME_V2_TYPES = (
+    "good_progress",     # All F2P tests pass (agent-visible)
+    "partial_progress",  # Some F2P pass, no regression
+    "wrong_direction",   # No F2P pass
+    "regression",        # New failures introduced (P2P broke)
+    "no_signal",         # Can't classify (tests didn't run)
+    "no_patch",          # No patch produced
+)
+
+
+def classify_outcome_v2(
+    f2p_passed: int,
+    f2p_total: int,
+    new_failures: int,
+    patch_exists: bool,
+) -> str:
+    """
+    Outcome classification using only agent-visible signals (no test_patch / no oracle).
+
+    f2p_passed: FAIL_TO_PASS tests that passed in inner-verify (apply_test_patch=False).
+        These are pre-existing tests that the agent could also run.
+    f2p_total: total FAIL_TO_PASS tests checked.
+    new_failures: tests that newly failed compared to baseline (regression signal).
+    patch_exists: whether a non-empty patch was produced.
+
+    Signal legality:
+    - F2P test names: injected into agent prompt (benchmark-provided, agent-visible)
+    - inner-verify: runs against existing test suite (no test_patch = no oracle)
+    - new_failures: baseline comparison (agent could do this themselves)
+    """
+    # No patch → exploration loop
+    if not patch_exists:
+        return "no_patch"
+
+    # No F2P data → can't classify
+    if f2p_total == 0:
+        return "no_signal"
+
+    # Regression: highest priority (broke existing tests)
+    if new_failures > 0:
+        return "regression"
+
+    # No F2P tests fixed
+    if f2p_passed == 0:
+        return "wrong_direction"
+
+    # Some but not all F2P fixed
+    if f2p_passed < f2p_total:
+        return "partial_progress"
+
+    # All F2P pass (agent-visible, not eval_resolved)
+    return "good_progress"
+
+
+# ── Outcome v2 interventions (agent-visible signal based) ────────────────────
+
+_OUTCOME_V2_INTERVENTIONS: dict[str, dict] = {
+    "good_progress": {
+        "must_not_do": [
+            "Do NOT make unnecessary changes — target tests are passing",
+        ],
+        "must_do": [
+            "Double-check for edge cases and regressions",
+            "Run the full test suite to confirm no breakage",
+        ],
+        "hint_prefix": (
+            "GOOD PROGRESS: Target failing tests appear to be passing. "
+            "Verify there are no regressions, then submit. "
+        ),
+    },
+    "partial_progress": {
+        "must_not_do": [
+            "Do NOT rewrite the entire fix — your approach is partially correct",
+            "Do NOT change code paths that are already making tests pass",
+        ],
+        "must_do": [
+            "Identify which FAIL_TO_PASS tests still fail and focus on those",
+            "Extend the existing fix incrementally — do not start over",
+            "Run tests after each change to confirm progress",
+        ],
+        "hint_prefix": (
+            "PARTIAL PROGRESS: Some failing tests are fixed, but not all. "
+            "Your direction is correct — extend the fix to cover remaining cases. "
+            "Do NOT rewrite from scratch. "
+        ),
+    },
+    "wrong_direction": {
+        "must_not_do": [
+            "Do NOT continue with the same approach — it fixed zero failing tests",
+            "Do NOT expand the previous patch",
+        ],
+        "must_do": [
+            "Re-read the failing tests carefully to understand expected behavior",
+            "Consider a completely different root cause hypothesis",
+            "Start with the simplest possible fix for the first failing test",
+        ],
+        "hint_prefix": (
+            "WRONG DIRECTION: Your previous patch did not fix ANY of the target failing tests. "
+            "Your approach is likely incorrect. Re-analyze the problem from scratch. "
+            "Read the test expectations carefully before writing code. "
+        ),
+    },
+    "regression": {
+        "must_not_do": [
+            "Do NOT continue with the same approach — it introduced new failures",
+            "Do NOT weaken or remove existing constraints",
+        ],
+        "must_do": [
+            "Revert your approach — you broke existing behavior",
+            "Understand which existing tests broke and why",
+            "Find a fix that preserves all existing passing tests",
+        ],
+        "hint_prefix": (
+            "REGRESSION DETECTED: Your patch introduced new failing tests. "
+            "You MUST preserve existing behavior. Revert and redesign your approach. "
+        ),
+    },
+    "no_signal": {
+        "must_not_do": [
+            "Do NOT submit without verifying test results",
+        ],
+        "must_do": [
+            "Check test setup and ensure correct test targeting",
+            "Run the FAIL_TO_PASS tests explicitly",
+        ],
+        "hint_prefix": (
+            "NO SIGNAL: Test execution did not produce useful results. "
+            "Check test setup and ensure correct test targeting. "
+        ),
+    },
+    "no_patch": {
+        "must_not_do": [
+            "Do NOT continue reading files without committing to a fix",
+        ],
+        "must_do": [
+            "Immediately identify the target file and function from the failing tests",
+            "Make the minimal change and submit — do not over-explore",
+        ],
+        "hint_prefix": (
+            "NO PATCH: Previous attempt did not produce a patch. "
+            "Go directly to the fix: identify file, make minimal change, submit. "
+        ),
+    },
+}
+
+
 # Deterministic intervention mapping (no LLM needed for these)
 _INTERVENTIONS: dict[str, dict] = {
     "wrong_direction": {
@@ -413,6 +567,11 @@ def build_retry_plan(
     tests_delta: Optional[int] = None,
     tests_passed_after: int = -1,
     controlled_verify: Optional[dict] = None,
+    # v2 (no-oracle) signals — from inner-verify (apply_test_patch=False)
+    patch_exists: bool = False,
+    inner_f2p_passed: int = -1,
+    inner_f2p_total: int = 0,
+    inner_new_failures: int = 0,
 ) -> RetryPlan:
     """
     Deterministic failure classification → intervention mapping → RetryPlan.
@@ -429,14 +588,31 @@ def build_retry_plan(
     failure_type = classify_failure(jingu_body, fp, prev_patch_fp, exec_feedback)
     failure_type_v2 = classify_failure_v2(jingu_body, fp, tests_delta, tests_passed_after)
 
-    # Outcome classification (BUG-10: F2P/P2P-based, overrides failure_type when available)
+    # Outcome classification: try v1 (oracle/F2P-based) first, fall back to v2 (agent-visible)
     outcome = classify_outcome(controlled_verify or {})
     outcome_intervention = _OUTCOME_INTERVENTIONS.get(outcome)
+    outcome_version = "v1"
+
+    # v2 (no-oracle): when v1 returns no_signal (inner-verify has no f2p/p2p), use agent-visible signals
+    cv = controlled_verify or {}
+    outcome_v2 = classify_outcome_v2(
+        f2p_passed=inner_f2p_passed if inner_f2p_passed >= 0 else 0,
+        f2p_total=inner_f2p_total,
+        new_failures=inner_new_failures,
+        patch_exists=patch_exists,
+    )
 
     if outcome != "no_signal":
-        print(f"    [outcome-engine] outcome={outcome}  f2p={controlled_verify.get('f2p_passed', '?')}/{(controlled_verify.get('f2p_passed', 0) or 0) + (controlled_verify.get('f2p_failed', 0) or 0)}  p2p_failed={controlled_verify.get('p2p_failed', '?')}", flush=True)
+        # v1 has signal (F2P/P2P available — final-verify or oracle-assisted mode)
+        print(f"    [outcome-engine] outcome={outcome} (v1/oracle)  f2p={cv.get('f2p_passed', '?')}/{(cv.get('f2p_passed', 0) or 0) + (cv.get('f2p_failed', 0) or 0)}  p2p_failed={cv.get('p2p_failed', '?')}", flush=True)
+    else:
+        # v2: use agent-visible F2P signal from inner-verify (no test_patch)
+        outcome = outcome_v2
+        outcome_version = "v2"
+        outcome_intervention = _OUTCOME_V2_INTERVENTIONS.get(outcome)
+        print(f"    [outcome-engine] outcome={outcome} (v2/agent-visible)  f2p_passed={inner_f2p_passed}/{inner_f2p_total}  new_failures={inner_new_failures}  patch={patch_exists}", flush=True)
 
-    # Prefer outcome-based intervention when F2P/P2P signal is available
+    # Prefer outcome-based intervention when available
     if outcome_intervention:
         intervention = outcome_intervention
     else:
@@ -495,7 +671,7 @@ def build_retry_plan(
         control_action = "ADJUST"
 
     return RetryPlan(
-        root_causes=[f"outcome={outcome}", f"failure_type={failure_type}", f"failure_type_v2={failure_type_v2}"]
+        root_causes=[f"outcome={outcome}", f"outcome_version={outcome_version}", f"failure_type={failure_type}", f"failure_type_v2={failure_type_v2}"]
                     + [f"violation={c}" for c in viol_codes],
         must_do=intervention["must_do"],
         must_not_do=intervention["must_not_do"],

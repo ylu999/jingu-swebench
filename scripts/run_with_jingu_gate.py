@@ -593,8 +593,10 @@ def _step_verify_if_needed(
 
             def _run_verify(patch=current_patch, container=cid, step=step_n):
                 try:
+                    # v2: inner-verify uses apply_test_patch=False (agent-visible signal only)
                     cv_result = run_controlled_verify(
-                        patch, state.instance, container, timeout_s=45
+                        patch, state.instance, container, timeout_s=45,
+                        apply_test_patch=False,
                     )
                     state.record_verify(step, cv_result)
                 except Exception as exc:
@@ -1987,9 +1989,15 @@ def run_controlled_verify(
     instance: dict,
     container_id: str,
     timeout_s: int = 60,
+    apply_test_patch: bool = True,
 ) -> dict:
     """
     Orchestrator-controlled verification: apply patch + run FAIL_TO_PASS tests.
+
+    apply_test_patch=True (default): applies test_patch for eval-aligned F2P/P2P.
+        Use for final verification / eval metrics.
+    apply_test_patch=False: skips test_patch, runs against existing test suite.
+        Use for inner-verify (agent-visible signal, no oracle).
 
     Uses the already-running swebench container (same image agent used, no re-pull needed).
     Runs specified tests directly via docker exec, returns structured results.
@@ -2106,7 +2114,9 @@ def run_controlled_verify(
         # Official SWE-bench eval applies the test_patch which contains new/modified
         # test cases (the FAIL_TO_PASS tests). Without this, controlled_verify runs
         # against the OLD test suite and produces false positives/negatives.
-        _test_patch = instance.get("test_patch", "")
+        # v2: only apply when apply_test_patch=True (final eval). Inner-verify uses
+        # apply_test_patch=False to keep signals agent-visible (no oracle).
+        _test_patch = instance.get("test_patch", "") if apply_test_patch else ""
         if _test_patch and _test_patch.strip():
             # Get test files from test_patch for later reset
             import re as _re_mod
@@ -3235,6 +3245,13 @@ def run_agent(
         cv_result["elapsed_ms"] = round((time.monotonic() - t_cv0) * 1000, 1)
         # Store as last verify_history entry (step=-1 means end-of-attempt)
         _vr_monitor.record_verify(-1, cv_result)
+        # v2 two-column log: final-verify (oracle/eval) vs inner-verify (agent-visible)
+        _er = cv_result.get("eval_resolved")
+        if _er is not None:
+            print(f"    [outcome-eval] eval_resolved={_er}"
+                  f"  f2p={cv_result.get('f2p_passed')}/{(cv_result.get('f2p_passed',0) or 0)+(cv_result.get('f2p_failed',0) or 0)}"
+                  f"  p2p={cv_result.get('p2p_passed')}/{(cv_result.get('p2p_passed',0) or 0)+(cv_result.get('p2p_failed',0) or 0)}",
+                  flush=True)
         return result
 
     t_llm = Timer("LLM agent loop (Bedrock)", parent=t_agent)
@@ -3921,6 +3938,11 @@ def run_with_jingu(instance_id: str, output_dir: Path, max_attempts: int = 3,
                             tests_delta=_tests_delta,
                             tests_passed_after=_tests_now,
                             controlled_verify=(jingu_body or {}).get("controlled_verify", {}),
+                            # v2 (no-oracle) signals from inner-verify (apply_test_patch=False)
+                            patch_exists=bool(patch and patch.strip()),
+                            inner_f2p_passed=(_cv_source.get("f2p_passed", -1) if _cv_source else -1),
+                            inner_f2p_total=((_cv_source.get("f2p_passed", 0) or 0) + (_cv_source.get("f2p_failed", 0) or 0)) if _cv_source else 0,
+                            inner_new_failures=(_cv_source.get("p2p_failed", 0) or 0) if _cv_source else 0,
                         )
                         t_ctrl.stop()
                         # p179: override control_action based on TEST_PROGRESS_MONOTONICITY
