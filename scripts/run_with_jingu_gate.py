@@ -39,6 +39,7 @@ from patch_reviewer import review_patch_bedrock, ReviewResult
 from retry_controller import build_retry_plan, classify_outcome, RetryPlan
 # p208: failure classification engine (system-level routing, separate from outcome engine)
 from failure_classifier import classify_failure, get_routing as get_failure_routing
+from repair_prompts import build_repair_prompt
 from governance_runtime import (
     install_governance_pack,
     run_governance_packs,
@@ -3449,12 +3450,20 @@ def run_agent(
                     _routing = get_failure_routing(_ft)
                     jingu_body["failure_type"] = _ft
                     jingu_body["failure_routing"] = _routing
+                    jingu_body["repair_directive"] = {
+                        "failure_type": _ft,
+                        "next_phase": _routing["next_phase"],
+                        "repair_goal": _routing["repair_goal"],
+                    }
+                    jingu_body["retry_mode"] = "phase_specific"
                     print(f"    [failure-classify] type={_ft} next_phase={_routing['next_phase']} "
                           f"f2p_pass={cv_flat.get('f2p_passed', 0)} "
                           f"f2p_fail={cv_flat.get('f2p_failed', 0)}", flush=True)
                 else:
                     jingu_body["failure_type"] = None
                     jingu_body["failure_routing"] = None
+                    jingu_body["repair_directive"] = None
+                    jingu_body["retry_mode"] = "generic"
             # p207-P4: store parsed test results as structured data for all consumers.
             # Calls parse_pytest_output on CV stdout so GovernancePacks, retry_controller,
             # and any future consumer can access failing_tests/error_excerpts/summary
@@ -4299,8 +4308,26 @@ def run_with_jingu(instance_id: str, output_dir: Path, max_attempts: int = 3,
                         # next_attempt_prompt already merges hint_prefix + exec_feedback
                         _prev_raw_patch = patch  # p25: save for Outcome Gate hash comparison
                         last_failure = retry_plan.next_attempt_prompt[:600]
+                        # p209: augment with phase-specific repair prompt from failure classification
+                        _jb_ft = (jingu_body or {}).get("failure_type")
+                        _jb_routing = (jingu_body or {}).get("failure_routing")
+                        _jb_cv = (jingu_body or {}).get("controlled_verify") or {}
+                        if _jb_ft and _jb_routing:
+                            _repair = build_repair_prompt(_jb_ft, _jb_cv, _jb_routing)
+                            last_failure = _repair + "\n\n" + last_failure
+                            print(f"    [repair-route] attempt={attempt} failure_type={_jb_ft} "
+                                  f"next_phase={_jb_routing['next_phase']}", flush=True)
                     else:
                         last_failure = exec_feedback[:400]
+                        # p209: augment non-retry-controller path too
+                        _jb_ft = (jingu_body or {}).get("failure_type")
+                        _jb_routing = (jingu_body or {}).get("failure_routing")
+                        _jb_cv = (jingu_body or {}).get("controlled_verify") or {}
+                        if _jb_ft and _jb_routing:
+                            _repair = build_repair_prompt(_jb_ft, _jb_cv, _jb_routing)
+                            last_failure = _repair + "\n\n" + last_failure
+                            print(f"    [repair-route] attempt={attempt} failure_type={_jb_ft} "
+                                  f"next_phase={_jb_routing['next_phase']}", flush=True)
                 else:
                     last_failure = ""
                 agent_exit = None
