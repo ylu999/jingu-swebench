@@ -37,6 +37,8 @@ from jingu_gate_bridge import evaluate_patch_from_traj, build_support_pool, run_
 from patch_reviewer import review_patch_bedrock, ReviewResult
 # B3: retry controller (failure → diagnosis → next strategy)
 from retry_controller import build_retry_plan, classify_outcome, RetryPlan
+# p208: failure classification engine (system-level routing, separate from outcome engine)
+from failure_classifier import classify_failure, get_routing as get_failure_routing
 from governance_runtime import (
     install_governance_pack,
     run_governance_packs,
@@ -3441,6 +3443,18 @@ def run_agent(
                 if _fallback_cv and _final_cv is None:
                     print(f"    [cv-fallback] F2P_ALL_FAIL inferred from controlled_error: "
                           f"passed={_cv_source['tests_passed']} failed={_cv_source['tests_failed']}")
+                # p208: failure classification — classify cv_result into typed failure category
+                _ft = classify_failure(cv_flat)
+                if _ft:
+                    _routing = get_failure_routing(_ft)
+                    jingu_body["failure_type"] = _ft
+                    jingu_body["failure_routing"] = _routing
+                    print(f"    [failure-classify] type={_ft} next_phase={_routing['next_phase']} "
+                          f"f2p_pass={cv_flat.get('f2p_passed', 0)} "
+                          f"f2p_fail={cv_flat.get('f2p_failed', 0)}", flush=True)
+                else:
+                    jingu_body["failure_type"] = None
+                    jingu_body["failure_routing"] = None
             # p207-P4: store parsed test results as structured data for all consumers.
             # Calls parse_pytest_output on CV stdout so GovernancePacks, retry_controller,
             # and any future consumer can access failing_tests/error_excerpts/summary
