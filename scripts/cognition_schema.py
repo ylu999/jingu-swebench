@@ -2,7 +2,7 @@
 cognition_schema.py — Phase 2 in-loop cognition record parser + validator.
 
 Parses structured phase records from LLM assistant message text.
-Validates principal contracts per CDP v1 taxonomy.
+Validates principal contracts per CDP v2.0 taxonomy (derived from subtype_contracts.py).
 Returns violations for injection back into agent context.
 
 Design: post-generation parsing (minisweagent doesn't support structured output).
@@ -16,58 +16,71 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 
-# ── CDP v1 taxonomy ──────────────────────────────────────────────────────────
+# ── CDP v2.0 taxonomy (derived from subtype_contracts.py) ────────────────────
 
-VALID_PHASES = {
-    "analysis", "decision", "design", "execution",
-    "observation", "understanding", "diagnosis", "planning", "validation",
+# Lowercase phase names (as parsed from agent output) → canonical uppercase phase names.
+# Only phases that exist in v2.0 subtype_contracts are valid.
+_PHASE_NORM: dict[str, str] = {
+    "observation": "OBSERVE",
+    "analysis":    "ANALYZE",
+    "decision":    "DECIDE",
+    "execution":   "EXECUTE",
+    "design":      "DESIGN",
+    "judge":       "JUDGE",
+    # Aliases: agent may also output the v2.0 names directly (lowercase)
+    "observe":     "OBSERVE",
+    "analyze":     "ANALYZE",
+    "decide":      "DECIDE",
+    "execute":     "EXECUTE",
+    "validation":  "JUDGE",
+    "planning":    "DESIGN",
 }
 
-# Required and forbidden principals per phase (subset — execution + diagnosis enforced strictly)
-PRINCIPAL_CONTRACTS: dict[str, dict[str, list[str]]] = {
-    "execution": {
-        "required": ["scope_control", "minimal_change"],
-        "forbidden": ["causality", "hypothesis_testing"],
-    },
-    "diagnosis": {
-        "required": ["evidence_based", "causality"],
-        "forbidden": ["minimal_change"],
-    },
-    "analysis": {
-        "required": ["causality"],
-        "forbidden": ["execution_first", "scope_control"],
-    },
-    "validation": {
-        "required": ["execution_first", "consistency_check"],
-        "forbidden": ["causality", "hypothesis_testing"],
-    },
-    "observation": {
-        "required": ["evidence_based", "no_hallucination"],
-        "forbidden": ["minimal_change", "scope_control"],
-    },
-    "understanding": {
-        "required": ["constraint_awareness", "explicit_assumption"],
-        "forbidden": ["execution_first", "minimal_change"],
-    },
-    "decision": {
-        "required": ["constraint_awareness"],
-        "forbidden": ["execution_first"],
-    },
-    "design": {
-        "required": ["constraint_awareness", "completeness"],
-        "forbidden": ["execution_first"],
-    },
-    "planning": {
-        "required": ["completeness", "consistency_check"],
-        "forbidden": ["execution_first", "minimal_change"],
-    },
-}
+VALID_PHASES = set(_PHASE_NORM.keys())
 
-# Phases that require at least one evidence_ref before action
-EVIDENCE_REQUIRED_PHASES = {"analysis", "diagnosis", "observation"}
 
-# Phases where action type must be "none" (no code write)
-NO_ACTION_PHASES = {"analysis", "diagnosis", "observation", "understanding"}
+def _build_principal_contracts() -> dict[str, dict[str, list[str]]]:
+    """
+    Build PRINCIPAL_CONTRACTS from v2.0 subtype_contracts.py (canonical source).
+
+    Returns a dict keyed by lowercase phase name (as parsed from agent output),
+    with required/forbidden principals derived from the canonical SubtypeContract.
+    SST2: consumers reference, never redeclare.
+    """
+    try:
+        from scripts.subtype_contracts import SUBTYPE_CONTRACTS
+    except ImportError:
+        try:
+            from subtype_contracts import SUBTYPE_CONTRACTS
+        except ImportError:
+            return {}  # graceful degradation per SST2 — empty, not stale copy
+
+    # Reverse map: canonical phase → lowercase parser key(s)
+    _upper_to_lower: dict[str, str] = {}
+    for lower, upper in _PHASE_NORM.items():
+        # Use the first (most natural) lowercase name for each canonical phase
+        if upper not in _upper_to_lower:
+            _upper_to_lower[upper] = lower
+
+    contracts: dict[str, dict[str, list[str]]] = {}
+    for _subtype, sc in SUBTYPE_CONTRACTS.items():
+        phase_upper = sc.get("phase", "")
+        lower_key = _upper_to_lower.get(phase_upper)
+        if lower_key and lower_key not in contracts:
+            contracts[lower_key] = {
+                "required": list(sc.get("required_principals", [])),
+                "forbidden": list(sc.get("forbidden_principals", [])),
+            }
+    return contracts
+
+
+PRINCIPAL_CONTRACTS: dict[str, dict[str, list[str]]] = _build_principal_contracts()
+
+# Phases that require at least one evidence_ref before action (v2.0: ANALYZE, OBSERVE)
+EVIDENCE_REQUIRED_PHASES = {"analysis", "observation", "analyze", "observe"}
+
+# Phases where action type must be "none" (no code write) (v2.0: OBSERVE, ANALYZE)
+NO_ACTION_PHASES = {"analysis", "observation", "analyze", "observe"}
 
 
 # ── Data model ───────────────────────────────────────────────────────────────
