@@ -4255,6 +4255,57 @@ def _run_official_evaluation(
     return result
 
 
+# ── Per-instance S3 sync (BUG-4) ─────────────────────────────────────────────
+_S3_RESULTS_BUCKET = os.environ.get("S3_RESULTS_BUCKET", "")
+_s3_client = None
+
+def _get_s3_client():
+    """Lazy-init boto3 S3 client. Returns None if boto3 unavailable or bucket not set."""
+    global _s3_client
+    if not _S3_RESULTS_BUCKET:
+        return None
+    if _s3_client is None:
+        try:
+            import boto3
+            _s3_client = boto3.client("s3", region_name=os.environ.get("AWS_DEFAULT_REGION", "us-west-2"))
+        except Exception:
+            return None
+    return _s3_client
+
+def _upload_to_s3(local_path: Path, s3_key: str) -> bool:
+    """Upload a single file to S3. Returns True on success, False on failure. Never raises."""
+    try:
+        client = _get_s3_client()
+        if client is None:
+            return False
+        client.upload_file(str(local_path), _S3_RESULTS_BUCKET, s3_key)
+        return True
+    except Exception as e:
+        print(f"[s3-sync] upload failed {s3_key}: {e}")
+        return False
+
+def _sync_instance_to_s3(instance_id: str, result: dict, output_dir: Path, batch_name: str):
+    """Upload traj + heartbeat for a completed instance. Best-effort, never crashes."""
+    if not _S3_RESULTS_BUCKET:
+        return
+    try:
+        best_attempt = result.get("best_attempt", 1)
+        # Upload traj for each attempt that exists
+        for attempt in range(1, result.get("attempts", 1) + 1):
+            traj_local = output_dir / f"attempt_{attempt}" / instance_id / f"{instance_id}.traj.json"
+            if traj_local.exists():
+                s3_key = f"{batch_name}/attempt_{attempt}/{instance_id}.traj.json"
+                if _upload_to_s3(traj_local, s3_key):
+                    print(f"[s3-sync] uploaded {s3_key}")
+
+        # Upload heartbeat
+        hb_local = output_dir / "heartbeat.json"
+        if hb_local.exists():
+            _upload_to_s3(hb_local, f"{batch_name}/heartbeat.json")
+    except Exception as e:
+        print(f"[s3-sync] instance sync failed {instance_id}: {e}")
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--instance-ids", nargs="+", required=True)
@@ -4357,6 +4408,13 @@ def main():
                 (output_dir / "heartbeat.json").write_text(json.dumps(_hb, indent=2) + "\n")
             except Exception:
                 pass  # heartbeat is best-effort, never crash the pipeline
+
+            # ── Per-instance S3 sync: upload traj + heartbeat immediately ────────
+            try:
+                _batch_name = output_dir.name  # e.g. "batch-p11-foo"
+                _sync_instance_to_s3(iid, r, output_dir, _batch_name)
+            except Exception:
+                pass  # S3 sync is best-effort, never crash the pipeline
 
     t_parallel.stop()
 
