@@ -396,6 +396,12 @@ class StepMonitorState:
                 "kind": result.get("verification_kind", "unknown"),
                 "stdout": result.get("stdout", "")[:10240],
                 "stderr": result.get("stderr", "")[:10240],
+                # BUG-10 fix: eval-aligned fields
+                "f2p_passed": result.get("f2p_passed"),
+                "f2p_failed": result.get("f2p_failed"),
+                "p2p_passed": result.get("p2p_passed"),
+                "p2p_failed": result.get("p2p_failed"),
+                "eval_resolved": result.get("eval_resolved"),
             }
             self.verify_history.append(entry)
             delta_str = f"  delta={delta:+d}" if delta is not None else ""
@@ -3321,12 +3327,25 @@ def run_agent(
                     "exit_code": _cv_source["exit_code"],
                     "elapsed_ms": _cv_source["elapsed_ms"],
                     "step": _cv_source["step"],
+                    # BUG-10 fix: eval-aligned fields
+                    "f2p_passed": _cv_source.get("f2p_passed"),
+                    "f2p_failed": _cv_source.get("f2p_failed"),
+                    "p2p_passed": _cv_source.get("p2p_passed"),
+                    "p2p_failed": _cv_source.get("p2p_failed"),
+                    "eval_resolved": _cv_source.get("eval_resolved"),
                 }
                 jingu_body["controlled_verify"] = cv_flat
                 jingu_body["test_results"]["ran_tests"] = True
                 jingu_body["test_results"]["controlled_passed"] = _cv_source["tests_passed"]
                 jingu_body["test_results"]["controlled_failed"] = _cv_source["tests_failed"]
                 jingu_body["test_results"]["controlled_exit_code"] = _cv_source["exit_code"]
+                # BUG-10: log eval-aligned verdict
+                _er = _cv_source.get("eval_resolved")
+                if _er is not None:
+                    print(f"    [controlled_verify] eval_resolved={_er}"
+                          f"  f2p={_cv_source.get('f2p_passed')}/{(_cv_source.get('f2p_passed',0) or 0)+(_cv_source.get('f2p_failed',0) or 0)}"
+                          f"  p2p={_cv_source.get('p2p_passed')}/{(_cv_source.get('p2p_passed',0) or 0)+(_cv_source.get('p2p_failed',0) or 0)}",
+                          flush=True)
                 if _fallback_cv and _final_cv is None:
                     print(f"    [cv-fallback] F2P_ALL_FAIL inferred from controlled_error: "
                           f"passed={_cv_source['tests_passed']} failed={_cv_source['tests_failed']}")
