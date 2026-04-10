@@ -172,8 +172,12 @@ def classify_failure_v2(
 
     # controlled_verify passed (tests_failed == 0 from orchestrator-controlled run)
     cv = jingu_body.get("controlled_verify", {})
+    # BUG-10: use eval_resolved (F2P+P2P aligned) as primary signal
+    if cv.get("eval_resolved") is True:
+        return "verified_pass"
+    # Fallback: old behavior for pre-BUG-10 data
     cv_failed = cv.get("tests_failed", -1)
-    if cv_failed == 0:
+    if cv_failed == 0 and cv.get("eval_resolved") is None:
         return "verified_pass"
 
     # tests ran and still failing — check if we have count signal
@@ -185,6 +189,56 @@ def classify_failure_v2(
         return "positive_delta_unresolved"
     # tests_delta == 0: stagnant; tests_delta < 0: regression — both = no progress
     return "no_test_progress"
+
+
+# ── Outcome classification (BUG-10: F2P/P2P-based) ──────────────────────────
+
+OUTCOME_TYPES = (
+    "resolved",          # All F2P pass, no P2P regression
+    "partial_fix",       # Some F2P pass, no P2P regression
+    "wrong_direction",   # No F2P pass
+    "regression",        # P2P tests broken
+    "no_signal",         # Can't classify (no CV data or no F2P tests)
+)
+
+
+def classify_outcome(controlled_verify: dict) -> str:
+    """
+    Outcome classification based on F2P/P2P decomposition from controlled_verify.
+
+    Uses eval-aligned fields (BUG-10 fix) as primary signal.
+    Returns one of OUTCOME_TYPES.
+    """
+    if not controlled_verify:
+        return "no_signal"
+
+    f2p_passed = controlled_verify.get("f2p_passed")
+    f2p_failed = controlled_verify.get("f2p_failed")
+    p2p_passed = controlled_verify.get("p2p_passed")
+    p2p_failed = controlled_verify.get("p2p_failed")
+
+    # No F2P data available — can't classify
+    if f2p_passed is None or f2p_failed is None:
+        return "no_signal"
+
+    total_f2p = f2p_passed + f2p_failed
+    if total_f2p == 0:
+        return "no_signal"
+
+    # P2P regression — highest priority
+    if p2p_failed is not None and p2p_failed > 0:
+        return "regression"
+
+    # All F2P pass — resolved
+    if f2p_passed == total_f2p:
+        return "resolved"
+
+    # Some F2P pass — partial fix
+    if f2p_passed > 0:
+        return "partial_fix"
+
+    # No F2P pass — wrong direction
+    return "wrong_direction"
 
 
 # Deterministic intervention mapping (no LLM needed for these)
@@ -257,6 +311,59 @@ _INTERVENTIONS: dict[str, dict] = {
     },
 }
 
+# ── Outcome-based interventions (BUG-10: uses F2P/P2P signal) ────────────────
+
+_OUTCOME_INTERVENTIONS: dict[str, dict] = {
+    "partial_fix": {
+        "must_not_do": [
+            "Do NOT rewrite the entire fix — your approach is partially correct",
+            "Do NOT change code paths that are already making tests pass",
+        ],
+        "must_do": [
+            "Identify which FAIL_TO_PASS tests still fail and focus on those",
+            "Extend the existing fix incrementally — do not start over",
+            "Run tests after each change to confirm progress",
+        ],
+        "hint_prefix": (
+            "PARTIAL FIX: Your previous patch fixed some failing tests but not all. "
+            "Your direction is correct — extend the fix to cover remaining cases. "
+            "Do NOT rewrite from scratch. "
+        ),
+    },
+    "wrong_direction": {
+        "must_not_do": [
+            "Do NOT continue with the same approach — it fixed zero failing tests",
+            "Do NOT expand the previous patch",
+        ],
+        "must_do": [
+            "Re-read the failing tests carefully to understand expected behavior",
+            "Consider a completely different root cause hypothesis",
+            "Start with the simplest possible fix for the first failing test",
+        ],
+        "hint_prefix": (
+            "WRONG DIRECTION: Your previous patch did not fix ANY of the failing tests. "
+            "Your approach is likely incorrect. Re-analyze the problem from scratch. "
+            "Read the test expectations carefully before writing code. "
+        ),
+    },
+    "regression": {
+        "must_not_do": [
+            "Do NOT weaken or remove existing constraints",
+            "Do NOT ignore tests that were passing before your change",
+        ],
+        "must_do": [
+            "Revert your approach — you broke existing behavior",
+            "Understand which existing tests broke and why",
+            "Find a fix that preserves all existing passing tests",
+        ],
+        "hint_prefix": (
+            "REGRESSION: Your previous patch broke existing tests that were passing. "
+            "You MUST preserve all existing behavior. Revert your approach and find "
+            "a fix that does not break any currently-passing tests. "
+        ),
+    },
+}
+
 
 @dataclass
 class RetryPlan:
@@ -305,6 +412,7 @@ def build_retry_plan(
     strategy_table_path: Optional[str | Path] = None,
     tests_delta: Optional[int] = None,
     tests_passed_after: int = -1,
+    controlled_verify: Optional[dict] = None,
 ) -> RetryPlan:
     """
     Deterministic failure classification → intervention mapping → RetryPlan.
@@ -320,7 +428,19 @@ def build_retry_plan(
     fp = patch_fp or {}
     failure_type = classify_failure(jingu_body, fp, prev_patch_fp, exec_feedback)
     failure_type_v2 = classify_failure_v2(jingu_body, fp, tests_delta, tests_passed_after)
-    intervention = _INTERVENTIONS.get(failure_type, _INTERVENTIONS["unknown"])
+
+    # Outcome classification (BUG-10: F2P/P2P-based, overrides failure_type when available)
+    outcome = classify_outcome(controlled_verify or {})
+    outcome_intervention = _OUTCOME_INTERVENTIONS.get(outcome)
+
+    if outcome != "no_signal":
+        print(f"    [outcome-engine] outcome={outcome}  f2p={controlled_verify.get('f2p_passed', '?')}/{(controlled_verify.get('f2p_passed', 0) or 0) + (controlled_verify.get('f2p_failed', 0) or 0)}  p2p_failed={controlled_verify.get('p2p_failed', '?')}", flush=True)
+
+    # Prefer outcome-based intervention when F2P/P2P signal is available
+    if outcome_intervention:
+        intervention = outcome_intervention
+    else:
+        intervention = _INTERVENTIONS.get(failure_type, _INTERVENTIONS["unknown"])
 
     # ── Compute control_action (decision priority order) ─────────────────────
 
@@ -375,7 +495,7 @@ def build_retry_plan(
         control_action = "ADJUST"
 
     return RetryPlan(
-        root_causes=[f"failure_type={failure_type}", f"failure_type_v2={failure_type_v2}"]
+        root_causes=[f"outcome={outcome}", f"failure_type={failure_type}", f"failure_type_v2={failure_type_v2}"]
                     + [f"violation={c}" for c in viol_codes],
         must_do=intervention["must_do"],
         must_not_do=intervention["must_not_do"],

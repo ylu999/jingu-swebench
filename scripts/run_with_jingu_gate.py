@@ -36,7 +36,7 @@ from jingu_gate_bridge import evaluate_patch_from_traj, build_support_pool, run_
 # B2: adversarial reviewer (cognitive governance)
 from patch_reviewer import review_patch_bedrock, ReviewResult
 # B3: retry controller (failure → diagnosis → next strategy)
-from retry_controller import build_retry_plan, RetryPlan
+from retry_controller import build_retry_plan, classify_outcome, RetryPlan
 from governance_runtime import (
     install_governance_pack,
     run_governance_packs,
@@ -3920,6 +3920,7 @@ def run_with_jingu(instance_id: str, output_dir: Path, max_attempts: int = 3,
                             strategy_table_path=STRATEGY_TABLE_PATH,
                             tests_delta=_tests_delta,
                             tests_passed_after=_tests_now,
+                            controlled_verify=(jingu_body or {}).get("controlled_verify", {}),
                         )
                         t_ctrl.stop()
                         # p179: override control_action based on TEST_PROGRESS_MONOTONICITY
