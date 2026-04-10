@@ -19,6 +19,7 @@ from governance_pack import (
     RecognitionResult,
     RouteDecision,
 )
+from unresolved_case_classifier import classify_unresolved
 
 
 # ── Step 3: parse_failure ──────────────────────────────────────────────────────
@@ -103,19 +104,17 @@ def _recognize(signal: FailureSignal) -> RecognitionResult | None:
 # ── Step 5: route ──────────────────────────────────────────────────────────────
 
 def _build_wrong_direction_hint(signal: FailureSignal, ctx: ExecutionContext) -> str:
-    test_names = ", ".join(signal.failing_tests[:5])
-    if len(signal.failing_tests) > 5:
-        test_names += f" ... (+{len(signal.failing_tests) - 5} more)"
-    return (
-        f"[JINGU ROUTING] F2P_ALL_FAIL (attempt {ctx.attempt}): "
-        f"ALL {signal.controlled_failed} target FAIL_TO_PASS tests still failing. "
-        f"Your fix direction is INCORRECT. "
-        f"Do NOT expand or continue the current patch. "
-        f"Re-analyze the root cause from scratch: "
-        f"read the failing tests carefully, identify what behavior is expected, "
-        f"locate the correct source of the bug. "
-        f"Tests that must pass: {test_names}"
+    # p207-P13: use unresolved case classifier for targeted hints
+    classification = classify_unresolved(ctx.jingu_body, signal.failing_tests)
+    category = classification["category"]
+    confidence = classification["confidence"]
+    signals_str = "; ".join(classification["signals"][:3])
+    print(
+        f"    [unresolved_classifier] category={category} confidence={confidence:.2f} "
+        f"signals=[{signals_str}]"
     )
+    # Use the classifier's targeted hint instead of generic one
+    return classification["hint"]
 
 
 def _build_coverage_hint(signal: FailureSignal, ctx: ExecutionContext) -> str:
