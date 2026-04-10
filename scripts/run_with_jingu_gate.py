@@ -3279,7 +3279,6 @@ def run_agent(
     t_llm.stop()
 
     # Parse traj for usage + submission
-    _cv_source = None  # v2: initialized here so it's always in scope for build_retry_plan
     traj_path = attempt_dir / instance_id / f"{instance_id}.traj.json"
     usage = ModelUsage(instance_id, attempt)
     usage.load_from_traj(traj_path)
@@ -3920,6 +3919,7 @@ def run_with_jingu(instance_id: str, output_dir: Path, max_attempts: int = 3,
                         _progress_ok, _progress_code = check_test_progress_invariant(_tests_prev, _tests_now)
                         print(f"    [test-progress] ok={_progress_ok}  code={_progress_code}  "
                               f"prev={_tests_prev}  now={_tests_now}  delta={_tests_delta}")
+                        _inner_cv = (jingu_body or {}).get("controlled_verify") or {}
                         t_ctrl = Timer(f"B3 retry-controller attempt={attempt}", parent=t_inst)
                         retry_plan = build_retry_plan(
                             problem_statement=instance.get("problem_statement", ""),
@@ -3941,9 +3941,9 @@ def run_with_jingu(instance_id: str, output_dir: Path, max_attempts: int = 3,
                             controlled_verify=(jingu_body or {}).get("controlled_verify", {}),
                             # v2 (no-oracle) signals from inner-verify (apply_test_patch=False)
                             patch_exists=bool(patch and patch.strip()),
-                            inner_f2p_passed=(_cv_source.get("f2p_passed", -1) if _cv_source else -1),
-                            inner_f2p_total=((_cv_source.get("f2p_passed", 0) or 0) + (_cv_source.get("f2p_failed", 0) or 0)) if _cv_source else 0,
-                            inner_new_failures=(_cv_source.get("p2p_failed", 0) or 0) if _cv_source else 0,
+                            inner_f2p_passed=_inner_cv.get("f2p_passed", -1),
+                            inner_f2p_total=(_inner_cv.get("f2p_passed", 0) or 0) + (_inner_cv.get("f2p_failed", 0) or 0),
+                            inner_new_failures=_inner_cv.get("p2p_failed", 0) or 0,
                         )
                         t_ctrl.stop()
                         # p179: override control_action based on TEST_PROGRESS_MONOTONICITY
