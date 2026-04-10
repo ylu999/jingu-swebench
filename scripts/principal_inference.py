@@ -14,12 +14,19 @@ Architecture:
   - infer_principals(): backward-compatible wrapper returning list[str]
   - diff_principals(): three-way diff, accepts list[str] or InferredPrincipalResult
 
-Principals inferred:
+Principals inferred (5 built-in + 7 stage-2 from p207-P5):
   causal_grounding           — evidence_refs non-empty + causal language in content/claims
   evidence_linkage           — evidence_refs non-empty AND from_steps non-empty
   minimal_change             — execution.code_patch subtype + content line count <= 30
   alternative_hypothesis_check — analysis.root_cause subtype + alternatives language
   invariant_preservation     — judge.verification subtype + preservation language
+  ontology_alignment         — phase maps to known subtype + principals declared
+  phase_boundary_discipline  — recognized phase + consistent declaration + subtype resolved
+  action_grounding           — PLAN references ROOT_CAUSE (execution.code_patch)
+  option_comparison          — OPTIONS >= 2 entries (decision.fix_direction)
+  constraint_satisfaction    — CONSTRAINTS non-empty (decision.fix_direction)
+  result_verification        — TEST_RESULTS non-empty (judge.verification)
+  uncertainty_honesty        — UNCERTAINTY non-empty (analysis.root_cause)
 """
 
 from __future__ import annotations
@@ -98,6 +105,26 @@ _PRESERVE_KEYWORDS = re.compile(
 
 _SMALL_PATCH_MAX_LINES = 30
 
+# Structured field extraction regex (mirrors declaration_extractor._STRUCTURED_FIELD_RE)
+_STRUCTURED_FIELD_RE = re.compile(
+    r"^([A-Z_]{3,}):\s*\n(.*?)(?=\n[A-Z_]{3,}:|\Z)",
+    re.MULTILINE | re.DOTALL,
+)
+
+# Forbidden phase transitions: these transitions indicate wrong phase ordering.
+# key=from_phase, value=set of phases that CANNOT legally follow it.
+_FORBIDDEN_TRANSITIONS: dict[str, set[str]] = {
+    "OBSERVE":  {"EXECUTE", "JUDGE"},         # must ANALYZE before EXECUTE
+    "ANALYZE":  {"JUDGE"},                     # must EXECUTE before JUDGE
+    "JUDGE":    {"OBSERVE"},                   # after JUDGE, go to EXECUTE or ANALYZE (retry), not back to OBSERVE
+}
+
+# Option-line pattern: matches "- Option N:", "N.", "N)", numbered list items
+_OPTION_LINE_RE = re.compile(
+    r"(?:^|\n)\s*(?:-\s*Option\s*\d|(?:\d+)[.)]\s)",
+    re.IGNORECASE,
+)
+
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -110,6 +137,29 @@ def _extract_fields(phase_record):
     claims_text = " ".join(str(c) for c in claims)
     full_text = content + " " + claims_text
     return evidence_refs, from_steps, content, full_text
+
+
+def _extract_structured_from_content(phase_record) -> dict[str, str]:
+    """Extract structured output sections (ROOT_CAUSE, PLAN, OPTIONS, etc.) from content.
+
+    Uses the same regex as declaration_extractor.extract_structured_fields.
+    Returns dict of field_name (lowercased) -> stripped content.
+    Also checks named attributes on the phase_record (root_cause, plan, etc.).
+    """
+    result: dict[str, str] = {}
+    content = getattr(phase_record, "content", "") or ""
+    if content:
+        for m in _STRUCTURED_FIELD_RE.finditer(content):
+            key = m.group(1).strip().lower()
+            val = m.group(2).strip()
+            if val:
+                result[key] = val
+    # Merge explicit PhaseRecord attributes (higher priority — already parsed)
+    for attr in ("root_cause", "causal_chain", "plan"):
+        val = getattr(phase_record, attr, "") or ""
+        if val:
+            result[attr] = val
+    return result
 
 
 # ── Rule implementations ──────────────────────────────────────────────────────
@@ -257,6 +307,338 @@ def _infer_invariant_preservation(phase_record) -> tuple[float, list[str], str]:
     return score, signals, explanation
 
 
+# ── Stage-2 principal inference rules (p207-P5) ─────────────────────────────
+
+def _infer_ontology_alignment(phase_record) -> tuple[float, list[str], str]:
+    """ontology_alignment: declared phase matches the contract-expected phase for the subtype.
+
+    Checks that PhaseRecord.phase is a recognized phase with a valid subtype mapping.
+    A phase that maps to subtype="unknown" indicates misalignment.
+    """
+    phase = (getattr(phase_record, "phase", "") or "").upper()
+    subtype = getattr(phase_record, "subtype", "") or ""
+    score = 0.0
+    signals: list[str] = []
+
+    if not phase:
+        signals.append("no_phase_declared")
+        return score, signals, "No phase declared — ontology alignment cannot be assessed"
+
+    # Phase must map to a known subtype (not "unknown")
+    if subtype and subtype != "unknown":
+        score += 0.7
+        signals.append("phase_maps_to_known_subtype")
+    else:
+        signals.append("phase_maps_to_unknown_subtype")
+
+    # Bonus: principals declared (agent is engaging with the principal protocol)
+    principals = getattr(phase_record, "principals", []) or []
+    if principals:
+        score += 0.3
+        score = min(score, 1.0)
+        signals.append(f"declared_{len(principals)}_principals")
+
+    if score >= 0.7:
+        explanation = f"Phase '{phase}' aligned with subtype '{subtype}'"
+    else:
+        explanation = f"Phase '{phase}' maps to unknown subtype — ontology mismatch"
+
+    return score, signals, explanation
+
+
+def _infer_phase_boundary_discipline(phase_record) -> tuple[float, list[str], str]:
+    """phase_boundary_discipline: no forbidden phase transition occurred.
+
+    Checks that the current phase is a recognized phase and that no forbidden
+    transition signal is present. Since individual phase_records don't carry
+    transition history, we check for structural signals:
+    - phase is recognized (not unknown)
+    - allowed_next is defined for this phase
+    - content doesn't contain signals of phase confusion (declaring a different phase)
+    """
+    phase = (getattr(phase_record, "phase", "") or "").upper()
+    content = getattr(phase_record, "content", "") or ""
+    score = 0.0
+    signals: list[str] = []
+
+    recognized_phases = {"OBSERVE", "ANALYZE", "DECIDE", "DESIGN", "EXECUTE", "JUDGE"}
+    if phase not in recognized_phases:
+        signals.append("unrecognized_phase")
+        return score, signals, f"Phase '{phase}' not in recognized set — boundary discipline unknown"
+
+    # Base score: phase is recognized
+    score += 0.5
+    signals.append("recognized_phase")
+
+    # Check for phase confusion in content: agent declares a different phase
+    # than what the record says (indicates boundary violation)
+    phase_decl_re = re.compile(r"PHASE:\s*(\w+)", re.IGNORECASE)
+    decl_match = phase_decl_re.search(content)
+    if decl_match:
+        declared = decl_match.group(1).strip().upper()
+        # Normalize common variants
+        norm_map = {"OBSERVATION": "OBSERVE", "ANALYSIS": "ANALYZE",
+                    "EXECUTION": "EXECUTE", "JUDGMENT": "JUDGE", "JUDGEMENT": "JUDGE",
+                    "DECISION": "DECIDE"}
+        declared = norm_map.get(declared, declared)
+        if declared == phase:
+            score += 0.3
+            signals.append("phase_declaration_consistent")
+        else:
+            score -= 0.3
+            signals.append(f"phase_declaration_mismatch_{declared}_vs_{phase}")
+    else:
+        # No explicit phase declaration in content — neutral (not a violation)
+        score += 0.2
+        signals.append("no_phase_declaration_in_content")
+
+    # Bonus: subtype is not "unknown" (boundary was resolvable)
+    subtype = getattr(phase_record, "subtype", "") or ""
+    if subtype and subtype != "unknown":
+        score += 0.2
+        score = min(score, 1.0)
+        signals.append("subtype_resolved")
+
+    if score >= 0.7:
+        explanation = f"Phase boundary discipline maintained for '{phase}'"
+    else:
+        explanation = f"Phase boundary issue detected for '{phase}'"
+
+    return score, signals, explanation
+
+
+def _infer_action_grounding(phase_record) -> tuple[float, list[str], str]:
+    """action_grounding: PLAN field references ROOT_CAUSE from ANALYZE phase.
+
+    Checks that execution plan is grounded in the root cause analysis,
+    not invented from scratch. Applies to execution.code_patch only.
+    """
+    structured = _extract_structured_from_content(phase_record)
+    plan_text = structured.get("plan", "")
+    root_cause_text = structured.get("root_cause", "")
+    content = getattr(phase_record, "content", "") or ""
+    score = 0.0
+    signals: list[str] = []
+
+    # Check 1: PLAN field exists and is non-empty
+    if plan_text:
+        score += 0.4
+        signals.append("has_plan_field")
+    else:
+        signals.append("no_plan_field")
+
+    # Check 2: PLAN references root cause (either via root_cause field or causal language)
+    if plan_text and root_cause_text:
+        # Direct reference: plan contains words from root cause
+        rc_words = set(w.lower() for w in root_cause_text.split() if len(w) > 4)
+        plan_words = set(w.lower() for w in plan_text.split())
+        overlap = rc_words & plan_words
+        if len(overlap) >= 2:
+            score += 0.4
+            signals.append(f"plan_references_root_cause_{len(overlap)}_words")
+        elif overlap:
+            score += 0.2
+            signals.append("plan_weak_root_cause_reference")
+        else:
+            signals.append("plan_no_root_cause_reference")
+    elif plan_text:
+        # No root_cause field but plan exists — check for causal language in plan
+        if _CAUSAL_KEYWORDS.search(plan_text):
+            score += 0.3
+            signals.append("plan_has_causal_language")
+        else:
+            signals.append("plan_no_causal_language")
+
+    # Bonus: evidence_refs present (plan grounded in specific files)
+    evidence_refs = getattr(phase_record, "evidence_refs", []) or []
+    if evidence_refs:
+        score += 0.2
+        score = min(score, 1.0)
+        signals.append("has_evidence_refs")
+
+    if score >= 0.7:
+        explanation = "Execution plan grounded in root cause analysis"
+    else:
+        explanation = "Execution plan not grounded — PLAN missing or no root cause reference"
+
+    return score, signals, explanation
+
+
+def _infer_option_comparison(phase_record) -> tuple[float, list[str], str]:
+    """option_comparison: OPTIONS field has >= 2 distinct entries.
+
+    Checks that the agent considered multiple approaches before deciding.
+    Applies to decision.approach_selection / decision.fix_direction.
+    """
+    structured = _extract_structured_from_content(phase_record)
+    options_text = structured.get("options", "")
+    content = getattr(phase_record, "content", "") or ""
+    score = 0.0
+    signals: list[str] = []
+
+    # Check OPTIONS field
+    search_text = options_text if options_text else content
+    if not search_text:
+        signals.append("no_options_content")
+        return score, signals, "No OPTIONS field or content — option comparison absent"
+
+    # Count distinct option entries
+    option_matches = _OPTION_LINE_RE.findall(search_text)
+    option_count = len(option_matches)
+
+    if option_count >= 2:
+        score += 0.8
+        signals.append(f"has_{option_count}_options")
+    elif option_count == 1:
+        score += 0.3
+        signals.append("has_1_option_only")
+    else:
+        # Fallback: check for "Option" keyword mentions
+        option_mentions = len(re.findall(r"\boption\b", search_text, re.IGNORECASE))
+        if option_mentions >= 2:
+            score += 0.5
+            signals.append(f"option_keyword_mentions_{option_mentions}")
+        else:
+            signals.append("no_options_detected")
+
+    # Bonus: SELECTED field exists (made a decision)
+    if structured.get("selected", ""):
+        score += 0.2
+        score = min(score, 1.0)
+        signals.append("has_selected_field")
+
+    if score >= 0.7:
+        explanation = f"Option comparison present ({option_count} options listed)"
+    else:
+        explanation = f"Insufficient option comparison ({option_count} options, need >= 2)"
+
+    return score, signals, explanation
+
+
+def _infer_constraint_satisfaction(phase_record) -> tuple[float, list[str], str]:
+    """constraint_satisfaction: CONSTRAINTS field is non-empty.
+
+    Checks that the agent identified constraints (what must not break).
+    Applies to decision.approach_selection / decision.fix_direction.
+    """
+    structured = _extract_structured_from_content(phase_record)
+    constraints_text = structured.get("constraints", "")
+    score = 0.0
+    signals: list[str] = []
+
+    if constraints_text:
+        score += 0.7
+        signals.append("has_constraints_field")
+
+        # Bonus: multiple constraint items (indicates thorough analysis)
+        constraint_items = len(re.findall(r"(?:^|\n)\s*[-*•]\s", constraints_text))
+        if constraint_items >= 2:
+            score += 0.3
+            score = min(score, 1.0)
+            signals.append(f"has_{constraint_items}_constraint_items")
+        elif constraint_items == 1:
+            score += 0.1
+            signals.append("has_1_constraint_item")
+    else:
+        signals.append("no_constraints_field")
+
+    if score >= 0.7:
+        explanation = "Constraints identified for decision"
+    else:
+        explanation = "No CONSTRAINTS section — constraint satisfaction not demonstrated"
+
+    return score, signals, explanation
+
+
+def _infer_result_verification(phase_record) -> tuple[float, list[str], str]:
+    """result_verification: TEST_RESULTS field is non-empty.
+
+    Checks that the agent ran tests and reported results.
+    Applies to judge.patch_review / judge.verification.
+    """
+    structured = _extract_structured_from_content(phase_record)
+    test_results_text = structured.get("test_results", "")
+    content = getattr(phase_record, "content", "") or ""
+    score = 0.0
+    signals: list[str] = []
+
+    if test_results_text:
+        score += 0.7
+        signals.append("has_test_results_field")
+
+        # Bonus: contains pass/fail indicators
+        has_pass_fail = bool(re.search(r"\b(pass|fail|error|ok|PASSED|FAILED)\b",
+                                       test_results_text, re.IGNORECASE))
+        if has_pass_fail:
+            score += 0.3
+            score = min(score, 1.0)
+            signals.append("test_results_has_pass_fail")
+    else:
+        # Fallback: check content for test execution evidence
+        has_test_run = bool(re.search(
+            r"\b(ran\s+\d+\s+test|test.*passed|test.*failed|pytest|unittest)\b",
+            content, re.IGNORECASE,
+        ))
+        if has_test_run:
+            score += 0.5
+            signals.append("content_has_test_evidence")
+        else:
+            signals.append("no_test_results")
+
+    if score >= 0.7:
+        explanation = "Test results reported for verification"
+    else:
+        explanation = "No TEST_RESULTS section — result verification not demonstrated"
+
+    return score, signals, explanation
+
+
+def _infer_uncertainty_honesty(phase_record) -> tuple[float, list[str], str]:
+    """uncertainty_honesty: UNCERTAINTY field is non-empty.
+
+    Checks that the agent acknowledges unknowns and limitations.
+    Applies to analysis.root_cause.
+    """
+    structured = _extract_structured_from_content(phase_record)
+    uncertainty_text = structured.get("uncertainty", "")
+    content = getattr(phase_record, "content", "") or ""
+    score = 0.0
+    signals: list[str] = []
+
+    if uncertainty_text:
+        score += 0.8
+        signals.append("has_uncertainty_field")
+
+        # Bonus: specific uncertainty (not just "none" or "nothing")
+        dismissive = re.match(r"^\s*(none|nothing|n/?a|no uncertainty)\s*$",
+                              uncertainty_text, re.IGNORECASE)
+        if dismissive:
+            score -= 0.3
+            signals.append("uncertainty_dismissed")
+        else:
+            score += 0.2
+            score = min(score, 1.0)
+            signals.append("uncertainty_substantive")
+    else:
+        # Fallback: check content for uncertainty language
+        has_uncertainty = bool(re.search(
+            r"\b(not sure|uncertain|might|could be|possible|unclear|unknown)\b",
+            content, re.IGNORECASE,
+        ))
+        if has_uncertainty:
+            score += 0.4
+            signals.append("content_has_uncertainty_language")
+        else:
+            signals.append("no_uncertainty_acknowledged")
+
+    if score >= 0.7:
+        explanation = "Uncertainty acknowledged in analysis"
+    else:
+        explanation = "No UNCERTAINTY section — uncertainty honesty not demonstrated"
+
+    return score, signals, explanation
+
+
 # ── Register the 5 built-in rules ─────────────────────────────────────────────
 
 register_rule(InferenceRule(
@@ -291,6 +673,57 @@ register_rule(InferenceRule(
     principal="invariant_preservation",
     infer=_infer_invariant_preservation,
     applies_to=["judge.verification"],
+    threshold=0.7,
+))
+
+# ── Register the 7 stage-2 principal rules (p207-P5) ─────────────────────────
+
+register_rule(InferenceRule(
+    principal="ontology_alignment",
+    infer=_infer_ontology_alignment,
+    applies_to=None,  # all subtypes — ontology alignment is universal
+    threshold=0.7,
+))
+
+register_rule(InferenceRule(
+    principal="phase_boundary_discipline",
+    infer=_infer_phase_boundary_discipline,
+    applies_to=None,  # all subtypes — boundary discipline is universal
+    threshold=0.7,
+))
+
+register_rule(InferenceRule(
+    principal="action_grounding",
+    infer=_infer_action_grounding,
+    applies_to=["execution.code_patch"],
+    threshold=0.7,
+))
+
+register_rule(InferenceRule(
+    principal="option_comparison",
+    infer=_infer_option_comparison,
+    applies_to=["decision.fix_direction"],
+    threshold=0.7,
+))
+
+register_rule(InferenceRule(
+    principal="constraint_satisfaction",
+    infer=_infer_constraint_satisfaction,
+    applies_to=["decision.fix_direction"],
+    threshold=0.7,
+))
+
+register_rule(InferenceRule(
+    principal="result_verification",
+    infer=_infer_result_verification,
+    applies_to=["judge.verification"],
+    threshold=0.7,
+))
+
+register_rule(InferenceRule(
+    principal="uncertainty_honesty",
+    infer=_infer_uncertainty_honesty,
+    applies_to=["analysis.root_cause"],
     threshold=0.7,
 ))
 

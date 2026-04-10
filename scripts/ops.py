@@ -1060,7 +1060,11 @@ def _launch_ecs_task(batch_name: str, instance_ids: list[str], max_attempts: int
         "--workers", str(workers),
         "--output", output_path,
     ]
-    env = [{"name": "BATCH_NAME", "value": batch_name}]
+    env = [
+        {"name": "BATCH_NAME", "value": batch_name},
+        {"name": "STRATEGY_LOG_PATH", "value": f"/app/results/{batch_name}/strategy_log.jsonl"},
+        {"name": "STRATEGY_TABLE_PATH", "value": f"/app/results/{batch_name}/strategy_table.json"},
+    ]
     if model:
         env.append({"name": "JINGU_MODEL", "value": model})
     overrides = {"containerOverrides": [{"name": "runner", "command": cmd_parts, "environment": env}]}
