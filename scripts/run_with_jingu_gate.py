@@ -3279,6 +3279,7 @@ def run_agent(
     t_llm.stop()
 
     # Parse traj for usage + submission
+    _cv_source = None  # v2: initialized here so it's always in scope for build_retry_plan
     traj_path = attempt_dir / instance_id / f"{instance_id}.traj.json"
     usage = ModelUsage(instance_id, attempt)
     usage.load_from_traj(traj_path)
