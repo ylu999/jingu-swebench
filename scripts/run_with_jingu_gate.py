@@ -3161,6 +3161,27 @@ def run_agent(
                 if _fallback_cv and _final_cv is None:
                     print(f"    [cv-fallback] F2P_ALL_FAIL inferred from controlled_error: "
                           f"passed={_cv_source['tests_passed']} failed={_cv_source['tests_failed']}")
+            # p207-P4: store parsed test results as structured data for all consumers.
+            # Calls parse_pytest_output on CV stdout so GovernancePacks, retry_controller,
+            # and any future consumer can access failing_tests/error_excerpts/summary
+            # without re-parsing.
+            if _cv_source and _cv_source.get("kind") == "controlled_fail_to_pass":
+                _cv_stdout_p4 = _cv_source.get("stdout", "")
+                _cv_stderr_p4 = _cv_source.get("stderr", "")
+                if _cv_stdout_p4 or _cv_stderr_p4:
+                    _parsed = parse_pytest_output(_cv_stdout_p4, _cv_stderr_p4)
+                    _cp = _cv_source.get("tests_passed", 0) or 0
+                    _cf = _cv_source.get("tests_failed", 0) or 0
+                    jingu_body["parsed_test_results"] = {
+                        "failing_tests": _parsed["failing_tests"],
+                        "error_excerpts": _parsed["error_excerpts"],
+                        "summary": _parsed["summary"],
+                        "partial_progress": _cp > 0 and _cf > 0,
+                    }
+                    print(f"    [p207-P4] parsed_test_results: "
+                          f"failing={len(_parsed['failing_tests'])} "
+                          f"excerpts={len(_parsed['error_excerpts'])} "
+                          f"partial={_cp > 0 and _cf > 0}")
             # Store full verify_history for observability
             jingu_body["verify_history"] = _monitor.verify_history
             # p190: per-phase records — one entry per VerdictAdvance during this attempt
