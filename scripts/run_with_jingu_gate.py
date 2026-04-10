@@ -285,6 +285,9 @@ class StepMonitorState:
         # Same phase + same reason N times in a row → ESCALATE_CONTRACT_BUG (VerdictStop).
         # This is a safety fuse, not a contract substitute. Prevents infinite gate loops.
         self._retryable_loop_counts: dict[tuple, int] = {}   # (phase, reason) → count
+        # p207-P9: selective principal bypass — tracks principals that hit fake loop limit.
+        # Only these specific principals are bypassed; other principals remain enforced.
+        self._bypassed_principals: set[str] = set()       # principal names bypassed due to fake loop
         # 改动9c: per-LLM-step keyed idempotency for control signal injection.
         # key = f"{llm_step}:{kind}:{signal_id}" where kind ∈ {phase_prefix, cognition_violation}
         # _llm_step increments only when a NEW assistant text is observed in _step_observe,
@@ -1002,6 +1005,23 @@ def _step_cp_update_and_verdict(
                 print(f"    [principal_inference] telemetry error={_inf_telem_exc}", flush=True)
             from principal_gate import check_principal_inference as _check_pi
             _inf_violation = _check_pi(_pr, _eval_phase)
+            # p207-P9: filter out bypassed principals from fake violation
+            if _inf_violation and "fake_principal" in _inf_violation and state._bypassed_principals:
+                _fake_names = [
+                    p.strip() for p in _inf_violation.split(":", 1)[1].split(",")
+                    if p.strip()
+                ]
+                _remaining = [p for p in _fake_names if p not in state._bypassed_principals]
+                if _remaining:
+                    _inf_violation = f"fake_principal:{','.join(_remaining)}"
+                else:
+                    # All fake principals are bypassed — no violation
+                    _inf_violation = None
+                    print(
+                        f"    [principal_inference] fake_principals_all_bypassed:"
+                        f" bypassed={sorted(state._bypassed_principals)}",
+                        flush=True,
+                    )
             if _inf_violation and "fake_principal" in _inf_violation:
                 # CC2: fake principal = declared but not supported by behavioral evidence.
                 # Only fake_checkable principals (stage 4, has inference rule) reach here.
@@ -1044,19 +1064,28 @@ def _step_cp_update_and_verdict(
                 _fi_loop_count = state._retryable_loop_counts[_fi_loop_key]
                 _FAKE_LOOP_LIMIT = 3
                 if _fi_loop_count >= _FAKE_LOOP_LIMIT:
+                    # p207-P9: selective bypass — only bypass the specific principals
+                    # that caused the fake loop, not all contracts.
+                    _fake_principals = []
+                    if ":" in _inf_violation:
+                        _fake_principals = [
+                            p.strip() for p in _inf_violation.split(":", 1)[1].split(",")
+                            if p.strip()
+                        ]
+                    state._bypassed_principals.update(_fake_principals)
+                    state._retryable_loop_counts[_fi_loop_key] = 0  # reset to avoid re-trigger
                     print(
-                        f"    [principal_inference] ESCALATE_FAKE_LOOP:"
+                        f"    [principal_inference] FAKE_LOOP_SELECTIVE_BYPASS:"
                         f" phase={_eval_phase} violation={_inf_violation}"
                         f" count={_fi_loop_count} >= {_FAKE_LOOP_LIMIT}"
-                        f" → VerdictStop (fake principal loop, not agent failure)",
+                        f" → bypassed_principals={sorted(state._bypassed_principals)}"
+                        f" (selective bypass, other principals still enforced)",
                         flush=True,
                     )
-                    state.early_stop_verdict = VerdictStop(reason="no_signal")
-                    raise StopExecution("no_signal")
+                    # Clear pending redirect hint — agent continues normally
+                    state.pending_redirect_hint = ""
             elif _inf_violation and "missing_required" in _inf_violation:
                 pass  # logged by principal_gate above; inference perspective is telemetry only
-        except StopExecution:
-            raise  # ESCALATE_FAKE_LOOP issued — propagate to outer handler
         except Exception as _pi_exc:
             print(f"    [principal_inference] check error={_pi_exc}", flush=True)
 
@@ -1666,6 +1695,154 @@ def extract_principal_violation_codes(decl: dict | None) -> list[str]:
     return codes
 
 
+# ── p207-P3: pytest output parser for targeted retry feedback ────────────────
+
+_MAX_PYTEST_FEEDBACK_BYTES = 2048  # cap extracted content to ~2KB
+
+
+def parse_pytest_output(stdout: str, stderr: str = "") -> dict:
+    """
+    Parse pytest stdout/stderr for structured failure details.
+
+    Returns dict with:
+      - failing_tests: list[str]  — test names that FAILED
+      - error_excerpts: list[str] — first N assertion/error messages
+      - summary: str              — the "X failed, Y passed" summary line
+      - partial: bool             — True if some tests passed and some failed
+
+    Handles gracefully: empty input, non-pytest output, truncated output.
+    """
+    result: dict = {
+        "failing_tests": [],
+        "error_excerpts": [],
+        "summary": "",
+        "partial": False,
+    }
+    if not stdout and not stderr:
+        return result
+
+    combined = (stdout or "") + "\n" + (stderr or "")
+
+    # 1. Extract FAILED test names from "FAILED path::Class::method" lines
+    failed_pattern = re.compile(r'FAILED\s+(\S+)', re.MULTILINE)
+    failed_matches = failed_pattern.findall(combined)
+    if failed_matches:
+        seen: set = set()
+        for m in failed_matches:
+            if m not in seen:
+                seen.add(m)
+                result["failing_tests"].append(m)
+
+    # 2. Extract summary line: "= X failed, Y passed =" or similar
+    summary_pattern = re.compile(
+        r'={2,}\s*([\d\w\s,]+(?:failed|passed|error)[^\n]*?)\s*={2,}',
+        re.MULTILINE,
+    )
+    summary_matches = summary_pattern.findall(combined)
+    if summary_matches:
+        result["summary"] = summary_matches[-1].strip()
+        s = result["summary"].lower()
+        if "passed" in s and "failed" in s:
+            result["partial"] = True
+
+    # 3. Extract error excerpts — assertion errors and typed exceptions
+    error_patterns = [
+        re.compile(r'((?:Assertion|Type|Value|Attribute|Key|Import|Runtime)Error[:\s].{10,200})', re.MULTILINE),
+        re.compile(r'(assert\w*\s+.{10,200})', re.MULTILINE | re.IGNORECASE),
+    ]
+    excerpts: list = []
+    for pat in error_patterns:
+        for m in pat.findall(combined):
+            cleaned = m.strip()[:300]
+            if cleaned and cleaned not in excerpts:
+                excerpts.append(cleaned)
+            if len(excerpts) >= 3:
+                break
+        if len(excerpts) >= 3:
+            break
+
+    # 4. Fallback: "E " prefixed lines (pytest's error detail marker)
+    if not excerpts:
+        e_lines = re.findall(r'^E\s+(.+)$', combined, re.MULTILINE)
+        for line in e_lines[:5]:
+            cleaned = line.strip()[:200]
+            if cleaned:
+                excerpts.append(cleaned)
+
+    result["error_excerpts"] = excerpts[:3]
+
+    return result
+
+
+def _get_cv_stdout(jingu_body: dict) -> tuple:
+    """
+    Extract stdout/stderr from the most recent controlled_fail_to_pass verify_history entry.
+    Returns (stdout, stderr). Both empty if not available.
+    """
+    verify_history = jingu_body.get("verify_history", [])
+    if not verify_history:
+        return "", ""
+    for entry in reversed(verify_history):
+        if entry.get("kind") == "controlled_fail_to_pass":
+            return entry.get("stdout", ""), entry.get("stderr", "")
+    for entry in reversed(verify_history):
+        if entry.get("kind") == "controlled_error":
+            return entry.get("stdout", ""), entry.get("stderr", "")
+    for entry in reversed(verify_history):
+        if entry.get("stdout", ""):
+            return entry.get("stdout", ""), entry.get("stderr", "")
+    return "", ""
+
+
+def _format_pytest_feedback(parsed: dict, controlled_passed: int, controlled_failed: int,
+                            fail_to_pass_tests: list) -> str:
+    """
+    Format parsed pytest output into an actionable retry feedback string.
+    Capped at ~2KB.
+    """
+    parts = []
+
+    total = controlled_passed + controlled_failed
+    if parsed["partial"]:
+        parts.append(
+            f"TEST RESULTS: {controlled_failed}/{total} FAIL_TO_PASS tests still failing "
+            f"({controlled_passed} now pass — partial progress)."
+        )
+    else:
+        parts.append(
+            f"TEST RESULTS: {controlled_failed}/{total} FAIL_TO_PASS tests still failing."
+        )
+
+    if parsed["failing_tests"]:
+        parts.append("Failing tests:")
+        for t in parsed["failing_tests"][:8]:
+            short = t.split("::")[-1] if "::" in t else t.split("/")[-1]
+            parts.append(f"  - {short}  ({t})" if len(t) < 120 else f"  - {short}")
+    elif fail_to_pass_tests:
+        parts.append("Required FAIL_TO_PASS tests:")
+        for t in fail_to_pass_tests[:6]:
+            short = t.split(".")[-1] if "." in t else t
+            parts.append(f"  - {short}")
+
+    if parsed["error_excerpts"]:
+        parts.append("Error details:")
+        for i, exc in enumerate(parsed["error_excerpts"][:2]):
+            parts.append(f"  [{i+1}] {exc}")
+
+    if parsed["summary"]:
+        parts.append(f"Summary: {parsed['summary']}")
+
+    parts.append(
+        "Action: read the failing test code, trace the expected behavior, "
+        "and fix the root cause in your patch."
+    )
+
+    feedback = "\n".join(parts)
+    if len(feedback) > _MAX_PYTEST_FEEDBACK_BYTES:
+        feedback = feedback[:_MAX_PYTEST_FEEDBACK_BYTES - 20] + "\n[truncated]"
+    return feedback
+
+
 def build_execution_feedback(
     jingu_body: dict,
     fail_to_pass_tests: list[str],
@@ -1676,6 +1853,8 @@ def build_execution_feedback(
 
     Converts: test_results + patch fingerprint → actionable hint for attempt 2.
     Three layers: summary → failing tests → example failure excerpt.
+    p207-P3: when controlled_verify stdout is available, parses pytest output
+    for specific failing test names and error messages.
     """
     test_results = jingu_body.get("test_results", {})
     tests_ran = test_results.get("ran_tests", False)
@@ -1697,7 +1876,16 @@ def build_execution_feedback(
                 f"Required tests: {tests_str}"
             )
         else:
-            # Official tests failed — HARD_FAIL with counts
+            # Official tests failed — p207-P3: parse pytest stdout for targeted feedback
+            cv_stdout, cv_stderr = _get_cv_stdout(jingu_body)
+            if cv_stdout or cv_stderr:
+                parsed = parse_pytest_output(cv_stdout, cv_stderr)
+                if parsed["failing_tests"] or parsed["error_excerpts"]:
+                    print(f"[bef] p207-P3: parsed {len(parsed['failing_tests'])} failing tests, "
+                          f"{len(parsed['error_excerpts'])} error excerpts from cv stdout")
+                    return _format_pytest_feedback(parsed, controlled_passed, controlled_failed,
+                                                   fail_to_pass_tests)
+            # Fallback: generic HARD_FAIL with counts (no parseable pytest output)
             return (
                 f"Official FAIL_TO_PASS tests FAILED: "
                 f"{controlled_passed} passed, {controlled_failed} failed. "
@@ -2977,6 +3165,15 @@ def run_agent(
             jingu_body["verify_history"] = _monitor.verify_history
             # p190: per-phase records — one entry per VerdictAdvance during this attempt
             jingu_body["phase_records"] = [r.as_dict() for r in _monitor.phase_records]
+            # p207-P9: log selective bypass summary at attempt end
+            if _monitor._bypassed_principals:
+                _bp_sorted = sorted(_monitor._bypassed_principals)
+                jingu_body["bypassed_principals"] = _bp_sorted
+                print(
+                    f"    [fake_loop_summary] total_bypassed={len(_bp_sorted)}"
+                    f" principals={_bp_sorted}",
+                    flush=True,
+                )
             # p195: principal inference telemetry — rich result with signals/explanation
             try:
                 from principal_inference import run_inference, diff_principals
