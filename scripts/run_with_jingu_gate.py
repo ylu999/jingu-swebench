@@ -3108,6 +3108,7 @@ def run_with_jingu(instance_id: str, output_dir: Path, max_attempts: int = 3,
     attempts_log: list[dict] = []   # telemetry: one entry per attempt
     last_failure = ""
     _prev_raw_patch = ""            # p25 Outcome Gate: raw patch from previous attempt for hash comparison
+    _no_progress_streak = 0          # p207-P6: consecutive no-progress attempts with different patches
     total_llm_calls = 0
     # p178: per-attempt strategy metadata (populated when retry_controller runs)
     _strategy_entries: list[dict] = []
@@ -3543,22 +3544,62 @@ def run_with_jingu(instance_id: str, output_dir: Path, max_attempts: int = 3,
                                     control_action="ADJUST",
                                     principal_violations=retry_plan.principal_violations,
                                 )
+                                _no_progress_streak = 0  # p207-P6: stuck is a different mode, reset exploring streak
                             else:
-                                # Different patch content, no improvement yet → exploring, allow continue
-                                print(f"    [test-progress-gate] NO_PROGRESS exploring — gentle ADJUST")
-                                if retry_plan.control_action == "CONTINUE":
+                                # Different patch content, no improvement yet → exploring
+                                _no_progress_streak += 1
+                                print(f"    [outcome_gate] consecutive_no_progress={_no_progress_streak} "
+                                      f"strategy_change_forced={_no_progress_streak >= 2}")
+                                if _no_progress_streak >= 2:
+                                    # p207-P6: 2+ consecutive no-progress with different patches → force complete strategy change
+                                    print(f"    [test-progress-gate] NO_PROGRESS exploring streak={_no_progress_streak} — FORCED STRATEGY CHANGE")
                                     retry_plan = RetryPlan(
-                                        root_causes=retry_plan.root_causes + ["invariant=NO_TEST_PROGRESS", "direction=exploring"],
-                                        must_do=retry_plan.must_do,
-                                        must_not_do=retry_plan.must_not_do,
-                                        validation_requirement=retry_plan.validation_requirement,
+                                        root_causes=retry_plan.root_causes + ["invariant=NO_TEST_PROGRESS", "direction=exploring", f"no_progress_streak={_no_progress_streak}"],
+                                        must_do=[
+                                            "ABANDON your current hypothesis entirely — it has failed multiple times",
+                                            "Re-read the failing test to understand what it ACTUALLY checks",
+                                            "Identify a completely different root cause",
+                                            "Write a fundamentally different fix targeting different code",
+                                        ],
+                                        must_not_do=[
+                                            "Do NOT make small variations of your previous patches",
+                                            "Do NOT modify the same function or method as before",
+                                            "Do NOT assume your previous diagnosis was correct",
+                                        ],
+                                        validation_requirement="Run required tests and confirm delta > 0",
                                         next_attempt_prompt=(
-                                            retry_plan.next_attempt_prompt
-                                            + "\n[Tests not yet improving — keep iterating, change approach if needed]"
-                                        ),
+                                            f"STRATEGY CHANGE REQUIRED (attempt streak={_no_progress_streak}): "
+                                            f"Your last {_no_progress_streak} attempts with DIFFERENT patches all failed to improve test results. "
+                                            "This means your fundamental hypothesis about the bug is wrong. "
+                                            "You MUST: "
+                                            "(1) ABANDON your current hypothesis entirely. "
+                                            "(2) Re-read the failing test to understand what it ACTUALLY checks. "
+                                            "(3) Identify a completely different root cause. "
+                                            "(4) Write a fundamentally different fix — different file or different function. "
+                                            "Do NOT make small variations of previous patches."
+                                        )[:600],
                                         control_action="ADJUST",
                                         principal_violations=retry_plan.principal_violations,
                                     )
+                                else:
+                                    # First no-progress exploring attempt → gentle hint
+                                    print(f"    [test-progress-gate] NO_PROGRESS exploring — gentle ADJUST")
+                                    if retry_plan.control_action == "CONTINUE":
+                                        retry_plan = RetryPlan(
+                                            root_causes=retry_plan.root_causes + ["invariant=NO_TEST_PROGRESS", "direction=exploring"],
+                                            must_do=retry_plan.must_do,
+                                            must_not_do=retry_plan.must_not_do,
+                                            validation_requirement=retry_plan.validation_requirement,
+                                            next_attempt_prompt=(
+                                                retry_plan.next_attempt_prompt
+                                                + "\n[Tests not yet improving — keep iterating, change approach if needed]"
+                                            ),
+                                            control_action="ADJUST",
+                                            principal_violations=retry_plan.principal_violations,
+                                        )
+                        else:
+                            # Progress OK or first attempt — reset no-progress streak
+                            _no_progress_streak = 0
                         # ── p27 GovernancePack pipeline ───────────────────────────────────
                         # Run all installed packs: parse_failure → recognize → route.
                         # First REROUTE decision overrides retry_plan.
