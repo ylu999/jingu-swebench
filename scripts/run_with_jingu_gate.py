@@ -1138,14 +1138,33 @@ def _step_check_structure(
             return
 
         # Build correction hint for missing fields
+        # ROOT_CAUSE (ANALYZE) and PLAN (EXECUTE) get WARNING-level mandatory language;
+        # all other fields remain soft hints.
+        _MANDATORY_FIELDS = {
+            ("ANALYZE", "ROOT_CAUSE"): (
+                "WARNING: Your analysis MUST include ROOT_CAUSE: with a specific file and line. "
+                "Without this, your fix will be unfocused."
+            ),
+            ("EXECUTE", "PLAN"): (
+                "WARNING: Your execution MUST include PLAN: listing specific changes. "
+                "Without this, your patch may be incomplete."
+            ),
+        }
         _missing_str = ", ".join(missing)
         _hint_parts = [
             f"[STRUCTURE HINT] Your {_phase} output is missing required fields: {_missing_str}.",
-            f"Please include these fields in your next response using the format:",
         ]
+        _has_mandatory = False
         for field in missing:
-            _hint_parts.append(f"  {field}:")
-            _hint_parts.append(f"  <your {field.lower().replace('_', ' ')} here>")
+            _mandatory_msg = _MANDATORY_FIELDS.get((_phase, field))
+            if _mandatory_msg:
+                _hint_parts.append(_mandatory_msg)
+                _has_mandatory = True
+            else:
+                _hint_parts.append(f"  {field}:")
+                _hint_parts.append(f"  <your {field.lower().replace('_', ' ')} here>")
+        if not _has_mandatory:
+            _hint_parts.insert(1, "Please include these fields in your next response using the format:")
 
         _hint = "\n".join(_hint_parts)
 

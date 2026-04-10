@@ -77,6 +77,8 @@ _ANALYZE_GUIDANCE = (
     "CAUSAL_CHAIN:\n<step-by-step reasoning from evidence to root cause>\n\n"
     "ALTERNATIVES:\n- <other hypothesis> — why ruled out\n\n"
     "UNCERTAINTY:\n<what you are NOT sure about — be honest>\n\n"
+    "ROOT_CAUSE is MANDATORY. If you do not produce a ROOT_CAUSE: field with a specific "
+    "file:line location, this analysis step is incomplete and you will be redirected back to ANALYZE.\n\n"
     "Rules: ROOT_CAUSE must be specific. EVIDENCE must reference real files. "
     "CAUSAL_CHAIN must connect evidence → root cause. Do NOT propose fixes here.\n"
     + _ANALYZE_PRINCIPAL
@@ -105,6 +107,8 @@ _EXECUTE_GUIDANCE = (
     "PLAN:\n<how you will fix it — MUST reference the ROOT_CAUSE from ANALYZE>\n\n"
     "CHANGE_SCOPE:\n<which files/functions will change>\n\n"
     "Then write the patch immediately.\n\n"
+    "PLAN is MANDATORY. If you do not produce a PLAN: field listing specific files and changes, "
+    "this execution step is incomplete and you will be redirected back to planning.\n\n"
     "Rules:\n"
     "1. PLAN must explicitly reference the root cause identified in ANALYZE.\n"
     "2. Do NOT re-analyze. Do NOT re-read files. You already know the root cause.\n"
