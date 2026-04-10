@@ -2072,7 +2072,7 @@ def run_controlled_verify(
             capture_output=True, text=True, timeout=15,
         )
 
-        # Step 3: apply patch (git apply in testbed)
+        # Step 3: apply model patch (git apply in testbed)
         apply_result = _sp.run(
             ["docker", "exec", "-w", "/testbed", container_id,
              "bash", "-c", "git apply /tmp/jingu_verify.patch 2>&1"],
@@ -2096,7 +2096,45 @@ def run_controlled_verify(
                 "stderr": (apply_result.stderr or "")[:10240],
             }
 
-        # Step 4: run FAIL_TO_PASS tests using official harness command
+        # Step 3b: apply test_patch (CRITICAL for eval alignment — BUG-10 fix)
+        # Official SWE-bench eval applies the test_patch which contains new/modified
+        # test cases (the FAIL_TO_PASS tests). Without this, controlled_verify runs
+        # against the OLD test suite and produces false positives/negatives.
+        _test_patch = instance.get("test_patch", "")
+        if _test_patch and _test_patch.strip():
+            # Get test files from test_patch for later reset
+            import re as _re_mod
+            _test_files = _re_mod.findall(r"diff --git a/.* b/(.*)", _test_patch)
+
+            # First reset test files to base_commit state (same as official eval)
+            if _test_files:
+                _test_files_str = " ".join(_test_files)
+                _sp.run(
+                    ["docker", "exec", "-w", "/testbed", container_id,
+                     "bash", "-c", f"git checkout {_base_c} {_test_files_str} 2>/dev/null || true"],
+                    capture_output=True, text=True, timeout=15,
+                )
+
+            # Write test_patch to container and apply
+            with _tf.NamedTemporaryFile(suffix=".patch", delete=False, mode="w") as _tp_f:
+                _tp_f.write(_test_patch)
+                _tp_host = _tp_f.name
+            _sp.run(
+                ["docker", "cp", _tp_host, f"{container_id}:/tmp/jingu_test.patch"],
+                capture_output=True, text=True, timeout=30,
+            )
+            os.unlink(_tp_host)
+            _tp_apply = _sp.run(
+                ["docker", "exec", "-w", "/testbed", container_id,
+                 "bash", "-c", "git apply -v /tmp/jingu_test.patch 2>&1"],
+                capture_output=True, text=True, timeout=30,
+            )
+            if _tp_apply.returncode != 0:
+                print(f"[controlled_verify] WARNING: test_patch apply failed: "
+                      f"{_tp_apply.stdout[:200]}", flush=True)
+                # Continue anyway — some test_patches may partially apply
+
+        # Step 4: run tests using official harness command
         test_cmd = _build_test_command(instance)
 
         test_result = _sp.run(
@@ -2110,12 +2148,24 @@ def run_controlled_verify(
         passed, failed = _parse_test_output_counts(output)
         elapsed_ms = round((time.monotonic() - t0) * 1000, 1)
 
+        # Step 6: parse F2P/P2P results for eval-aligned verdict
+        f2p_pass, f2p_fail, p2p_pass, p2p_fail = _parse_f2p_p2p(
+            output, fail_to_pass, instance.get("PASS_TO_PASS", [])
+        )
+
         # Rollback: reset to base_commit then restore agent's working state via stash pop
         _sp.run(
             ["docker", "exec", "-w", "/testbed", container_id,
              "bash", "-c", f"git reset --hard {_base_c} -q 2>/dev/null; git stash pop -q 2>/dev/null || true"],
             capture_output=True, text=True, timeout=15,
         )
+
+        # Compute eval-aligned resolved status
+        f2p_total = f2p_pass + f2p_fail
+        p2p_total = p2p_pass + p2p_fail
+        f2p_rate = f2p_pass / f2p_total if f2p_total > 0 else 1.0
+        p2p_rate = p2p_pass / p2p_total if p2p_total > 0 else 1.0
+        eval_resolved = (f2p_rate == 1.0 and p2p_rate == 1.0)
 
         return {
             "verification_kind": "controlled_fail_to_pass",
@@ -2126,6 +2176,12 @@ def run_controlled_verify(
             "output_tail": output_tail,
             "stdout": (test_result.stdout or "")[:10240],
             "stderr": (test_result.stderr or "")[:10240],
+            # BUG-10 fix: eval-aligned fields
+            "f2p_passed": f2p_pass,
+            "f2p_failed": f2p_fail,
+            "p2p_passed": p2p_pass,
+            "p2p_failed": p2p_fail,
+            "eval_resolved": eval_resolved,
         }
 
     except _sp.TimeoutExpired:
@@ -2282,6 +2338,119 @@ def _parse_test_output_counts(output: str) -> tuple[int, int]:
         return total, 0  # OK
     # Error exit with no parseable output
     return -1, -1
+
+
+def _parse_f2p_p2p(
+    output: str,
+    fail_to_pass: list,
+    pass_to_pass: list,
+) -> tuple[int, int, int, int]:
+    """
+    Parse test output against FAIL_TO_PASS and PASS_TO_PASS test lists.
+
+    Matches individual test results in the output against the official test lists
+    to compute eval-aligned metrics, exactly like SWE-bench grading.
+
+    Returns (f2p_passed, f2p_failed, p2p_passed, p2p_failed).
+
+    BUG-10 fix: this replaces the old approach of just counting total pass/fail,
+    which couldn't distinguish F2P from P2P and produced false positives/negatives.
+    """
+    import json as _json
+
+    # Parse JSON-encoded test lists if needed
+    if isinstance(fail_to_pass, str):
+        try:
+            fail_to_pass = _json.loads(fail_to_pass)
+        except Exception:
+            fail_to_pass = []
+    if isinstance(pass_to_pass, str):
+        try:
+            pass_to_pass = _json.loads(pass_to_pass)
+        except Exception:
+            pass_to_pass = []
+
+    if not output:
+        # No output at all — F2P conservatively failed, P2P unknown (assume passed)
+        return 0, len(fail_to_pass), len(pass_to_pass), 0
+
+    # Build sets of test identifiers for matching
+    f2p_set = set(fail_to_pass)
+    p2p_set = set(pass_to_pass)
+
+    # Extract test results from output.
+    # Django uses unittest format: "test_name (module.Class) ... ok/FAIL/ERROR"
+    # pytest uses: "path::test_name PASSED/FAILED"
+    passed_tests = set()
+    failed_tests = set()
+
+    for line in output.split("\n"):
+        line = line.strip()
+        # Django unittest format: "test_method (module.ClassName) ... ok"
+        # or "test_method (module.ClassName) ... FAIL"
+        m_django = re.match(
+            r"^(\w+)\s+\(([^)]+)\)\s+\.\.\.\s+(ok|FAIL|ERROR)", line
+        )
+        if m_django:
+            test_name = m_django.group(1)
+            test_class = m_django.group(2)
+            status = m_django.group(3)
+            # Build full test ID: "test_name (module.Class)"
+            full_id = f"{test_name} ({test_class})"
+            if status == "ok":
+                passed_tests.add(full_id)
+            else:
+                failed_tests.add(full_id)
+            continue
+
+        # Django verbose: "test_method (module.ClassName)\nDescription ... ok"
+        m_django_desc = re.match(
+            r"^(.+?)\s+\.\.\.\s+(ok|FAIL|ERROR)$", line
+        )
+        if m_django_desc:
+            test_id = m_django_desc.group(1).strip()
+            status = m_django_desc.group(2)
+            if status == "ok":
+                passed_tests.add(test_id)
+            else:
+                failed_tests.add(test_id)
+            continue
+
+        # pytest format: "path/test.py::test_name PASSED/FAILED"
+        m_pytest = re.match(r"^(.+?)\s+(PASSED|FAILED|ERROR)", line)
+        if m_pytest:
+            test_id = m_pytest.group(1).strip()
+            status = m_pytest.group(2)
+            if status == "PASSED":
+                passed_tests.add(test_id)
+            else:
+                failed_tests.add(test_id)
+
+    # Match against F2P and P2P lists
+    f2p_passed = 0
+    f2p_failed = 0
+    for t in f2p_set:
+        if t in passed_tests:
+            f2p_passed += 1
+        elif t in failed_tests:
+            f2p_failed += 1
+        else:
+            # Test not found in output — count as failed (conservative)
+            f2p_failed += 1
+
+    p2p_passed = 0
+    p2p_failed = 0
+    for t in p2p_set:
+        if t in passed_tests:
+            p2p_passed += 1
+        elif t in failed_tests:
+            p2p_failed += 1
+        else:
+            # Test not found in output — count as passed (conservative for P2P,
+            # since missing from output often means the test module wasn't in directives)
+            p2p_passed += 1
+
+    return f2p_passed, f2p_failed, p2p_passed, p2p_failed
 
 
 def extract_test_counts(jingu_body: dict) -> int:
