@@ -4338,6 +4338,26 @@ def main():
                 print(f"[predictions] saved {r['instance_id']} (incremental)")
             print(f"[progress] {done}/{len(args.instance_ids)} done")
 
+            # ── Heartbeat: write after each instance completes ─────────────────
+            _hb_errors = [e_iid for e_iid, e_r in zip(
+                [futures[f] for f in futures], results) if e_r and not e_r.get("accepted")]
+            try:
+                _hb = {
+                    "ts": time.time(),
+                    "ts_iso": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                    "done": done,
+                    "total": len(args.instance_ids),
+                    "last_instance": iid,
+                    "last_accepted": bool(r and r.get("accepted")),
+                    "accepted_so_far": sum(1 for x in results if x and x.get("accepted")),
+                    "errors": [futures[f] for f in futures
+                               if f.done() and f.exception() is not None],
+                    "run_id": args.run_id or "unknown",
+                }
+                (output_dir / "heartbeat.json").write_text(json.dumps(_hb, indent=2) + "\n")
+            except Exception:
+                pass  # heartbeat is best-effort, never crash the pipeline
+
     t_parallel.stop()
 
     t_write = Timer("write predictions", parent=_timing_root)
