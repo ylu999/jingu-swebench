@@ -4258,7 +4258,7 @@ def _run_official_evaluation(
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--instance-ids", nargs="+", required=True)
-    parser.add_argument("--max-attempts", type=int, default=1)
+    parser.add_argument("--max-attempts", type=int, default=3)
     parser.add_argument("--output", default="results/mini-swe-agent")
     parser.add_argument("--workers", type=int, default=4,
                         help="Parallel instances to run (default: 4)")
