@@ -1,7 +1,7 @@
 """
 declaration_extractor.py — Extract type/principal declaration from agent output.
 
-Looks for FIX_TYPE: and PRINCIPALS: lines in the last 500 chars of agent output.
+Looks for FIX_TYPE: and PRINCIPALS: lines in the last 2000 chars of agent output.
 Returns {"type": str, "principals": [str]} or {} if not found.
 
 This is structural extraction — deterministic regex, no LLM.
@@ -50,13 +50,13 @@ def extract_declaration(agent_output: str) -> Declaration:
     """
     Extract fix type and principals from agent output.
 
-    Scans the last 500 characters where declarations are expected to appear.
+    Scans the last 2000 characters where declarations are expected to appear.
     Returns {} if FIX_TYPE is not found (opt-in gate).
     """
     if not agent_output:
         return {}
 
-    tail = agent_output[-500:]
+    tail = agent_output[-2000:]
 
     type_match = _FIX_TYPE_RE.search(tail)
     if not type_match:

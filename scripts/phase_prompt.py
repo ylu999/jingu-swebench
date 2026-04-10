@@ -15,35 +15,92 @@ so prompt vocabulary stays in sync with principal_gate.py enforcement.
 # Load canonical principal guidance from subtype_contracts (p193).
 # build_phase_principal_guidance returns "You MUST declare ... You SHOULD also declare ..."
 # This is appended to the phase behavior text below.
-# Exception-safe: if import fails, fallback to static principal strings.
+# Exception-safe: if import fails, fallback to empty strings (SST2 — no stale copies).
 try:
     from subtype_contracts import build_phase_principal_guidance as _build_pg
+    _UNDERSTAND_PRINCIPAL = _build_pg("UNDERSTAND") or ""
+    _OBSERVE_PRINCIPAL = _build_pg("OBSERVE") or ""
     _ANALYZE_PRINCIPAL = _build_pg("ANALYZE") or ""
+    _DECIDE_PRINCIPAL = _build_pg("DECIDE") or ""
+    _DESIGN_PRINCIPAL = _build_pg("DESIGN") or ""
     _EXECUTE_PRINCIPAL = _build_pg("EXECUTE") or ""
-    _JUDGE_PRINCIPAL   = _build_pg("JUDGE")   or ""
+    _JUDGE_PRINCIPAL = _build_pg("JUDGE") or ""
 except Exception:
     # Fallback: subtype_contracts unavailable. Use empty string rather than stale
     # hardcoded names — consumers should degrade gracefully without principal hint.
+    _UNDERSTAND_PRINCIPAL = ""
+    _OBSERVE_PRINCIPAL = ""
     _ANALYZE_PRINCIPAL = ""
+    _DECIDE_PRINCIPAL = ""
+    _DESIGN_PRINCIPAL = ""
     _EXECUTE_PRINCIPAL = ""
-    _JUDGE_PRINCIPAL   = ""
+    _JUDGE_PRINCIPAL = ""
 
-# Phase guidance = behavior text + principal guidance from contract (p193)
+# ── Phase guidance templates ─────────────────────────────────────────────────
+# Each phase has a complete structure template that the gate can validate.
+# Structure is a control signal, not decoration.
+
+_UNDERSTAND_GUIDANCE = (
+    "Read the issue description and understand what is being asked.\n\n"
+    "You MUST produce your understanding in this exact format:\n\n"
+    "PHASE: understand\n"
+    "PRINCIPALS: constraint_awareness\n\n"
+    "PROBLEM_STATEMENT:\n<what exactly is broken — one clear sentence>\n\n"
+    "EXPECTED_BEHAVIOR:\n<what should happen>\n\n"
+    "ACTUAL_BEHAVIOR:\n<what happens instead>\n\n"
+    "SCOPE:\n<which files/modules are likely involved>\n\n"
+    "Rules: Do NOT start fixing yet. Do NOT read code yet. First understand the problem.\n"
+)
+
+_OBSERVE_GUIDANCE = (
+    "Gather evidence by reading files and running tests.\n\n"
+    "You MUST produce your observations in this exact format:\n\n"
+    "PHASE: observe\n"
+    "PRINCIPALS: evidence_completeness\n\n"
+    "EVIDENCE:\n"
+    "- file/path.py:line — what this shows\n"
+    "- file/path.py:line — what this shows\n\n"
+    "MISSING_EVIDENCE:\n"
+    "- what you still need to check\n\n"
+    "Rules: Every observation MUST reference a real file:line. "
+    "Do NOT hypothesize yet. Gather facts only.\n"
+    + _OBSERVE_PRINCIPAL
+)
+
 _ANALYZE_GUIDANCE = (
     "Identify the root cause with causal evidence. Do NOT write any fix yet.\n\n"
     "You MUST produce your analysis in this exact format:\n\n"
+    "PHASE: analyze\n"
+    "PRINCIPALS: causal_grounding, evidence_linkage\n\n"
     "ROOT_CAUSE:\n<one specific root cause — not vague>\n\n"
     "EVIDENCE:\n- file/path.py:line - what this shows\n- file/path.py:line - what this shows\n\n"
     "CAUSAL_CHAIN:\n<step-by-step reasoning from evidence to root cause>\n\n"
     "ALTERNATIVES:\n- <other hypothesis> — why ruled out\n\n"
+    "UNCERTAINTY:\n<what you are NOT sure about — be honest>\n\n"
     "Rules: ROOT_CAUSE must be specific. EVIDENCE must reference real files. "
     "CAUSAL_CHAIN must connect evidence → root cause. Do NOT propose fixes here.\n"
     + _ANALYZE_PRINCIPAL
 )
+
+_DECIDE_GUIDANCE = (
+    "Choose the best fix strategy based on your analysis.\n\n"
+    "You MUST produce your decision in this exact format:\n\n"
+    "PHASE: decide\n"
+    "PRINCIPALS: option_comparison, constraint_satisfaction\n\n"
+    "OPTIONS:\n"
+    "- Option 1: <approach> — pros: ... cons: ...\n"
+    "- Option 2: <approach> — pros: ... cons: ...\n\n"
+    "SELECTED:\n<which option and why>\n\n"
+    "CONSTRAINTS:\n<what must NOT break — existing tests, API contracts, etc.>\n\n"
+    "Rules: You MUST list at least 2 options with tradeoffs. "
+    "SELECTED must reference a specific option. Do NOT start coding yet.\n"
+    + _DECIDE_PRINCIPAL
+)
+
 _EXECUTE_GUIDANCE = (
     "ACTION REQUIRED NOW. Write the patch. You MUST follow the root cause from ANALYZE.\n\n"
     "You MUST produce your execution plan in this exact format BEFORE writing code:\n\n"
-    "PHASE: execution\n"
+    "PHASE: execute\n"
     "PRINCIPALS: minimal_change\n\n"
     "PLAN:\n<how you will fix it — MUST reference the ROOT_CAUSE from ANALYZE>\n\n"
     "CHANGE_SCOPE:\n<which files/functions will change>\n\n"
@@ -58,33 +115,31 @@ _EXECUTE_GUIDANCE = (
     + _EXECUTE_PRINCIPAL
     + "\nSuccess condition: a file is edited with a concrete, minimal code change."
 )
+
 _JUDGE_GUIDANCE = (
-    "Verify your fix. Run tests. Check that invariants are preserved. "
+    "Verify your fix. Run tests. Check that invariants are preserved.\n\n"
+    "You MUST produce your judgment in this exact format:\n\n"
+    "PHASE: judge\n"
+    "PRINCIPALS: invariant_preservation, result_verification\n\n"
+    "VERDICT: pass | fail | uncertain\n\n"
+    "TEST_RESULTS:\n<which tests you ran and their results>\n\n"
+    "CONFIDENCE: high | medium | low\n<why this level>\n\n"
+    "SIDE_EFFECTS:\n<what else could break — be honest>\n\n"
+    "FIX_TYPE: <fix_type>\n"
+    "PRINCIPALS: <principals>\n\n"
+    "Rules: You MUST run at least the failing test. VERDICT must be based on test results, "
+    "not on reading code. If uncertain, say so.\n"
     + _JUDGE_PRINCIPAL
-    + " Output: FIX_TYPE declaration + evidence that tests pass."
 )
 
 # Phase guidance — one entry per phase in control/reasoning_state.py Phase Literal.
 # Each value is the guidance text appended after "[Phase: X]".
-# ANALYZE/EXECUTE/JUDGE are derived from SUBTYPE_CONTRACTS (p193) for vocab alignment.
+# All phases have complete structure templates that the gate can validate.
 PHASE_GUIDANCE: dict[str, str] = {
-    "UNDERSTAND": (
-        "Read the issue description and test failures carefully. "
-        "Form a clear problem statement before doing anything else. "
-        "You may transition to OBSERVE when you have a clear understanding of the problem."
-    ),
-    "OBSERVE": (
-        "Suggested phase: OBSERVE. Gather evidence by reading files and running tests. "
-        "Output must include at least one file reference in the format path/to/file.py:line — "
-        "for example: EVIDENCE: django/db/models/query.py:234. "
-        "You may transition to ANALYZE when you have sufficient evidence to form a hypothesis."
-    ),
+    "UNDERSTAND": _UNDERSTAND_GUIDANCE,
+    "OBSERVE": _OBSERVE_GUIDANCE,
     "ANALYZE": _ANALYZE_GUIDANCE,
-    "DECIDE": (
-        "Choose the best fix strategy based on your analysis. "
-        "Output: which approach you will take and why. "
-        "You may transition to EXECUTE when you have a clear, grounded plan."
-    ),
+    "DECIDE": _DECIDE_GUIDANCE,
     "EXECUTE": _EXECUTE_GUIDANCE,
     "JUDGE": _JUDGE_GUIDANCE,
 }
