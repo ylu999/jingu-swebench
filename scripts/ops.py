@@ -869,6 +869,7 @@ def cmd_smoke(args) -> None:
         print("\n[smoke] interrupted", flush=True)
     print("─" * 70, flush=True)
 
+    exit_code = "?"
     try:
         t_resp = ecs.describe_tasks(cluster=ECS_CLUSTER, tasks=[task_id])
         tasks_list = t_resp.get("tasks", [])
@@ -878,6 +879,48 @@ def cmd_smoke(args) -> None:
             print(f"[smoke] final status={s.get('lastStatus')} exit={exit_code}", flush=True)
     except Exception:
         pass
+
+    # ── Auto-eval: launch SWE-bench eval if task succeeded ──────────────────
+    skip_eval = getattr(args, "skip_eval", False)
+    if exit_code == 0 and not skip_eval:
+        predictions_key = f"{batch_name}/jingu-predictions.jsonl"
+        s3_client = boto3.client("s3", region_name=REGION)
+        try:
+            s3_client.head_object(Bucket=S3_BUCKET, Key=predictions_key)
+        except Exception:
+            print(f"[smoke] predictions not found at s3://{S3_BUCKET}/{predictions_key}, skipping eval", flush=True)
+            return
+
+        eval_run_id = f"eval-{batch_name}"
+        print(f"\n[smoke] ── auto-eval ──────────────────────────────────────────", flush=True)
+        print(f"[smoke] launching eval: {eval_run_id}", flush=True)
+        print(f"[smoke] predictions: {predictions_key}", flush=True)
+        try:
+            eval_task_id = _launch_eval_task(predictions_key, eval_run_id, workers=4)
+            print(f"[smoke] eval task: {eval_task_id}", flush=True)
+            eval_task = _wait_for_task(eval_task_id, "smoke-eval", poll_interval=20, timeout_s=3600)
+            eval_exit = eval_task.get("containers", [{}])[0].get("exitCode", 1)
+            if eval_exit == 0:
+                eval_data = _read_eval_results_from_s3(eval_run_id)
+                if eval_data:
+                    resolved_ids = eval_data.get("resolved_ids", [])
+                    unresolved_ids = eval_data.get("unresolved_ids", [])
+                    print(f"[smoke] eval result: {len(resolved_ids)}/{len(resolved_ids)+len(unresolved_ids)} resolved", flush=True)
+                    for rid in resolved_ids:
+                        print(f"  ✓ {rid}", flush=True)
+                    for uid in unresolved_ids:
+                        print(f"  ✗ {uid}", flush=True)
+                else:
+                    resolved, total = _parse_resolved_from_cw(eval_task_id)
+                    print(f"[smoke] eval result (from CW): {resolved}/{total} resolved", flush=True)
+            else:
+                print(f"[smoke] eval task failed (exit={eval_exit})", flush=True)
+        except Exception as e:
+            print(f"[smoke] eval failed: {e}", flush=True)
+    elif exit_code != 0:
+        print(f"[smoke] task failed (exit={exit_code}), skipping eval", flush=True)
+    elif skip_eval:
+        print(f"[smoke] --skip-eval specified, skipping eval", flush=True)
 
 
 # ── watch ──────────────────────────────────────────────────────────────────────
@@ -2312,6 +2355,8 @@ def main():
                          help=f"Required for all launches: confirms runbook ({_RUNBOOK_PATH}) was read this session")
     p_smoke.add_argument("--env", nargs="+", default=None,
                          help="Extra env vars as KEY=VALUE (e.g. --env STRUCTURED_OUTPUT_ENABLED=true)")
+    p_smoke.add_argument("--skip-eval", action="store_true",
+                         help="Skip auto-eval after smoke task completes")
 
     # eval — run SWE-bench evaluation on predictions via ECS
     p_eval = sub.add_parser("eval", help="Run SWE-bench eval on S3 predictions via ECS")
