@@ -809,7 +809,54 @@ def _step_cp_update_and_verdict(
         except Exception as _pr_exc:
             print(f"    [phase_record] error (non-fatal): {_pr_exc}", flush=True)
 
+        # p211: Analysis gate — enforce quality before EXECUTE advance
+        _analysis_gate_rejected = False
+        if _eval_phase == "ANALYZE" and _pr is not None:
+            try:
+                from analysis_gate import evaluate_analysis as _eval_analysis
+                _analysis_verdict = _eval_analysis(_pr)
+                print(
+                    f"    [analysis_gate] passed={_analysis_verdict.passed}"
+                    f" failed_rules={_analysis_verdict.failed_rules}"
+                    f" scores={_analysis_verdict.scores}",
+                    flush=True,
+                )
+                if not _analysis_verdict.passed:
+                    _analysis_gate_rejected = True
+                    # Reset phase back to ANALYZE — do not advance to EXECUTE
+                    import dataclasses as _dc_ag
+                    if cp_state_holder is not None:
+                        cp_state_holder[0] = _dc_ag.replace(
+                            cp_state_holder[0], phase="ANALYZE", no_progress_steps=0
+                        )
+                        _cp_s = cp_state_holder[0]
+                    else:
+                        state.cp_state = _dc_ag.replace(
+                            state.cp_state, phase="ANALYZE", no_progress_steps=0
+                        )
+                        _cp_s = state.cp_state
+                    # Inject feedback to agent with specific rejection reasons
+                    _ag_reasons = "; ".join(_analysis_verdict.reasons)
+                    agent_self.messages.append({
+                        "role": "user",
+                        "content": (
+                            f"[analysis_gate REJECT: {', '.join(_analysis_verdict.failed_rules)}] "
+                            f"Your analysis needs improvement before proceeding to execution. "
+                            f"Address the following: {_ag_reasons}"
+                        ),
+                    })
+                    # Invalidate cached phase record so next step re-extracts
+                    state.phase_records = [
+                        r for r in state.phase_records
+                        if r.phase.upper() != _eval_phase
+                    ]
+                    print(f"    [analysis_gate] REJECT — redirecting to ANALYZE", flush=True)
+            except Exception as _ag_exc:
+                print(f"    [analysis_gate] error (non-fatal): {_ag_exc}", flush=True)
+
         try:
+            if _analysis_gate_rejected:
+                raise RuntimeError("analysis_gate rejected, skipping principal gate")
             if _pr is None:
                 raise RuntimeError("phase_record unavailable, skipping principal gate")
             from principal_gate import (
@@ -985,6 +1032,8 @@ def _step_cp_update_and_verdict(
             print(f"    [principal_gate] error={_pg_exc}", flush=True)
 
         try:
+            if _analysis_gate_rejected:
+                raise RuntimeError("analysis_gate rejected, skipping inference check")
             if _pr is None:
                 raise RuntimeError("phase_record unavailable, skipping inference check")
             # Inference telemetry: run inference directly to log per-principal signals.
@@ -1101,6 +1150,8 @@ def _step_cp_update_and_verdict(
             print(f"    [principal_inference] check error={_pi_exc}", flush=True)
 
         try:
+            if _analysis_gate_rejected:
+                raise RuntimeError("analysis_gate rejected, skipping telemetry")
             if _pr is None:
                 raise RuntimeError("phase_record unavailable, skipping telemetry")
             from principal_inference import run_inference, diff_principals
