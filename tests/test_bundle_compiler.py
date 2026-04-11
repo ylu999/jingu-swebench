@@ -349,6 +349,335 @@ class TestResolveRefsS2:
 
 
 # ---------------------------------------------------------------------------
+# S3 — _check_completeness tests
+# ---------------------------------------------------------------------------
+
+def _complete_bundle() -> dict:
+    """Return a bundle whose contracts pass all S3 completeness checks."""
+    return {
+        "version": "1.0.0",
+        "compiler_version": "0.1.0",
+        "generated_at": "2026-04-11T00:00:00Z",
+        "generator_commit": "abc1234",
+        "capabilities": ["prompt_only"],
+        "phases": ["OBSERVE", "UNDERSTAND"],
+        "contracts": {
+            "observation.fact_gathering": {
+                "phase": "OBSERVE",
+                "subtype": "observation.fact_gathering",
+                "prompt": "## Phase: OBSERVE\nGather evidence.",
+                "schema": {
+                    "type": "object",
+                    "properties": {"phase": {"type": "string"}},
+                    "required": ["phase"],
+                },
+                "policy": {
+                    "required_principals": ["ontology_alignment"],
+                },
+                "principals": [
+                    {
+                        "name": "ontology_alignment",
+                        "applies_to": ["observation.fact_gathering"],
+                        "requires_fields": ["phase"],
+                        "inference_rule_exists": False,
+                        "fake_check_eligible": False,
+                    },
+                ],
+                "cognition_spec": {
+                    "type": "observation.fact_gathering",
+                    "phase": "OBSERVE",
+                    "task_shape": "fact_gathering",
+                    "schema_ref": "observation.fact_gathering",
+                },
+                "repair_templates": {
+                    "ontology_alignment": "[ontology_alignment] fix it",
+                },
+                "routing": {
+                    "principal_routes": {
+                        "ontology_alignment": {
+                            "next_phase": "OBSERVE",
+                            "strategy": "fix",
+                        },
+                    },
+                },
+                "phase_spec": {
+                    "name": "OBSERVE",
+                    "allowed_next_phases": ["ANALYZE", "OBSERVE"],
+                },
+            },
+        },
+        "cognition": {"phases": [{"name": "OBSERVE"}, {"name": "UNDERSTAND"}]},
+    }
+
+
+def _resolve(data: dict) -> ResolvedBundle:
+    """Parse + resolve a bundle dict."""
+    fd, path = tempfile.mkstemp(suffix=".json")
+    with os.fdopen(fd, "w") as f:
+        json.dump(data, f)
+    try:
+        parsed = _parse_bundle(path)
+        return _resolve_refs(parsed)
+    finally:
+        os.unlink(path)
+
+
+class TestCheckCompletenessS3:
+    """Tests for _check_completeness (S3)."""
+
+    def test_complete_bundle_no_errors(self):
+        resolved = _resolve(_complete_bundle())
+        errors = _check_completeness(resolved)
+        assert errors == []
+
+    def test_never_raises(self):
+        """Even a very broken bundle returns errors list, not an exception."""
+        data = _complete_bundle()
+        # Strip all contract fields to trigger many errors
+        data["contracts"]["observation.fact_gathering"] = {"phase": "OBSERVE"}
+        resolved = _resolve(data)
+        errors = _check_completeness(resolved)
+        assert isinstance(errors, list)
+        assert len(errors) > 0
+
+    # --- Phase coverage ---
+
+    def test_phase_no_contract_allowed(self):
+        """UNDERSTAND is in default allowed list, should not error."""
+        resolved = _resolve(_complete_bundle())
+        assert "UNDERSTAND" in resolved.phases_without_contracts
+        errors = _check_completeness(resolved)
+        codes = [e.code for e in errors]
+        assert "PHASE_NO_CONTRACT_NOT_ALLOWLISTED" not in codes
+
+    def test_phase_no_contract_not_allowed(self):
+        data = _complete_bundle()
+        data["phases"].append("NEWPHASE")
+        resolved = _resolve(data)
+        errors = _check_completeness(resolved)
+        phase_errors = [e for e in errors if e.code == "PHASE_NO_CONTRACT_NOT_ALLOWLISTED"]
+        assert len(phase_errors) == 1
+        assert phase_errors[0].context["phase"] == "NEWPHASE"
+
+    def test_phase_no_contract_custom_allowed(self):
+        data = _complete_bundle()
+        data["phases"].append("NEWPHASE")
+        resolved = _resolve(data)
+        errors = _check_completeness(
+            resolved, allowed_no_contract_phases=frozenset({"UNDERSTAND", "NEWPHASE"})
+        )
+        codes = [e.code for e in errors]
+        assert "PHASE_NO_CONTRACT_NOT_ALLOWLISTED" not in codes
+
+    # --- Per-contract: MISSING_PROMPT ---
+
+    def test_missing_prompt(self):
+        data = _complete_bundle()
+        del data["contracts"]["observation.fact_gathering"]["prompt"]
+        resolved = _resolve(data)
+        errors = _check_completeness(resolved)
+        assert any(e.code == "MISSING_PROMPT" for e in errors)
+
+    def test_empty_prompt(self):
+        data = _complete_bundle()
+        data["contracts"]["observation.fact_gathering"]["prompt"] = ""
+        resolved = _resolve(data)
+        errors = _check_completeness(resolved)
+        assert any(e.code == "MISSING_PROMPT" for e in errors)
+
+    # --- Per-contract: MISSING_SCHEMA / INVALID_SCHEMA_SHAPE ---
+
+    def test_missing_schema(self):
+        data = _complete_bundle()
+        del data["contracts"]["observation.fact_gathering"]["schema"]
+        # Also remove schema_ref to avoid DANGLING_SCHEMA_REF in S2
+        data["contracts"]["observation.fact_gathering"]["cognition_spec"]["schema_ref"] = ""
+        resolved = _resolve(data)
+        errors = _check_completeness(resolved)
+        assert any(e.code == "MISSING_SCHEMA" for e in errors)
+
+    def test_schema_not_dict(self):
+        data = _complete_bundle()
+        # Resolve first with valid schema, then mutate contract for S3
+        resolved = _resolve(data)
+        resolved.subtype_to_contract["observation.fact_gathering"]["schema"] = "not a dict"
+        errors = _check_completeness(resolved)
+        assert any(e.code == "MISSING_SCHEMA" for e in errors)
+
+    def test_schema_missing_type(self):
+        data = _complete_bundle()
+        schema = data["contracts"]["observation.fact_gathering"]["schema"]
+        del schema["type"]
+        resolved = _resolve(data)
+        errors = _check_completeness(resolved)
+        shape_errors = [e for e in errors if e.code == "INVALID_SCHEMA_SHAPE"]
+        assert len(shape_errors) == 1
+        assert shape_errors[0].context["missing_key"] == "type"
+
+    def test_schema_missing_properties(self):
+        data = _complete_bundle()
+        schema = data["contracts"]["observation.fact_gathering"]["schema"]
+        del schema["properties"]
+        resolved = _resolve(data)
+        errors = _check_completeness(resolved)
+        assert any(
+            e.code == "INVALID_SCHEMA_SHAPE" and e.context.get("missing_key") == "properties"
+            for e in errors
+        )
+
+    def test_schema_missing_required(self):
+        data = _complete_bundle()
+        schema = data["contracts"]["observation.fact_gathering"]["schema"]
+        del schema["required"]
+        resolved = _resolve(data)
+        errors = _check_completeness(resolved)
+        assert any(
+            e.code == "INVALID_SCHEMA_SHAPE" and e.context.get("missing_key") == "required"
+            for e in errors
+        )
+
+    # --- Per-contract: MISSING_POLICY_KEY ---
+
+    def test_missing_policy_required_principals(self):
+        data = _complete_bundle()
+        data["contracts"]["observation.fact_gathering"]["policy"] = {}
+        resolved = _resolve(data)
+        errors = _check_completeness(resolved)
+        assert any(e.code == "MISSING_POLICY_KEY" for e in errors)
+
+    def test_no_policy_at_all(self):
+        data = _complete_bundle()
+        del data["contracts"]["observation.fact_gathering"]["policy"]
+        resolved = _resolve(data)
+        errors = _check_completeness(resolved)
+        assert any(e.code == "MISSING_POLICY_KEY" for e in errors)
+
+    # --- Per-contract: MISSING_PRINCIPALS_ARRAY ---
+
+    def test_missing_principals(self):
+        data = _complete_bundle()
+        # Resolve first, then remove principals from the resolved contract for S3
+        resolved = _resolve(data)
+        del resolved.subtype_to_contract["observation.fact_gathering"]["principals"]
+        errors = _check_completeness(resolved)
+        assert any(e.code == "MISSING_PRINCIPALS_ARRAY" for e in errors)
+
+    def test_principals_not_list(self):
+        data = _complete_bundle()
+        # Resolve first, then mutate for S3
+        resolved = _resolve(data)
+        resolved.subtype_to_contract["observation.fact_gathering"]["principals"] = "not a list"
+        errors = _check_completeness(resolved)
+        assert any(e.code == "MISSING_PRINCIPALS_ARRAY" for e in errors)
+
+    # --- Per-contract: MISSING_COGNITION_SPEC ---
+
+    def test_missing_cognition_task_shape(self):
+        data = _complete_bundle()
+        del data["contracts"]["observation.fact_gathering"]["cognition_spec"]["task_shape"]
+        resolved = _resolve(data)
+        errors = _check_completeness(resolved)
+        assert any(e.code == "MISSING_COGNITION_SPEC" for e in errors)
+
+    def test_no_cognition_spec(self):
+        data = _complete_bundle()
+        del data["contracts"]["observation.fact_gathering"]["cognition_spec"]
+        resolved = _resolve(data)
+        errors = _check_completeness(resolved)
+        assert any(e.code == "MISSING_COGNITION_SPEC" for e in errors)
+
+    # --- Per-contract: MISSING_REPAIR_TEMPLATES ---
+
+    def test_missing_repair_templates(self):
+        data = _complete_bundle()
+        del data["contracts"]["observation.fact_gathering"]["repair_templates"]
+        resolved = _resolve(data)
+        errors = _check_completeness(resolved)
+        assert any(e.code == "MISSING_REPAIR_TEMPLATES" for e in errors)
+
+    def test_repair_templates_not_dict(self):
+        data = _complete_bundle()
+        data["contracts"]["observation.fact_gathering"]["repair_templates"] = ["not", "a", "dict"]
+        resolved = _resolve(data)
+        errors = _check_completeness(resolved)
+        assert any(e.code == "MISSING_REPAIR_TEMPLATES" for e in errors)
+
+    # --- Per-contract: MISSING_ROUTING ---
+
+    def test_missing_routing(self):
+        data = _complete_bundle()
+        del data["contracts"]["observation.fact_gathering"]["routing"]
+        resolved = _resolve(data)
+        errors = _check_completeness(resolved)
+        assert any(e.code == "MISSING_ROUTING" for e in errors)
+
+    def test_routing_no_principal_routes(self):
+        data = _complete_bundle()
+        data["contracts"]["observation.fact_gathering"]["routing"] = {}
+        resolved = _resolve(data)
+        errors = _check_completeness(resolved)
+        assert any(e.code == "MISSING_ROUTING" for e in errors)
+
+    # --- Per-contract: MISSING_ALLOWED_NEXT_PHASES ---
+
+    def test_missing_allowed_next_phases(self):
+        data = _complete_bundle()
+        del data["contracts"]["observation.fact_gathering"]["phase_spec"]
+        resolved = _resolve(data)
+        errors = _check_completeness(resolved)
+        assert any(e.code == "MISSING_ALLOWED_NEXT_PHASES" for e in errors)
+
+    def test_empty_allowed_next_phases(self):
+        data = _complete_bundle()
+        data["contracts"]["observation.fact_gathering"]["phase_spec"]["allowed_next_phases"] = []
+        resolved = _resolve(data)
+        errors = _check_completeness(resolved)
+        assert any(e.code == "MISSING_ALLOWED_NEXT_PHASES" for e in errors)
+
+    # --- All errors have stage S3 ---
+
+    def test_all_errors_stage_s3(self):
+        data = _complete_bundle()
+        # Resolve first with valid data, then break everything for S3
+        resolved = _resolve(data)
+        c = resolved.subtype_to_contract["observation.fact_gathering"]
+        c["prompt"] = ""
+        c["schema"] = None
+        c["policy"] = {}
+        c["principals"] = "bad"
+        c["cognition_spec"] = {}
+        c["repair_templates"] = None
+        c["routing"] = {}
+        c["phase_spec"] = {}
+        errors = _check_completeness(resolved)
+        assert all(e.stage == "S3" for e in errors)
+        assert len(errors) >= 8  # at least one for each check type
+
+    # --- Context contains phase and subtype ---
+
+    def test_error_context_has_phase_and_subtype(self):
+        data = _complete_bundle()
+        data["contracts"]["observation.fact_gathering"]["prompt"] = ""
+        resolved = _resolve(data)
+        errors = _check_completeness(resolved)
+        prompt_err = [e for e in errors if e.code == "MISSING_PROMPT"][0]
+        assert prompt_err.context["phase"] == "OBSERVE"
+        assert prompt_err.context["subtype"] == "observation.fact_gathering"
+
+    # --- Real bundle integration ---
+
+    def test_real_bundle_completeness(self):
+        """Real bundle.json should pass S3 with zero errors."""
+        bundle_path = os.path.join(os.path.dirname(__file__), "..", "bundle.json")
+        if not os.path.exists(bundle_path):
+            pytest.skip("bundle.json not found")
+        parsed = _parse_bundle(bundle_path)
+        resolved = _resolve_refs(parsed)
+        errors = _check_completeness(resolved)
+        assert errors == [], f"Real bundle has S3 errors: {errors}"
+
+
+# ---------------------------------------------------------------------------
 # DEFAULT_BUNDLE_PATH
 # ---------------------------------------------------------------------------
 
