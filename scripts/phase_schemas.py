@@ -176,6 +176,204 @@ PHASE_SCHEMAS: dict[str, dict[str, Any]] = {
 }
 
 
+# ── Cognition-aligned PhaseRecord schemas (p222) ──────────────────────────
+
+# Base schema for PhaseRecord structured output — all phases share this shape.
+# Per-phase schemas extend this with phase-specific constraints.
+PHASE_RECORD_BASE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "phase": {
+            "type": "string",
+            "enum": ["UNDERSTAND", "OBSERVE", "ANALYZE", "DECIDE", "DESIGN", "EXECUTE", "JUDGE"],
+            "description": "The current reasoning phase.",
+        },
+        "subtype": {
+            "type": "string",
+            "description": "The subtype of output (e.g. 'analysis.root_cause', 'execution.code_patch').",
+        },
+        "principals": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Declared cognitive principals for this phase.",
+        },
+        "claims": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Explicit claims made in this phase.",
+        },
+        "evidence_refs": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Evidence references (file:line or test names) grounding claims.",
+        },
+        "from_steps": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Step identifiers this record derives from.",
+        },
+        "content": {
+            "type": "string",
+            "description": "The main reasoning content for this phase.",
+        },
+    },
+    "required": ["phase", "subtype", "principals", "content"],
+}
+
+# OBSERVE phase: evidence gathering
+OBSERVE_RECORD_SCHEMA: dict[str, Any] = {
+    **PHASE_RECORD_BASE_SCHEMA,
+    "properties": {
+        **PHASE_RECORD_BASE_SCHEMA["properties"],
+        "phase": {
+            "type": "string",
+            "enum": ["OBSERVE"],
+            "description": "The current reasoning phase.",
+        },
+        "subtype": {
+            "type": "string",
+            "enum": ["observation.fact_gathering"],
+            "description": "Observation subtype.",
+        },
+    },
+    "required": ["phase", "subtype", "principals", "evidence_refs", "content"],
+}
+
+# ANALYZE phase: root cause with evidence
+ANALYZE_RECORD_SCHEMA: dict[str, Any] = {
+    **PHASE_RECORD_BASE_SCHEMA,
+    "properties": {
+        **PHASE_RECORD_BASE_SCHEMA["properties"],
+        "phase": {
+            "type": "string",
+            "enum": ["ANALYZE"],
+            "description": "The current reasoning phase.",
+        },
+        "subtype": {
+            "type": "string",
+            "enum": ["analysis.root_cause"],
+            "description": "Analysis subtype.",
+        },
+        "root_cause": {
+            "type": "string",
+            "minLength": 20,
+            "description": "The identified root cause with specific file/function reference.",
+        },
+        "causal_chain": {
+            "type": "string",
+            "description": "Step-by-step causal chain from evidence to root cause.",
+        },
+    },
+    "required": ["phase", "subtype", "principals", "evidence_refs", "content", "root_cause"],
+}
+
+# DECIDE phase: fix direction selection
+DECIDE_RECORD_SCHEMA: dict[str, Any] = {
+    **PHASE_RECORD_BASE_SCHEMA,
+    "properties": {
+        **PHASE_RECORD_BASE_SCHEMA["properties"],
+        "phase": {
+            "type": "string",
+            "enum": ["DECIDE"],
+            "description": "The current reasoning phase.",
+        },
+        "subtype": {
+            "type": "string",
+            "enum": ["decision.fix_direction"],
+            "description": "Decision subtype.",
+        },
+    },
+    "required": ["phase", "subtype", "principals", "content"],
+}
+
+# DESIGN phase: solution shape
+DESIGN_RECORD_SCHEMA: dict[str, Any] = {
+    **PHASE_RECORD_BASE_SCHEMA,
+    "properties": {
+        **PHASE_RECORD_BASE_SCHEMA["properties"],
+        "phase": {
+            "type": "string",
+            "enum": ["DESIGN"],
+            "description": "The current reasoning phase.",
+        },
+        "subtype": {
+            "type": "string",
+            "enum": ["design.solution_shape"],
+            "description": "Design subtype.",
+        },
+    },
+    "required": ["phase", "subtype", "principals", "content"],
+}
+
+# EXECUTE phase: code patch with plan
+EXECUTE_RECORD_SCHEMA: dict[str, Any] = {
+    **PHASE_RECORD_BASE_SCHEMA,
+    "properties": {
+        **PHASE_RECORD_BASE_SCHEMA["properties"],
+        "phase": {
+            "type": "string",
+            "enum": ["EXECUTE"],
+            "description": "The current reasoning phase.",
+        },
+        "subtype": {
+            "type": "string",
+            "enum": ["execution.code_patch"],
+            "description": "Execution subtype.",
+        },
+        "plan": {
+            "type": "string",
+            "minLength": 10,
+            "description": "How the root cause will be fixed. Must reference the root cause.",
+        },
+    },
+    "required": ["phase", "subtype", "principals", "content", "plan"],
+}
+
+# JUDGE phase: verification
+JUDGE_RECORD_SCHEMA: dict[str, Any] = {
+    **PHASE_RECORD_BASE_SCHEMA,
+    "properties": {
+        **PHASE_RECORD_BASE_SCHEMA["properties"],
+        "phase": {
+            "type": "string",
+            "enum": ["JUDGE"],
+            "description": "The current reasoning phase.",
+        },
+        "subtype": {
+            "type": "string",
+            "enum": ["judge.verification"],
+            "description": "Judge subtype.",
+        },
+    },
+    "required": ["phase", "subtype", "principals", "content"],
+}
+
+# Mapping: phase -> cognition-aligned record schema
+PHASE_RECORD_SCHEMAS: dict[str, dict[str, Any]] = {
+    "OBSERVE": OBSERVE_RECORD_SCHEMA,
+    "ANALYZE": ANALYZE_RECORD_SCHEMA,
+    "DECIDE": DECIDE_RECORD_SCHEMA,
+    "DESIGN": DESIGN_RECORD_SCHEMA,
+    "EXECUTE": EXECUTE_RECORD_SCHEMA,
+    "JUDGE": JUDGE_RECORD_SCHEMA,
+}
+
+
+def get_phase_record_schema(phase: str) -> dict[str, Any] | None:
+    """Return the cognition-aligned PhaseRecord schema for a phase.
+
+    These schemas align with PhaseRecord dataclass fields and are suitable
+    for structured output enforcement via Claude API or Bedrock tool use.
+
+    Args:
+        phase: Phase name (case-insensitive).
+
+    Returns:
+        JSON Schema dict or None if no schema for this phase.
+    """
+    return PHASE_RECORD_SCHEMAS.get(phase.upper())
+
+
 def get_phase_schema(phase: str) -> dict[str, Any] | None:
     """Return the JSON Schema for a given phase, or None if no schema is defined.
 
