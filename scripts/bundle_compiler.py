@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import os
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -171,3 +173,152 @@ class CompiledBundle:
     activation_report: ActivationReport
     validators: dict[str, CompiledValidator]
     retry_router: CompiledRetryRouter
+
+
+# ---------------------------------------------------------------------------
+# DEFAULT_BUNDLE_PATH
+# ---------------------------------------------------------------------------
+
+DEFAULT_BUNDLE_PATH: str = os.environ.get("JINGU_BUNDLE_PATH", "bundle.json")
+
+
+# ---------------------------------------------------------------------------
+# S1 — PARSE
+# ---------------------------------------------------------------------------
+
+_REQUIRED_TOP_LEVEL_KEYS = ("version", "phases", "contracts", "cognition")
+
+
+def _parse_bundle(path: str) -> ParseResult:
+    """S1: Load and validate bundle JSON, extract metadata."""
+    with open(path) as f:
+        bundle: dict[str, Any] = json.load(f)
+
+    # Version check
+    version = bundle.get("version", "")
+    if not version:
+        raise CompilationError("S1", "MISSING_VERSION", "Bundle has no version field")
+
+    major = version.split(".")[0]
+    if major != "1":
+        raise CompilationError(
+            "S1",
+            "INCOMPATIBLE_VERSION",
+            f"Unsupported bundle version: {version} (expected major version 1)",
+            {"version": version},
+        )
+
+    # Required top-level keys
+    for key in _REQUIRED_TOP_LEVEL_KEYS:
+        if key not in bundle:
+            raise CompilationError(
+                "S1",
+                "MISSING_TOP_LEVEL_KEY",
+                f"Missing required top-level key: {key}",
+                {"key": key},
+            )
+
+    return ParseResult(
+        bundle=bundle,
+        version=version,
+        compiler_version=bundle.get("compiler_version", ""),
+        generated_at=bundle.get("generated_at", ""),
+        generator_commit=bundle.get("generator_commit", ""),
+        capabilities=bundle.get("capabilities", []),
+    )
+
+
+# ---------------------------------------------------------------------------
+# S2 — RESOLVE
+# ---------------------------------------------------------------------------
+
+def _resolve_refs(parsed: ParseResult) -> ResolvedBundle:
+    """S2: Resolve cross-references — derive phase_to_subtype, build registries, validate refs."""
+    bundle = parsed.bundle
+    contracts = bundle.get("contracts", {})
+    all_phases = set(bundle.get("phases", []))
+
+    # --- Derive phase_to_subtype from contracts (NOT hardcoded) ---
+    phase_to_subtype: dict[str, str] = {}
+    subtype_to_contract: dict[str, dict] = {}
+
+    for subtype_key, contract in contracts.items():
+        phase = contract.get("phase", "").upper()
+        if not phase:
+            raise CompilationError(
+                "S2",
+                "PHASE_NO_SUBTYPE",
+                f"Contract '{subtype_key}' has no phase field",
+                {"subtype": subtype_key},
+            )
+        if phase in phase_to_subtype:
+            raise CompilationError(
+                "S2",
+                "DUPLICATE_PHASE_MAPPING",
+                f"Phase '{phase}' already mapped to '{phase_to_subtype[phase]}', "
+                f"cannot also map to '{subtype_key}'",
+                {"phase": phase, "existing": phase_to_subtype[phase], "new": subtype_key},
+            )
+        phase_to_subtype[phase] = subtype_key
+        subtype_to_contract[subtype_key] = contract
+
+    # --- Build schema_registry from contract inline schemas ---
+    schema_registry: dict[str, dict] = {}
+    for subtype_key, contract in contracts.items():
+        inline_schema = contract.get("schema")
+        if inline_schema:
+            schema_registry[subtype_key] = inline_schema
+
+    # Also include top-level schemas if present
+    top_schemas = bundle.get("schemas", {})
+    if isinstance(top_schemas, dict):
+        for schema_name, schema_def in top_schemas.items():
+            if schema_name not in schema_registry:
+                schema_registry[schema_name] = schema_def
+
+    # --- Validate schema_refs ---
+    for subtype_key, contract in contracts.items():
+        cognition_spec = contract.get("cognition_spec", {})
+        schema_ref = cognition_spec.get("schema_ref", "")
+        if schema_ref and schema_ref not in schema_registry:
+            raise CompilationError(
+                "S2",
+                "DANGLING_SCHEMA_REF",
+                f"Contract '{subtype_key}' references schema '{schema_ref}' which does not exist",
+                {"subtype": subtype_key, "schema_ref": schema_ref},
+            )
+
+    # --- Build principal_registry (deduped by name) ---
+    principal_registry: dict[str, dict] = {}
+    for _subtype_key, contract in contracts.items():
+        for principal in contract.get("principals", []):
+            name = principal.get("name", "")
+            if name and name not in principal_registry:
+                principal_registry[name] = principal
+
+    # --- Validate principal refs in policy.required_principals ---
+    for subtype_key, contract in contracts.items():
+        policy = contract.get("policy", {})
+        for req_principal in policy.get("required_principals", []):
+            if req_principal not in principal_registry:
+                raise CompilationError(
+                    "S2",
+                    "DANGLING_PRINCIPAL_REF",
+                    f"Contract '{subtype_key}' policy requires principal "
+                    f"'{req_principal}' which is not in any contract's principals list",
+                    {"subtype": subtype_key, "principal": req_principal},
+                )
+
+    # --- Compute phases_with_contracts / phases_without_contracts ---
+    phases_with = frozenset(phase_to_subtype.keys())
+    phases_without = frozenset(all_phases - phases_with)
+
+    return ResolvedBundle(
+        raw=bundle,
+        phase_to_subtype=phase_to_subtype,
+        subtype_to_contract=subtype_to_contract,
+        schema_registry=schema_registry,
+        principal_registry=principal_registry,
+        phases_with_contracts=phases_with,
+        phases_without_contracts=phases_without,
+    )
