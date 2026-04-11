@@ -917,8 +917,11 @@ def _compile_bundle_uncached(path: "str | None") -> "CompiledBundle":
     # S8: Activation report
     activation_report = _build_activation_report(resolved, validators, fatal_errors, all_warnings)
 
-    # governance: placeholder until p224-09 implements _build_governance_from_compiled()
-    governance: Any = None
+    # Build governance from compiled data (p224-09).
+    # Lazy import avoids circular dependency: jingu_onboard imports nothing from
+    # bundle_compiler, but bundle_compiler now calls into jingu_onboard.
+    from jingu_onboard import _build_governance_from_compiled
+    governance = _build_governance_from_compiled(resolved, validators)
 
     return CompiledBundle(
         governance=governance,

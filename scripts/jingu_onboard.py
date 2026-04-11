@@ -379,6 +379,50 @@ def _parse_contract(phase: str, subtype: str, contract: dict[str, Any]) -> Phase
     )
 
 
+# ── Helper for compiler integration (p224-09) ─────────────────────────────
+
+def _build_governance_from_compiled(
+    resolved: Any,
+    validators: dict[str, Any],
+) -> "JinguGovernance":
+    """Build JinguGovernance from a pre-compiled ResolvedBundle + validators dict.
+
+    This is the compiler-path counterpart to onboard().  It does NOT re-parse
+    or re-validate the bundle — both resolved and validators are the outputs of
+    the 8-stage compile_bundle() pipeline, which has already done all validation.
+
+    The function assembles PhaseConfig objects from the already-resolved data
+    and returns a JinguGovernance.  All PhaseConfig construction follows the
+    same _parse_contract() logic used in onboard(), but fed from the resolved
+    bundle rather than raw JSON.
+
+    Args:
+        resolved:   ResolvedBundle from bundle_compiler._resolve_refs()
+        validators: dict[phase_str -> CompiledValidator] from _compile_validators()
+
+    Returns:
+        JinguGovernance ready for use as bundle.governance
+    """
+    phases: dict[str, PhaseConfig] = {}
+
+    for subtype_key, contract in resolved.subtype_to_contract.items():
+        phase = contract.get("phase", "").upper()
+        if not phase:
+            continue
+        phases[phase] = _parse_contract(phase, subtype_key, contract)
+
+    raw = resolved.raw
+    metadata = {
+        "version": raw.get("version", ""),
+        "compiler_version": raw.get("compiler_version", ""),
+        "generated_at": raw.get("generated_at", ""),
+        "contract_count": len(phases),
+        "phases_onboarded": list(phases.keys()),
+    }
+
+    return JinguGovernance(phases, metadata)
+
+
 # ── The single entry point ────────────────────────────────────────────────
 
 _cached_governance: JinguGovernance | None = None

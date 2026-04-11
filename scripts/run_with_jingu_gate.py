@@ -791,12 +791,24 @@ def run_agent(
             "read the existing code more carefully — the solution is always a code change, not an environment change."
         )
 
-    # B4: phase-structured reasoning protocol — p224: loaded from bundle via jingu_onboard.
+    # B4: phase-structured reasoning protocol — p224-09: loaded via compile_bundle().
     # All phase prompts, principal requirements, type contracts, forbidden moves
     # are derived from bundle.json (compiled by jingu-cognition TS). Zero hardcoded strings.
     try:
-        from jingu_onboard import onboard as _onboard_prompt
-        _gov_prompt = _onboard_prompt()
+        from bundle_compiler import compile_bundle as _compile_bundle
+        import logging as _logging
+        _bundle = _compile_bundle()
+        _report = _bundle.activation_report
+        _logging.getLogger(__name__).info(
+            "[jingu-compiler] activation_ok=%s bundle_version=%s compiler_version=%s "
+            "generator_commit=%s phases=%s contracts=%d principals=%d "
+            "inference_eligible=%d fake_check_eligible=%d warnings=%d",
+            _report.activation_ok, _report.bundle_version, _report.compiler_version,
+            _report.generator_commit, _report.phases_compiled, _report.contracts_compiled,
+            _report.principals_total, _report.principals_inference_eligible,
+            _report.principals_fake_check_eligible, len(_report.prompt_warnings),
+        )
+        _gov_prompt = _bundle.governance
         # Assemble full reasoning protocol from per-phase prompts
         _phase_prompt_parts = []
         for _pp_phase in _gov_prompt.list_phases():

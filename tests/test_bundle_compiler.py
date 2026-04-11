@@ -2000,13 +2000,18 @@ class TestCompileBundle:
         assert isinstance(result.retry_router, CompiledRetryRouter)
         assert len(result.retry_router.routes) > 0
 
-    def test_governance_is_none_placeholder(self):
-        """governance is None until p224-09 implements _build_governance_from_compiled."""
-        bundle_path = os.path.join(os.path.dirname(__file__), "..", "bundle.json")
-        if not os.path.exists(bundle_path):
+    def test_governance_is_jingu_governance(self):
+        """governance is a JinguGovernance built from the compiled bundle (p224-09)."""
+        import sys, os as _os
+        sys.path.insert(0, _os.path.join(_os.path.dirname(__file__), "..", "scripts"))
+        from jingu_onboard import JinguGovernance
+        bundle_path = _os.path.join(_os.path.dirname(__file__), "..", "bundle.json")
+        if not _os.path.exists(bundle_path):
             pytest.skip("bundle.json not found")
         result = compile_bundle(bundle_path)
-        assert result.governance is None
+        assert isinstance(result.governance, JinguGovernance)
+        # Phases compiled matches what governance reports
+        assert set(result.governance.list_phases()) == set(result.activation_report.phases_compiled)
 
     def test_caching_returns_same_object(self):
         """Second call returns the cached object (same identity)."""
