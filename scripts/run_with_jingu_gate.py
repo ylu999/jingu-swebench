@@ -56,7 +56,7 @@ from strategy_logger import log_strategy_entry, make_entry as make_strategy_entr
 # B4: cognition gate (declaration-vs-patch consistency check)
 from declaration_extractor import (
     extract_declaration, extract_last_agent_message,
-    extract_from_structured, extract_phase_record_from_structured,
+    extract_from_structured,
     build_phase_record_from_structured,
 )
 from patch_signals import extract_patch_signals

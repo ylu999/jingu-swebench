@@ -16,7 +16,7 @@ Usage:
     result = model.structured_extract(
         accumulated_text="... agent's ANALYZE phase reasoning ...",
         phase="ANALYZE",
-        schema=ANALYZE_EXTRACTION_SCHEMA,
+        schema=analyze_schema,  # from cognition bundle
     )
     # result is a dict guaranteed to match schema
 """
