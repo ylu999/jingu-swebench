@@ -46,7 +46,7 @@ import traceback
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, Optional
 
 from minisweagent.models import get_model
 from minisweagent.run.benchmarks.swebench import (
@@ -90,6 +90,67 @@ class AttemptOutcome:
 
     attempt: int
     result: AttemptResult
+
+
+@dataclass
+class InstanceResult:
+    """Final result for a full instance run (all attempts).
+
+    Produced by JinguAgent.run(); consumed by run_with_jingu() thin wrapper
+    which calls .to_dict() to maintain backward-compatible dict interface.
+    """
+
+    instance_id: str
+    accepted: bool
+    patch: str
+    attempts: int
+    best_attempt: Optional[int] = None
+    score: Optional[float] = None
+    gate_code: Optional[str] = None
+    gate_reason_codes: list = field(default_factory=list)
+    admission_reason: Optional[str] = None
+    elapsed_s: float = 0.0
+    model_usage: dict = field(default_factory=dict)
+    attempts_log: list = field(default_factory=list)
+    attempt_delta: Optional[dict] = None
+    # Rejection-only fields
+    status: Optional[str] = None
+    failure_type: Optional[str] = None
+    reason: Optional[str] = None
+
+    def to_dict(self) -> dict:
+        """Return dict compatible with run_with_jingu() caller expectations."""
+        d: dict[str, Any] = {"instance_id": self.instance_id}
+        if self.status == "rejected":
+            # Onboarding rejection path
+            d["status"] = "rejected"
+            d["failure_type"] = self.failure_type
+            d["reason"] = self.reason
+            d["patch"] = ""
+            d["accepted"] = False
+            return d
+        if not self.accepted:
+            d["accepted"] = False
+            d["patch"] = ""
+            d["attempts"] = self.attempts
+            d["elapsed_s"] = self.elapsed_s
+            d["model_usage"] = self.model_usage
+            d["attempts_log"] = self.attempts_log
+            d["attempt_delta"] = self.attempt_delta
+            return d
+        d["accepted"] = True
+        d["patch"] = self.patch
+        d["attempts"] = self.attempts
+        d["best_attempt"] = self.best_attempt
+        d["score"] = self.score
+        d["gate_code"] = self.gate_code
+        d["gate_reason_codes"] = self.gate_reason_codes
+        d["admission_reason"] = self.admission_reason
+        d["elapsed_s"] = self.elapsed_s
+        d["model_usage"] = self.model_usage
+        d["attempts_log"] = self.attempts_log
+        d["attempt_delta"] = self.attempt_delta
+        return d
 
 
 def jingu_process_instance(
@@ -1000,9 +1061,821 @@ class JinguAgent:
         )
         return AttemptOutcome(attempt=attempt, result=result)
 
-    def run(self) -> Any:
-        """Execute the full multi-attempt loop. Must be overridden."""
-        raise NotImplementedError
+    def run(self) -> "InstanceResult":
+        """Execute the full multi-attempt loop with retry, gate evaluation, and governance.
+
+        Moved from run_with_jingu() in run_with_jingu_gate.py (p225-10).
+        Owns: onboarding check, attempt loop, NBR/EFR enforcement, gate evaluation,
+        retry planning, early stop handling, candidate selection.
+        """
+        # Lazy imports to avoid circular dependencies — all from run_with_jingu_gate.py
+        # and its re-exports.
+        from run_with_jingu_gate import (
+            Timer, _timing_root, _instance_timers, _usage_tracker,
+            GATE_MODE, RETRY_CONTROLLER_ENABLED, STRUCTURED_OUTPUT_ENABLED,
+            STRATEGY_LOG_PATH, STRATEGY_TABLE_PATH,
+            _try_parse_structured_output,
+            classify_admission, patch_fingerprint, patch_content_hash,
+            score_patch, normalize_patch, extract_test_counts,
+            check_test_progress_invariant, compute_attempt_delta,
+            build_execution_feedback, extract_principal_violation_codes,
+            jingu_structural_check,
+        )
+        from jingu_gate_bridge import evaluate_patch_from_traj
+        from retry_controller import build_retry_plan, RetryPlan
+        from failure_classifier import classify_failure, get_routing as get_failure_routing
+        from repair_prompts import build_repair_prompt
+        from failure_routing import route_failure as route_failure_p216, is_data_driven_routing_enabled
+        from strategy_prompts import get_strategy_prompt
+        from governance_runtime import (
+            run_governance_packs, override_retry_plan_from_pack,
+            ExecutionContext as GovExecutionContext,
+        )
+        from strategy_logger import log_strategy_entry, make_entry as make_strategy_entry
+        from declaration_extractor import (
+            extract_declaration, extract_last_agent_message, extract_from_structured,
+        )
+        from patch_signals import extract_patch_signals
+        from cognition_check import check_cognition, format_cognition_feedback
+        from control.reasoning_state import (
+            initial_reasoning_state, update_reasoning_state, decide_next,
+            normalize_signals, VerdictStop, VerdictRedirect,
+        )
+        from control.swe_signal_adapter import extract_verify_signals
+        from control.phase_result import build_phase_result, route_from_phase_result
+        from signal_extraction import compute_steps_since_last_signal
+        from step_monitor_state import early_stop_scope
+        from controlled_verify import _check_onboarding, _build_execution_model, _print_execution_model
+
+        instance_id = self._instance["instance_id"]
+
+        t_inst = Timer(f"instance: {instance_id}", parent=_timing_root)
+        _instance_timers[instance_id] = t_inst
+
+        print(f"  [jingu] loading instance {instance_id}...")
+
+        # ONBOARDING_FIRST: verify official harness path is known before any execution
+        _ok, _reason = _check_onboarding(self._instance)
+        if not _ok:
+            print(f"[onboarding-check] FAIL: {_reason}")
+            return InstanceResult(
+                instance_id=instance_id,
+                accepted=False,
+                patch="",
+                attempts=self._max_attempts,
+                status="rejected",
+                failure_type="ONBOARDING_REQUIRED",
+                reason=_reason,
+            )
+        print("[onboarding-check] PASS")
+        _print_execution_model(_build_execution_model(self._instance))
+
+        candidates: list[dict] = []
+        attempts_log: list[dict] = []
+        last_failure = ""
+        _prev_raw_patch = ""
+        _no_progress_streak = 0
+        total_llm_calls = 0
+        _strategy_entries: list[dict] = []
+        _test_counts_by_attempt: dict[int, int] = {}
+        cp_state_holder: list = [initial_reasoning_state("OBSERVE")]
+        self._cp_state_holder = cp_state_holder
+
+        for attempt in range(1, self._max_attempts + 1):
+            print(f"  [attempt {attempt}/{self._max_attempts}] {instance_id}")
+
+            # Clear principal_violation at attempt boundary
+            import dataclasses as _dc_boundary
+            cp_state_holder[0] = _dc_boundary.replace(cp_state_holder[0], principal_violation="")
+
+            # NBR enforcement: No Blind Retry
+            if attempt > 1 and not last_failure.strip() and self._mode != "baseline":
+                raise RuntimeError(
+                    f"[NBR violation] attempt {attempt} has empty last_failure. "
+                    "Execution feedback is required before retry. "
+                    "Check build_execution_feedback() and ensure tests_ran signal is captured."
+                )
+
+            outcome = self.run_attempt(attempt, previous_failure=last_failure, parent_timer=t_inst)
+            patch = outcome.result.patch
+            agent_exit = outcome.result.exit_status
+            jingu_body = outcome.result.jingu_body
+            _attempt_monitor = outcome.result.monitor
+
+            # Early stop verdict handling
+            if _attempt_monitor is not None and _attempt_monitor.early_stop_verdict is not None:
+                _esv = _attempt_monitor.early_stop_verdict
+                print(
+                    f"  [cp] early_stop instance={instance_id} attempt={attempt}"
+                    f" reason={_esv.reason} — verdict-driven attempt termination",
+                    flush=True,
+                )
+                if _esv.reason == "no_signal":
+                    _mon = _attempt_monitor
+                    _tr = (jingu_body or {}).get("test_results", {})
+                    _phase_result = build_phase_result(
+                        str(cp_state_holder[0].phase).upper(),
+                        has_patch=_mon._prev_patch_non_empty,
+                        has_inner_verify=len(_mon.verify_history) > 0,
+                        test_results=_tr,
+                        no_progress_steps=cp_state_holder[0].no_progress_steps,
+                        early_stop_reason=_esv.reason,
+                        files_written=len((jingu_body or {}).get("files_written", [])),
+                    )
+                    _pr_route, _pr_target, _pr_hint = route_from_phase_result(_phase_result)
+                    print(
+                        f"  [phase_result] phase={_phase_result.phase}"
+                        f" outcome={_phase_result.outcome}"
+                        f" verdict={_phase_result.verdict}"
+                        f" route={_pr_route}"
+                        f" target={_pr_target or '-'}"
+                        f" trust={_phase_result.trust_score or '-'}"
+                        f" reason={_phase_result.judge_reason}",
+                        flush=True,
+                    )
+                    _typed_subtypes = {
+                        "NO_PATCH_NO_ATTEMPT",
+                        "NO_PATCH_NO_WRITE",
+                        "NO_PATCH_WRITE_FAIL",
+                        "NO_PATCH_ABORTED",
+                        "NO_SIGNAL_NO_VERIFY",
+                        "NO_SIGNAL_STALLED_AFTER_VERIFY",
+                    }
+                    if _phase_result.outcome in _typed_subtypes and _pr_hint:
+                        last_failure = _pr_hint
+                    else:
+                        last_failure = (
+                            "Previous attempt stopped early: no progress signal detected "
+                            "(control-plane verdict=STOP no_signal). "
+                            "Change your approach entirely — avoid repeated reads without writing code."
+                        )
+                if _esv.reason == "task_success":
+                    _mon_ts = _attempt_monitor
+                    _tr_ts = (jingu_body or {}).get("test_results", {})
+                    _pr_ts = build_phase_result(
+                        str(cp_state_holder[0].phase).upper(),
+                        has_patch=_mon_ts._prev_patch_non_empty,
+                        has_inner_verify=len(_mon_ts.verify_history) > 0,
+                        test_results=_tr_ts,
+                        no_progress_steps=cp_state_holder[0].no_progress_steps,
+                        early_stop_reason="task_success",
+                        files_written=len((_tr_ts or {}).get("files_written", [])),
+                    )
+                    _pr_ts_route, _pr_ts_target, _ = route_from_phase_result(_pr_ts)
+                    print(
+                        f"  [phase_result] phase={_pr_ts.phase}"
+                        f" outcome={_pr_ts.outcome}"
+                        f" verdict={_pr_ts.verdict}"
+                        f" route={_pr_ts_route}"
+                        f" target={_pr_ts_target or '-'}"
+                        f" trust={_pr_ts.trust_score or '-'}"
+                        f" reason={_pr_ts.judge_reason}",
+                        flush=True,
+                    )
+                    break  # task_success = instance-terminal
+
+                _scope = early_stop_scope(_esv.reason)
+                if _scope == "attempt_terminal":
+                    if patch:
+                        cp_state_holder[0] = initial_reasoning_state("OBSERVE")
+                        print(
+                            f"  [cp] no_signal attempt={attempt}/{self._max_attempts}"
+                            f" — submission preserved ({len(patch)}c patch),"
+                            f" falling through to gate (p24 submission persistence)",
+                            flush=True,
+                        )
+                    else:
+                        print(
+                            f"  [cp] no_signal attempt={attempt}/{self._max_attempts}"
+                            f" — attempt-terminal (no patch), resetting cp_state for next attempt",
+                            flush=True,
+                        )
+                        cp_state_holder[0] = initial_reasoning_state("OBSERVE")
+                        continue
+
+            # p179: record test counts
+            _test_counts_by_attempt[attempt] = extract_test_counts(jingu_body)
+
+            t_gate = Timer(f"jingu gate attempt={attempt}", parent=t_inst)
+            if not patch:
+                print(f"    [gate] EMPTY — no submission (exit={agent_exit})")
+                attempts_log.append({
+                    "attempt": attempt,
+                    "admission_reason": "no_patch",
+                    "patch_fp": None,
+                    "gate_reason_codes": [],
+                    "exit_status": agent_exit,
+                })
+                if agent_exit and "LimitsExceeded" in agent_exit:
+                    last_failure = (
+                        "You ran out of steps before submitting. "
+                        "SKIP all exploration and testing this time. "
+                        "Go DIRECTLY to the fix: read the failing test, identify the exact line to change, "
+                        "make the minimal edit, then call submit IMMEDIATELY."
+                    )
+                else:
+                    _jb = jingu_body or {}
+                    _files_written_count = len(_jb.get("files_written", []))
+                    _phase_recs = _jb.get("phase_records", [])
+                    _analyze_rec = next((r for r in _phase_recs if r.get("phase") == "ANALYZE"), None)
+                    _execute_rec = next((r for r in _phase_recs if r.get("phase") == "EXECUTE"), None)
+                    _has_root_cause = bool(_analyze_rec and _analyze_rec.get("root_cause"))
+                    _has_plan = bool(_analyze_rec and _analyze_rec.get("plan")) or bool(_execute_rec and _execute_rec.get("plan"))
+                    _execution_ready = bool(_execute_rec or _has_plan)
+                    if _files_written_count == 0 and _analyze_rec and _execution_ready:
+                        _rc_snippet = ""
+                        if _has_root_cause:
+                            _rc_snippet = f" Root cause from your analysis: {_analyze_rec['root_cause'][:120]}"
+                        print(
+                            f"    [execution-gate] EXECUTION_NO_MATERIALIZATION"
+                            f" files_written={_files_written_count}"
+                            f" has_root_cause={_has_root_cause}"
+                            f" has_plan={_has_plan}"
+                            f" execute_rec={_execute_rec is not None}",
+                            flush=True,
+                        )
+                        last_failure = (
+                            "EXECUTION REQUIRED: You identified the root cause but never edited any file. "
+                            "Analysis is complete. You MUST write the patch NOW.\n\n"
+                            "MANDATORY this attempt:\n"
+                            "1. Do NOT re-read files or re-analyze.\n"
+                            "2. Open the exact file identified in your analysis.\n"
+                            "3. Make the minimal code change to fix the root cause.\n"
+                            "4. Run the required tests.\n"
+                            "5. Call submit.\n\n"
+                            "Failure to edit at least one file = attempt counts as FAILED."
+                            + (_rc_snippet if _rc_snippet else "")
+                        )
+                    elif _files_written_count == 0 and _analyze_rec and not _execution_ready:
+                        print(
+                            f"    [execution-gate] ANALYZE_NOT_READY"
+                            f" files_written={_files_written_count}"
+                            f" has_root_cause={_has_root_cause}"
+                            f" has_plan={_has_plan}",
+                            flush=True,
+                        )
+                        last_failure = "No patch was generated"
+                    else:
+                        last_failure = "No patch was generated"
+                t_gate.stop()
+                continue
+
+            patch = normalize_patch(patch)
+
+            if self._mode == "baseline":
+                score = score_patch(patch)
+                fp = patch_fingerprint(patch)
+                print(f"    [gate] BASELINE (no gate)  score={score:.0f}  lines={len(patch.splitlines())}")
+                attempts_log.append({
+                    "attempt": attempt,
+                    "admission_reason": "baseline_no_gate",
+                    "patch_fp": fp,
+                    "gate_reason_codes": [],
+                    "exit_status": agent_exit,
+                })
+                candidates.append({"attempt": attempt, "patch": patch, "score": score,
+                                    "gate_code": "BASELINE_NO_GATE"})
+                last_failure = ""
+                agent_exit = None
+            elif GATE_MODE == "trust_gate":
+                attempt_dir = self._output_dir / f"attempt_{attempt}"
+                traj_path = attempt_dir / instance_id / f"{instance_id}.traj.json"
+                gate_result = evaluate_patch_from_traj(
+                    patch_text=patch,
+                    traj_path=traj_path if traj_path.exists() else None,
+                    exit_status=agent_exit,
+                    proposal_id=f"{instance_id}-attempt-{attempt}",
+                    jingu_body=jingu_body,
+                )
+                exp = gate_result.explanation
+                exp_str = (f"units={exp.total_units} approved={exp.approved} "
+                           f"downgraded={exp.downgraded} rejected={exp.rejected}"
+                           if exp else "no explanation")
+                admission = classify_admission(gate_result, patch, agent_exit)
+                fp = patch_fingerprint(patch)
+                attempts_log.append({
+                    "attempt": attempt,
+                    "admission_reason": admission,
+                    "patch_fp": fp,
+                    "gate_reason_codes": gate_result.reason_codes,
+                    "exit_status": agent_exit,
+                })
+                if gate_result.admitted:
+                    score = score_patch(patch)
+                    patch_lines = len(patch.splitlines())
+                    grade = gate_result.gate_code
+                    print(f"    [gate] {grade}  score={score:.0f}  lines={patch_lines}  {exp_str}")
+                    print(f"    [telemetry] admission={admission}  files={fp['files']}  "
+                          f"hunks={fp['hunks']}  +{fp['lines_added']}/-{fp['lines_removed']}")
+                    t_gate.stop()
+
+                    candidates.append({
+                        "attempt": attempt,
+                        "patch": patch,
+                        "score": score,
+                        "gate_code": gate_result.gate_code,
+                        "gate_reason_codes": gate_result.reason_codes,
+                    })
+                    # Patch bloat detection
+                    if attempt >= 2 and len(attempts_log) >= 2:
+                        prev = attempts_log[-2].get("patch_fp") or {}
+                        prev_size = prev.get("lines_added", 0) + prev.get("lines_removed", 0)
+                        curr_size = fp["lines_added"] + fp["lines_removed"]
+                        if prev_size > 0 and curr_size > prev_size * 1.5:
+                            print(f"    [bloat-warn] attempt {attempt} patch is {curr_size} lines "
+                                  f"(+{curr_size - prev_size} vs attempt {attempt-1} {prev_size}). "
+                                  f"Possible wrong direction.")
+                    # B3: retry-controller
+                    if attempt < self._max_attempts:
+                        fail_to_pass = self._instance.get("FAIL_TO_PASS", [])
+                        if not isinstance(fail_to_pass, list):
+                            fail_to_pass = []
+                        exec_feedback = build_execution_feedback(
+                            jingu_body=jingu_body or {},
+                            fail_to_pass_tests=fail_to_pass,
+                            patch_fp=fp,
+                        )
+                        print(f"    [exec-feedback] {exec_feedback[:200]}")
+                        # EFR enforcement
+                        tests_ran = (jingu_body or {}).get("test_results", {}).get("ran_tests", False)
+                        if tests_ran and not exec_feedback.strip():
+                            raise RuntimeError(
+                                "[EFR violation] tests ran but exec_feedback is empty. "
+                                "build_execution_feedback() must extract test output."
+                            )
+                        # B4: cognition gate
+                        _traj_path = self._output_dir / f"attempt_{attempt}" / instance_id / f"{instance_id}.traj.json"
+                        _decl = None
+                        _traj_msgs_for_signal: list[dict] = []
+                        if _traj_path.exists():
+                            try:
+                                _traj_msgs_for_signal = json.loads(_traj_path.read_text()).get("messages", [])
+                                _structured_decl = _try_parse_structured_output(_traj_msgs_for_signal)
+                                if _structured_decl is not None:
+                                    _decl = extract_from_structured(_structured_decl)
+                                    print(f"    [cognition] extraction_method=structured", flush=True)
+                                else:
+                                    _last_msg = extract_last_agent_message(_traj_msgs_for_signal)
+                                    _decl = extract_declaration(_last_msg)
+                                if _decl:
+                                    _signals = extract_patch_signals(patch)
+                                    _cog = check_cognition(_decl, _signals)
+                                    _cog_fb = format_cognition_feedback(_cog)
+                                    if _cog_fb:
+                                        print(f"    [cognition] violation: {_cog_fb[:200]}")
+                                        exec_feedback = exec_feedback + "\n" + _cog_fb if exec_feedback else _cog_fb
+                                    else:
+                                        print(f"    [cognition] pass  type={_decl['type']}  signals={_signals}")
+                                else:
+                                    print(f"    [cognition] skip  (no FIX_TYPE declaration)")
+                            except (json.JSONDecodeError, OSError):
+                                pass
+                        _steps_since_signal = compute_steps_since_last_signal(_traj_msgs_for_signal)
+                        if _steps_since_signal > 0:
+                            print(f"    [no-signal] steps_since_last_signal={_steps_since_signal}")
+                        _principal_viol_codes = extract_principal_violation_codes(_decl)
+                        if _principal_viol_codes:
+                            print(f"    [principal-viol] {_principal_viol_codes}")
+                        if RETRY_CONTROLLER_ENABLED:
+                            _tests_now = _test_counts_by_attempt.get(attempt, -1)
+                            _tests_prev = _test_counts_by_attempt.get(attempt - 1, -1)
+                            _tests_delta = (_tests_now - _tests_prev) if _tests_now >= 0 and _tests_prev >= 0 else None
+                            _progress_ok, _progress_code = check_test_progress_invariant(_tests_prev, _tests_now)
+                            print(f"    [test-progress] ok={_progress_ok}  code={_progress_code}  "
+                                  f"prev={_tests_prev}  now={_tests_now}  delta={_tests_delta}")
+                            _inner_cv = (jingu_body or {}).get("controlled_verify") or {}
+                            prev_fp = attempts_log[-2]["patch_fp"] if len(attempts_log) >= 2 else None
+                            t_ctrl = Timer(f"B3 retry-controller attempt={attempt}", parent=t_inst)
+                            retry_plan = build_retry_plan(
+                                problem_statement=self._instance.get("problem_statement", ""),
+                                patch_text=patch,
+                                jingu_body=jingu_body or {},
+                                fail_to_pass_tests=fail_to_pass,
+                                gate_admitted=True,
+                                gate_reason_codes=gate_result.reason_codes,
+                                instance_id=instance_id,
+                                patch_fp=fp,
+                                prev_patch_fp=prev_fp,
+                                exec_feedback=exec_feedback,
+                                attempt=attempt,
+                                steps_since_last_signal=_steps_since_signal,
+                                principal_violation_codes=_principal_viol_codes,
+                                strategy_table_path=STRATEGY_TABLE_PATH,
+                                tests_delta=_tests_delta,
+                                tests_passed_after=_tests_now,
+                                controlled_verify=(jingu_body or {}).get("controlled_verify", {}),
+                                patch_exists=bool(patch and patch.strip()),
+                                inner_f2p_passed=_inner_cv.get("f2p_passed") if _inner_cv.get("f2p_passed") is not None else -1,
+                                inner_f2p_total=(_inner_cv.get("f2p_passed") or 0) + (_inner_cv.get("f2p_failed") or 0),
+                                inner_new_failures=_inner_cv.get("p2p_failed") or 0,
+                            )
+                            t_ctrl.stop()
+                            # p179: override control_action based on TEST_PROGRESS_MONOTONICITY
+                            if not _progress_ok and _progress_code == "TEST_REGRESSION":
+                                print(f"    [test-progress-gate] REGRESSION detected — overriding to STOP_FAIL")
+                                retry_plan = RetryPlan(
+                                    root_causes=retry_plan.root_causes + [f"invariant=TEST_REGRESSION"],
+                                    must_do=["Revert the direction of your fix — you made tests worse"],
+                                    must_not_do=["Do not continue in the same direction as the previous attempt"],
+                                    validation_requirement="Run required tests and confirm delta > 0",
+                                    next_attempt_prompt=(
+                                        "REGRESSION: Your previous patch made the tests worse. "
+                                        "You must completely change your approach. "
+                                        "Do NOT expand the previous change. "
+                                        "Reread the failing tests from scratch and fix the actual root cause."
+                                    )[:600],
+                                    control_action="STOP_FAIL",
+                                    principal_violations=retry_plan.principal_violations,
+                                )
+                            elif not _progress_ok and _progress_code == "NO_TEST_PROGRESS":
+                                _curr_hash = patch_content_hash(patch)
+                                _prev_hash = patch_content_hash(_prev_raw_patch) if _prev_raw_patch else None
+                                _same_patch = (_prev_hash is not None and _curr_hash == _prev_hash)
+                                _patch_direction = "stuck" if _same_patch else "exploring"
+                                print(f"    [outcome-gate] NO_PROGRESS direction={_patch_direction} "
+                                      f"curr_hash={_curr_hash} prev_hash={_prev_hash}")
+                                if _same_patch:
+                                    print(f"    [test-progress-gate] NO_PROGRESS stuck — overriding to ADJUST (force change)")
+                                    retry_plan = RetryPlan(
+                                        root_causes=retry_plan.root_causes + ["invariant=NO_TEST_PROGRESS", "direction=stuck"],
+                                        must_do=["Write a completely different patch — different approach or different file"],
+                                        must_not_do=["Do not reuse any part of your previous patch"],
+                                        validation_requirement="Run required tests and confirm delta > 0",
+                                        next_attempt_prompt=(
+                                            "NO PROGRESS + SAME PATCH: Your approach is stuck. "
+                                            "You must write a fundamentally different fix. "
+                                            "Abandon your current hypothesis entirely. "
+                                            "Reread the failing tests with fresh eyes and form a new hypothesis."
+                                        )[:600],
+                                        control_action="ADJUST",
+                                        principal_violations=retry_plan.principal_violations,
+                                    )
+                                    _no_progress_streak = 0
+                                else:
+                                    _no_progress_streak += 1
+                                    print(f"    [outcome_gate] consecutive_no_progress={_no_progress_streak} "
+                                          f"strategy_change_forced={_no_progress_streak >= 2}")
+                                    if _no_progress_streak >= 2:
+                                        print(f"    [test-progress-gate] NO_PROGRESS exploring streak={_no_progress_streak} — FORCED STRATEGY CHANGE")
+                                        retry_plan = RetryPlan(
+                                            root_causes=retry_plan.root_causes + ["invariant=NO_TEST_PROGRESS", "direction=exploring", f"no_progress_streak={_no_progress_streak}"],
+                                            must_do=[
+                                                "ABANDON your current hypothesis entirely — it has failed multiple times",
+                                                "Re-read the failing test to understand what it ACTUALLY checks",
+                                                "Identify a completely different root cause",
+                                                "Write a fundamentally different fix targeting different code",
+                                            ],
+                                            must_not_do=[
+                                                "Do NOT make small variations of your previous patches",
+                                                "Do NOT modify the same function or method as before",
+                                                "Do NOT assume your previous diagnosis was correct",
+                                            ],
+                                            validation_requirement="Run required tests and confirm delta > 0",
+                                            next_attempt_prompt=(
+                                                f"STRATEGY CHANGE REQUIRED (attempt streak={_no_progress_streak}): "
+                                                f"Your last {_no_progress_streak} attempts with DIFFERENT patches all failed to improve test results. "
+                                                "This means your fundamental hypothesis about the bug is wrong. "
+                                                "You MUST: "
+                                                "(1) ABANDON your current hypothesis entirely. "
+                                                "(2) Re-read the failing test to understand what it ACTUALLY checks. "
+                                                "(3) Identify a completely different root cause. "
+                                                "(4) Write a fundamentally different fix — different file or different function. "
+                                                "Do NOT make small variations of previous patches."
+                                            )[:600],
+                                            control_action="ADJUST",
+                                            principal_violations=retry_plan.principal_violations,
+                                        )
+                                    else:
+                                        print(f"    [test-progress-gate] NO_PROGRESS exploring — gentle ADJUST")
+                                        if retry_plan.control_action == "CONTINUE":
+                                            retry_plan = RetryPlan(
+                                                root_causes=retry_plan.root_causes + ["invariant=NO_TEST_PROGRESS", "direction=exploring"],
+                                                must_do=retry_plan.must_do,
+                                                must_not_do=retry_plan.must_not_do,
+                                                validation_requirement=retry_plan.validation_requirement,
+                                                next_attempt_prompt=(
+                                                    retry_plan.next_attempt_prompt
+                                                    + "\n[Tests not yet improving — keep iterating, change approach if needed]"
+                                                ),
+                                                control_action="ADJUST",
+                                                principal_violations=retry_plan.principal_violations,
+                                            )
+                            else:
+                                _no_progress_streak = 0
+                            # GovernancePack pipeline
+                            _gov_ctx = GovExecutionContext(
+                                jingu_body=jingu_body or {},
+                                fail_to_pass=fail_to_pass,
+                                attempt=attempt,
+                                instance_id=instance_id,
+                                patch_text=patch,
+                            )
+                            _pack_decision = run_governance_packs(_gov_ctx)
+                            if _pack_decision and _pack_decision.action == "REROUTE":
+                                retry_plan = override_retry_plan_from_pack(retry_plan, _pack_decision)
+                            print(f"    [retry-ctrl] action={retry_plan.control_action}  "
+                                  f"root_causes={retry_plan.root_causes}")
+                            print(f"    [retry-ctrl] must_not_do={retry_plan.must_not_do}")
+                            print(f"    [retry-ctrl] hint={retry_plan.next_attempt_prompt[:200]}")
+                            # Store strategy metadata
+                            _strategy_failure_class = next(
+                                (rc.split("=", 1)[1] for rc in retry_plan.root_causes if rc.startswith("failure_type=") and not rc.startswith("failure_type_v2=")),
+                                "unknown",
+                            )
+                            _strategy_failure_class_v2 = next(
+                                (rc.split("=", 1)[1] for rc in retry_plan.root_causes if rc.startswith("failure_type_v2=")),
+                                "signal_missing",
+                            )
+                            _strategy_entries.append({
+                                "attempt": attempt,
+                                "failure_class": _strategy_failure_class,
+                                "failure_class_v2": _strategy_failure_class_v2,
+                                "control_action": retry_plan.control_action,
+                                "steps_since_signal": _steps_since_signal,
+                                "enforced_violations": retry_plan.principal_violations,
+                                "hint_used": retry_plan.next_attempt_prompt[:300],
+                                "tests_passed_count": _tests_now,
+                                "tests_passed_prev": _tests_prev,
+                                "tests_delta": _tests_delta,
+                                "progress_code": _progress_code,
+                                "files_written_paths": (jingu_body or {}).get("files_written", []),
+                            })
+                            # B3-CP: update reasoning state
+                            _cv_passed = (_strategy_failure_class_v2 == "verified_pass")
+                            _verify_partial = extract_verify_signals(controlled_verify_passed=_cv_passed)
+                            cp_state_holder[0] = update_reasoning_state(
+                                cp_state_holder[0], normalize_signals(_verify_partial)
+                            )
+                            _cp_state_now = cp_state_holder[0]
+                            cp_verdict = decide_next(_cp_state_now)
+                            _iid_short = instance_id.split("__")[-1] if "__" in instance_id else instance_id
+                            print(f"    [control-plane] instance={_iid_short} attempt={attempt}"
+                                  f" state=phase:{_cp_state_now.phase}"
+                                  f" step:{_cp_state_now.step_index} no_progress:{_cp_state_now.no_progress_steps}"
+                                  f" task_success:{_cp_state_now.task_success}")
+                            print(f"    [control-plane] instance={_iid_short} attempt={attempt} verdict={cp_verdict}")
+                            if isinstance(cp_verdict, VerdictStop):
+                                print(f"    [control-plane] instance={_iid_short} STOPPING — reason={cp_verdict.reason}")
+                                _tr_cpv = (jingu_body or {}).get("test_results", {})
+                                _pr_cpv = build_phase_result(
+                                    str(cp_state_holder[0].phase).upper(),
+                                    has_patch=(_attempt_monitor._prev_patch_non_empty if _attempt_monitor else False),
+                                    has_inner_verify=len(_attempt_monitor.verify_history) > 0 if _attempt_monitor else False,
+                                    test_results=_tr_cpv,
+                                    no_progress_steps=cp_state_holder[0].no_progress_steps,
+                                    early_stop_reason=cp_verdict.reason,
+                                    files_written=len((jingu_body or {}).get("files_written", [])),
+                                )
+                                _pr_cpv_route, _pr_cpv_target, _ = route_from_phase_result(_pr_cpv)
+                                print(
+                                    f"  [phase_result] phase={_pr_cpv.phase}"
+                                    f" outcome={_pr_cpv.outcome}"
+                                    f" verdict={_pr_cpv.verdict}"
+                                    f" route={_pr_cpv_route}"
+                                    f" target={_pr_cpv_target or '-'}"
+                                    f" trust={_pr_cpv.trust_score or '-'}"
+                                    f" reason={_pr_cpv.judge_reason}",
+                                    flush=True,
+                                )
+                                break
+                            if isinstance(cp_verdict, VerdictRedirect):
+                                print(f"    [control-plane] instance={_iid_short} REDIRECT → forcing ADJUST  reason={cp_verdict.reason}")
+                                import dataclasses as _dc
+                                retry_plan = _dc.replace(
+                                    retry_plan,
+                                    control_action="ADJUST",
+                                    next_attempt_prompt=(
+                                        retry_plan.next_attempt_prompt
+                                        + f"\n\n[Control-plane redirect: {cp_verdict.reason} — re-examine environment assumptions before patching]"
+                                    ),
+                                )
+
+                            if retry_plan.control_action in ("STOP_FAIL", "STOP_NO_SIGNAL"):
+                                print(f"    [retry-ctrl] STOPPING — action={retry_plan.control_action}")
+                                _tr_sf = (jingu_body or {}).get("test_results", {})
+                                _pr_sf = build_phase_result(
+                                    str(cp_state_holder[0].phase).upper(),
+                                    has_patch=(_attempt_monitor._prev_patch_non_empty if _attempt_monitor else False),
+                                    has_inner_verify=len(_attempt_monitor.verify_history) > 0 if _attempt_monitor else False,
+                                    test_results=_tr_sf,
+                                    no_progress_steps=cp_state_holder[0].no_progress_steps,
+                                    early_stop_reason=retry_plan.control_action.lower(),
+                                    files_written=len((jingu_body or {}).get("files_written", [])),
+                                )
+                                _pr_sf_route, _pr_sf_target, _ = route_from_phase_result(_pr_sf)
+                                print(
+                                    f"  [phase_result] phase={_pr_sf.phase}"
+                                    f" outcome={_pr_sf.outcome}"
+                                    f" verdict={_pr_sf.verdict}"
+                                    f" route={_pr_sf_route}"
+                                    f" target={_pr_sf_target or '-'}"
+                                    f" trust={_pr_sf.trust_score or '-'}"
+                                    f" reason={_pr_sf.judge_reason}",
+                                    flush=True,
+                                )
+                                break
+                            if _strategy_failure_class_v2 == "verified_pass":
+                                print(f"    [retry-ctrl] STOPPING — verified_pass (controlled_verify tests_failed=0)")
+                                _tr_vp = (jingu_body or {}).get("test_results", {})
+                                _pr_vp = build_phase_result(
+                                    str(cp_state_holder[0].phase).upper(),
+                                    has_patch=(_attempt_monitor._prev_patch_non_empty if _attempt_monitor else False),
+                                    has_inner_verify=len(_attempt_monitor.verify_history) > 0 if _attempt_monitor else False,
+                                    test_results=_tr_vp,
+                                    no_progress_steps=cp_state_holder[0].no_progress_steps,
+                                    early_stop_reason="verified_pass",
+                                    files_written=len((jingu_body or {}).get("files_written", [])),
+                                )
+                                _pr_vp_route, _pr_vp_target, _ = route_from_phase_result(_pr_vp)
+                                print(
+                                    f"  [phase_result] phase={_pr_vp.phase}"
+                                    f" outcome={_pr_vp.outcome}"
+                                    f" verdict={_pr_vp.verdict}"
+                                    f" route={_pr_vp_route}"
+                                    f" target={_pr_vp_target or '-'}"
+                                    f" trust={_pr_vp.trust_score or '-'}"
+                                    f" reason={_pr_vp.judge_reason}",
+                                    flush=True,
+                                )
+                                break
+
+                            _prev_raw_patch = patch
+                            last_failure = retry_plan.next_attempt_prompt[:600]
+                            _jb_ft = (jingu_body or {}).get("failure_type")
+                            _jb_routing = (jingu_body or {}).get("failure_routing")
+                            _jb_cv = (jingu_body or {}).get("controlled_verify") or {}
+                            if _jb_ft and _jb_routing:
+                                _repair = build_repair_prompt(_jb_ft, _jb_cv, _jb_routing)
+                                last_failure = _repair + "\n\n" + last_failure
+                                print(f"    [repair-route] attempt={attempt} failure_type={_jb_ft} "
+                                      f"next_phase={_jb_routing['next_phase']}", flush=True)
+                            if is_data_driven_routing_enabled():
+                                try:
+                                    _p216_phase = (jingu_body or {}).get("last_phase", "ANALYZE").upper()
+                                    _p216_principal = (jingu_body or {}).get("top_failed_principal", "")
+                                    if _p216_principal:
+                                        _p216_next, _p216_strategy = route_failure_p216(_p216_phase, _p216_principal)
+                                        _p216_prompt = get_strategy_prompt(_p216_strategy)
+                                        last_failure = _p216_prompt + "\n\n" + last_failure
+                                        print(f"    [p216-routing] attempt={attempt} phase={_p216_phase} "
+                                              f"principal={_p216_principal} -> next={_p216_next} "
+                                              f"strategy={_p216_strategy}", flush=True)
+                                except Exception as _p216_exc:
+                                    print(f"    [p216-routing] error (non-fatal): {_p216_exc}", flush=True)
+                        else:
+                            last_failure = exec_feedback[:400]
+                            _jb_ft = (jingu_body or {}).get("failure_type")
+                            _jb_routing = (jingu_body or {}).get("failure_routing")
+                            _jb_cv = (jingu_body or {}).get("controlled_verify") or {}
+                            if _jb_ft and _jb_routing:
+                                _repair = build_repair_prompt(_jb_ft, _jb_cv, _jb_routing)
+                                last_failure = _repair + "\n\n" + last_failure
+                                print(f"    [repair-route] attempt={attempt} failure_type={_jb_ft} "
+                                      f"next_phase={_jb_routing['next_phase']}", flush=True)
+                            if is_data_driven_routing_enabled():
+                                try:
+                                    _p216_phase = (jingu_body or {}).get("last_phase", "ANALYZE").upper()
+                                    _p216_principal = (jingu_body or {}).get("top_failed_principal", "")
+                                    if _p216_principal:
+                                        _p216_next, _p216_strategy = route_failure_p216(_p216_phase, _p216_principal)
+                                        _p216_prompt = get_strategy_prompt(_p216_strategy)
+                                        last_failure = _p216_prompt + "\n\n" + last_failure
+                                        print(f"    [p216-routing] attempt={attempt} phase={_p216_phase} "
+                                              f"principal={_p216_principal} -> next={_p216_next} "
+                                              f"strategy={_p216_strategy}", flush=True)
+                                except Exception as _p216_exc:
+                                    print(f"    [p216-routing] error (non-fatal): {_p216_exc}", flush=True)
+                    else:
+                        last_failure = ""
+                    agent_exit = None
+                else:
+                    codes = ", ".join(gate_result.reason_codes)
+                    print(f"    [gate] REJECTED  codes={codes}  {exp_str}")
+                    if gate_result.error:
+                        print(f"    [gate-error] {gate_result.error[:300]}")
+                    print(f"    [telemetry] admission={admission}  files={fp['files']}  "
+                          f"hunks={fp['hunks']}  +{fp['lines_added']}/-{fp['lines_removed']}")
+                    hint = gate_result.retry_hint
+                    if not hint:
+                        if "APPLY_FAILED" in gate_result.reason_codes:
+                            hint = ("Previous patch failed to apply. Check for merge conflicts "
+                                    "or incorrect line numbers. Generate a clean diff.")
+                        elif "PARSE_FAILED" in gate_result.reason_codes:
+                            hint = ("Previous patch was malformed (missing ---, +++, @@ markers). "
+                                    "Use git diff format exactly.")
+                        else:
+                            hint = f"Gate rejected patch ({codes}). Generate a better patch."
+                    last_failure = hint[:400]
+                    t_gate.stop()
+                    continue
+            else:
+                # B0 fallback: structural check only
+                sg = jingu_structural_check(patch)
+                if not sg["pass"]:
+                    print(f"    [gate] FAIL structural: {sg['code']} — {sg.get('message','')}")
+                    last_failure = f"Structural gate failed: {sg['message']}"
+                    t_gate.stop()
+                    continue
+                score = score_patch(patch)
+                patch_lines = len(patch.splitlines())
+                print(f"    [gate] OK  score={score:.0f}  lines={patch_lines}")
+                t_gate.stop()
+                candidates.append({"attempt": attempt, "patch": patch, "score": score,
+                                    "gate_code": "STRUCTURAL_OK"})
+                last_failure = ""
+                agent_exit = None
+
+        t_inst.stop()
+
+        inst_usage = _usage_tracker.per_instance().get(instance_id, {})
+        llm_calls = inst_usage.get("api_calls", 0)
+        t_inst.llm_calls = llm_calls
+
+        delta = compute_attempt_delta(attempts_log)
+        if delta:
+            print(f"  [attempt_delta] files_changed={delta['files_changed']}  "
+                  f"size_delta={delta['size_delta_lines']:+d}  "
+                  f"same_reason={delta['same_admission_reason']}  "
+                  f"{delta['a1_admission']} → {delta['a2_admission']}")
+
+        # Flush strategy log entries
+        if STRATEGY_LOG_PATH and _strategy_entries:
+            _inst_final_admitted = bool(candidates)
+            _admit_by_attempt = {
+                a["attempt"]: a["admission_reason"] not in ("no_patch", "gate_reject_parse_failed",
+                    "gate_reject_apply_failed", "gate_reject_empty_patch",
+                    "gate_reject_too_many_files", "gate_reject_other", "gate_error")
+                for a in attempts_log
+            }
+            _has_patch_by_attempt = {
+                a["attempt"]: a["admission_reason"] != "no_patch"
+                for a in attempts_log
+            }
+            for _se in _strategy_entries:
+                _next_att = _se["attempt"] + 1
+                _next_admitted = _admit_by_attempt.get(_next_att, False)
+                _next_has_patch = _has_patch_by_attempt.get(_next_att, False)
+                try:
+                    log_strategy_entry(
+                        make_strategy_entry(
+                            instance_id=instance_id,
+                            attempt_id=_se["attempt"],
+                            failure_class=_se["failure_class"],
+                            control_action=_se["control_action"],
+                            steps_since_last_signal=_se["steps_since_signal"],
+                            enforced_violation_codes=_se["enforced_violations"],
+                            hint_used=_se["hint_used"],
+                            next_attempt_admitted=_next_admitted,
+                            next_attempt_has_patch=_next_has_patch,
+                            instance_final_admitted=_inst_final_admitted,
+                            outcome="solved" if _inst_final_admitted else "unsolved",
+                            tests_delta=_se.get("tests_delta", None),
+                            tests_passed_before=_se.get("tests_passed_prev", -1),
+                            tests_passed_after=_se.get("tests_passed_count", -1),
+                            files_written_paths=_se.get("files_written_paths", []),
+                            failure_class_v2=_se.get("failure_class_v2", "signal_missing"),
+                        ),
+                        STRATEGY_LOG_PATH,
+                    )
+                except Exception as _log_err:
+                    print(f"    [strategy-log] WARNING: failed to write entry: {_log_err}")
+
+        if not candidates:
+            return InstanceResult(
+                instance_id=instance_id,
+                accepted=False,
+                patch="",
+                attempts=self._max_attempts,
+                elapsed_s=t_inst.elapsed,
+                model_usage=inst_usage,
+                attempts_log=attempts_log,
+                attempt_delta=delta,
+            )
+
+        best = max(candidates, key=lambda c: c["score"])
+        gate_code = best.get("gate_code", "ADMITTED")
+        best_admission = next(
+            (a["admission_reason"] for a in attempts_log if a["attempt"] == best["attempt"]),
+            gate_code.lower(),
+        )
+        print(f"  [result] ACCEPTED  best_attempt={best['attempt']}  score={best['score']:.0f}  "
+              f"gate={gate_code}  admission={best_admission}  elapsed={t_inst.elapsed:.1f}s  "
+              f"bedrock_calls={llm_calls}  cost=${inst_usage.get('cost_usd', 0):.4f}")
+        return InstanceResult(
+            instance_id=instance_id,
+            accepted=True,
+            patch=best["patch"],
+            attempts=self._max_attempts,
+            best_attempt=best["attempt"],
+            score=best["score"],
+            gate_code=gate_code,
+            gate_reason_codes=best.get("gate_reason_codes", []),
+            admission_reason=best_admission,
+            elapsed_s=t_inst.elapsed,
+            model_usage=inst_usage,
+            attempts_log=attempts_log,
+            attempt_delta=delta,
+        )
 
 
 # ---------------------------------------------------------------------------
