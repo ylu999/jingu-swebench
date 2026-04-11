@@ -206,11 +206,20 @@ class JinguGovernance:
 
         Removes unsupported constraints (minLength, minimum, maximum)
         and adds additionalProperties: false to all objects.
+
+        Returns None (triggers regex fallback) if adapted schema fails validation.
         """
         raw = self.get_extraction_schema(phase)
         if raw is None:
             return None
-        return _adapt_schema_for_constrained_decoding(raw)
+        adapted = _adapt_schema_for_constrained_decoding(raw)
+        errors = _validate_adapted_schema(adapted, phase.upper())
+        if errors:
+            logger.warning(
+                "[schema_validation] phase=%s errors=%s", phase.upper(), errors
+            )
+            return None
+        return adapted
 
 
 # ── Schema adaptation ─────────────────────────────────────────────────────
@@ -238,6 +247,57 @@ def _adapt_schema_for_constrained_decoding(schema: dict[str, Any]) -> dict[str, 
         result["additionalProperties"] = False
 
     return result
+
+
+def _validate_adapted_schema(schema: dict[str, Any], phase: str, _depth: int = 0) -> list[str]:
+    """Validate that an adapted schema satisfies Anthropic/Bedrock constrained decoding requirements.
+
+    Returns a list of error strings. Empty list = valid.
+
+    Checks:
+    - Top-level type == "object"
+    - additionalProperties: false on all objects (including nested)
+    - required array present on all objects
+    - No $ref keys anywhere
+    - Depth limit: max 4 levels
+    """
+    errors: list[str] = []
+    path = f"{phase}(depth={_depth})"
+
+    # Depth limit
+    if _depth > 4:
+        errors.append(f"{path}: schema exceeds max depth 4")
+        return errors
+
+    # $ref check (at any level)
+    if "$ref" in schema:
+        errors.append(f"{path}: contains $ref (not supported)")
+
+    schema_type = schema.get("type")
+
+    if schema_type == "object":
+        # additionalProperties: false required
+        if schema.get("additionalProperties") is not False:
+            errors.append(f"{path}: object missing additionalProperties: false")
+
+        # required array must be present
+        if "required" not in schema:
+            errors.append(f"{path}: object missing required array")
+
+        # Recurse into properties
+        for prop_name, prop_schema in schema.get("properties", {}).items():
+            if isinstance(prop_schema, dict):
+                errors.extend(
+                    _validate_adapted_schema(prop_schema, f"{phase}.{prop_name}", _depth + 1)
+                )
+
+    # Recurse into array items
+    if schema_type == "array" and isinstance(schema.get("items"), dict):
+        errors.extend(
+            _validate_adapted_schema(schema["items"], f"{phase}.items", _depth + 1)
+        )
+
+    return errors
 
 
 # ── Phase resolution ──────────────────────────────────────────────────────
@@ -375,6 +435,20 @@ def onboard(bundle_path: str | None = None, *, force_reload: bool = False) -> Ji
     }
 
     gov = JinguGovernance(phases, metadata)
+
+    # Startup schema validation — log per-phase constrained decoding readiness
+    all_phase_names = ["UNDERSTAND", "OBSERVE", "ANALYZE", "DECIDE", "DESIGN", "EXECUTE", "JUDGE"]
+    for p in all_phase_names:
+        raw = gov.get_extraction_schema(p)
+        if raw is None:
+            logger.info("[onboard] schema_validation phase=%s: no schema (expected)", p)
+            continue
+        constrained = gov.get_constrained_schema(p)
+        if constrained is not None:
+            logger.info("[onboard] schema_validation phase=%s: OK", p)
+        else:
+            logger.warning("[onboard] schema_validation phase=%s: FAILED (regex fallback)", p)
+
     _cached_governance = gov
 
     logger.info(
