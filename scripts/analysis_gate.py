@@ -16,6 +16,10 @@ Every field must be derived from system state, not from LLM output.
 import re
 from dataclasses import dataclass, field
 from phase_record import PhaseRecord
+from gate_rejection import (
+    GateRejection, ContractView, FieldSpec, FieldFailure,
+    build_gate_rejection, SDG_ENABLED,
+)
 
 
 @dataclass
@@ -26,6 +30,7 @@ class AnalysisVerdict:
     reasons: list       # human-readable rejection reasons
     scores: dict        # per-rule scores for telemetry
     extracted: dict = field(default_factory=dict)  # p214: field status for repair feedback
+    rejection: GateRejection | None = None  # p217: structured SDG rejection (populated on failure)
 
 
 # ── Code reference detection (structural) ────────────────────────────────────
@@ -196,6 +201,52 @@ def _check_causal_chain(pr: PhaseRecord) -> float:
         return 0.0
 
 
+# ── ANALYZE contract (SDG p217) ──────────────────────────────────────────────
+
+_ANALYZE_CONTRACT = ContractView(
+    required_fields=["root_cause", "causal_chain", "evidence_refs"],
+    field_specs={
+        "root_cause": FieldSpec(
+            description="Identified root cause with specific code reference (file/function/line)",
+            required=True,
+            min_length=10,
+            semantic_check="grounded_in_code",
+        ),
+        "causal_chain": FieldSpec(
+            description="Causal chain: test failure -> condition -> code -> why it fails",
+            required=True,
+            min_length=20,
+            semantic_check="connects_test_to_code",
+        ),
+        "evidence_refs": FieldSpec(
+            description="Code and test references supporting the analysis",
+            required=True,
+        ),
+        "alternative_hypothesis": FieldSpec(
+            description="At least 2 hypotheses with rejection reasoning for non-chosen",
+            required=False,
+            semantic_check="multiple_distinct_hypotheses",
+        ),
+    },
+)
+
+# Rule name -> (field, hint) mapping for SDG FieldFailure construction
+_RULE_TO_FIELD: dict[str, tuple[str, str]] = {
+    "code_grounding": (
+        "root_cause",
+        "Point to exact code location (file:line or function name) causing the issue",
+    ),
+    "alternative_hypothesis": (
+        "alternative_hypothesis",
+        "Consider at least 2 hypotheses and explain why non-chosen ones were rejected",
+    ),
+    "causal_chain": (
+        "causal_chain",
+        "Explain step-by-step: test failure -> condition -> code -> why it fails",
+    ),
+}
+
+
 # ── Main evaluation function ─────────────────────────────────────────────────
 
 _THRESHOLD = 0.5  # Soft gate: reject only clearly inadequate analyses
@@ -242,13 +293,52 @@ def evaluate_analysis(pr: PhaseRecord) -> AnalysisVerdict:
             "Explain step-by-step how the test failure connects to the root cause."
         )
 
+    extracted = {
+        "root_cause": pr.root_cause[:100] if pr.root_cause else "",
+        "causal_chain": pr.causal_chain[:100] if pr.causal_chain else "",
+    }
+
+    # p217: Build structured GateRejection on failure (when SDG enabled)
+    rejection = None
+    if failed and SDG_ENABLED:
+        field_failures = []
+        for rule_name in failed:
+            field_name, hint = _RULE_TO_FIELD.get(
+                rule_name, (rule_name, f"Fix {rule_name}")
+            )
+            score = scores.get(rule_name, 0.0)
+            # Determine reason based on score
+            if score == 0.0:
+                reason = "missing"
+            elif score < _THRESHOLD:
+                reason = "too_short" if field_name in ("causal_chain", "root_cause") else "semantic_fail"
+            else:
+                reason = "semantic_fail"
+
+            field_spec = _ANALYZE_CONTRACT.field_specs.get(field_name)
+            expected = field_spec.description if field_spec else f"{field_name} required"
+            actual_val = extracted.get(field_name)
+
+            field_failures.append(FieldFailure(
+                field=field_name,
+                reason=reason,
+                hint=hint,
+                expected=expected,
+                actual=actual_val if actual_val else None,
+            ))
+
+        rejection = build_gate_rejection(
+            gate_name="analysis_gate",
+            contract=_ANALYZE_CONTRACT,
+            extracted=extracted,
+            failures=field_failures,
+        )
+
     return AnalysisVerdict(
         passed=len(failed) == 0,
         failed_rules=failed,
         reasons=reasons,
         scores=scores,
-        extracted={
-            "root_cause": pr.root_cause[:100] if pr.root_cause else "",
-            "causal_chain": pr.causal_chain[:100] if pr.causal_chain else "",
-        },
+        extracted=extracted,
+        rejection=rejection,
     )

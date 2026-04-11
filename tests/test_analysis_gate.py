@@ -24,6 +24,7 @@ from analysis_gate import (
     _check_causal_chain,
     _is_code_evidence_ref,
 )
+from gate_rejection import GateRejection, FieldFailure
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
@@ -426,3 +427,69 @@ class TestThresholds:
         assert "code_grounding" in verdict.scores
         assert "alternative_hypothesis" in verdict.scores
         assert "causal_chain" in verdict.scores
+
+
+# -- Tests: SDG GateRejection on failure (p217) --
+
+class TestAnalysisGateRejection:
+
+    def test_passing_verdict_has_no_rejection(self):
+        """Good analysis should have rejection=None."""
+        pr = _make_good_pr()
+        verdict = evaluate_analysis(pr)
+        assert verdict.passed is True
+        assert verdict.rejection is None
+
+    def test_failing_verdict_has_rejection(self):
+        """Failed analysis should have a non-None GateRejection."""
+        pr = _make_empty_pr()
+        verdict = evaluate_analysis(pr)
+        assert verdict.passed is False
+        assert verdict.rejection is not None
+        assert isinstance(verdict.rejection, GateRejection)
+
+    def test_rejection_gate_name(self):
+        """Rejection gate_name is 'analysis_gate'."""
+        pr = _make_empty_pr()
+        verdict = evaluate_analysis(pr)
+        assert verdict.rejection.gate_name == "analysis_gate"
+
+    def test_rejection_has_failures(self):
+        """Rejection contains FieldFailure entries for each failed rule."""
+        pr = _make_empty_pr()
+        verdict = evaluate_analysis(pr)
+        assert len(verdict.rejection.failures) == 3  # all 3 rules fail
+        fields_failed = [f.field for f in verdict.rejection.failures]
+        assert "root_cause" in fields_failed
+        assert "causal_chain" in fields_failed
+        assert "alternative_hypothesis" in fields_failed
+
+    def test_rejection_failures_have_hints(self):
+        """Each FieldFailure has a non-empty hint."""
+        pr = _make_empty_pr()
+        verdict = evaluate_analysis(pr)
+        for f in verdict.rejection.failures:
+            assert f.hint != "", f"FieldFailure for {f.field} has empty hint"
+            assert len(f.hint) > 5
+
+    def test_rejection_has_contract(self):
+        """Rejection carries the ANALYZE contract view."""
+        pr = _make_empty_pr()
+        verdict = evaluate_analysis(pr)
+        assert len(verdict.rejection.contract.required_fields) > 0
+        assert "root_cause" in verdict.rejection.contract.required_fields
+
+    def test_rejection_has_extracted(self):
+        """Rejection carries extracted values."""
+        pr = _make_no_code_refs_pr()
+        verdict = evaluate_analysis(pr)
+        assert verdict.rejection is not None
+        assert "root_cause" in verdict.rejection.extracted
+
+    def test_single_rule_failure_has_one_field_failure(self):
+        """When only one rule fails, rejection has exactly 1 FieldFailure."""
+        pr = _make_single_hypothesis_pr()
+        verdict = evaluate_analysis(pr)
+        if not verdict.passed and verdict.rejection:
+            # Should have failure count matching failed_rules
+            assert len(verdict.rejection.failures) == len(verdict.failed_rules)
