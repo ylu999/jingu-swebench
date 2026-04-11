@@ -62,7 +62,7 @@ from declaration_extractor import (
 from patch_signals import extract_patch_signals
 from cognition_check import check_cognition, format_cognition_feedback
 from preflight import run_preflight
-# B1-CP: reasoning control plane (Python port of jingu-control-plane v0.3)
+# B1-CP: reasoning control plane (Python port of jingu-trust-gate control plane v0.3)
 from control.reasoning_state import (
     initial_reasoning_state, update_reasoning_state, decide_next,
     normalize_signals, ReasoningState,

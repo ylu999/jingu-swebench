@@ -1,2 +1,2 @@
-# control — Python port of jingu-control-plane v0.3 core
-# Mirror of jingu-control-plane/src/{integrator,controller,adapter}/
+# control — Python port of jingu-trust-gate control plane v0.3 core
+# Mirror of jingu-trust-gate/src/control/{integrator,controller,adapter}/

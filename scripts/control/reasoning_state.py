@@ -1,10 +1,10 @@
 """
-control/reasoning_state.py — Python port of jingu-control-plane v0.3 core.
+control/reasoning_state.py — Python port of jingu-trust-gate control plane v0.3 core.
 
-Mirrors:
-  src/integrator/signal_integrator.ts   → initial_reasoning_state, update_reasoning_state
-  src/controller/phase_controller.ts    → decide_next
-  src/adapter/normalize.ts              → normalize_signals, DEFAULT_SIGNALS
+Mirrors (now in jingu-trust-gate/src/control/ — absorbed from jingu-control-plane p227-08):
+  src/control/integrator/signal-integrator.ts   → initial_reasoning_state, update_reasoning_state
+  src/control/controller/phase-controller.ts    → decide_next
+  src/control/adapter/normalize.ts              → normalize_signals, DEFAULT_SIGNALS
 
 Interface kept 1:1 with the TypeScript API (same field names, same defaults, same logic).
 
