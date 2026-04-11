@@ -23,11 +23,7 @@ import argparse
 import json
 import os
 import re
-import sys
-import tempfile
 import time
-import traceback
-import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
@@ -583,39 +579,6 @@ _timing_root: Timer | None = None
 _instance_timers: dict[str, Timer] = {}  # iid -> Timer
 
 
-class ScopedPatch:
-    """
-    Scoped monkey patch — replaces an attribute on an object for the duration of a
-    `with` block, then restores the original value unconditionally on exit.
-
-    Stacks safely: multiple ScopedPatch instances on the same obj/attr will each
-    save and restore the value they saw on entry, so nesting works correctly and
-    no "chain stacking" (P9 class bug) is possible.
-
-    Usage:
-        with ScopedPatch(ProgressTrackingAgent, "step", monitored_step):
-            run_agent(...)
-        # ProgressTrackingAgent.step is now the original value again.
-    """
-
-    def __init__(self, obj, attr: str, new_value):
-        self._obj = obj
-        self._attr = attr
-        self._new_value = new_value
-        self._orig = None          # set in __enter__
-        self._entered = False
-
-    def __enter__(self):
-        self._orig = getattr(self._obj, self._attr)
-        setattr(self._obj, self._attr, self._new_value)
-        self._entered = True
-        return self
-
-    def __exit__(self, exc_type, exc, tb):
-        if self._entered:
-            setattr(self._obj, self._attr, self._orig)
-        return False   # do not suppress exceptions
-
 # ── Model Usage Tracker ───────────────────────────────────────────────────────
 
 class ModelUsage:
@@ -748,27 +711,6 @@ def _load_instances(instance_ids: list[str], dataset: str = "Lite") -> dict[str,
 
 def _load_instance(instance_id: str, dataset: str = "Lite") -> dict:
     return _load_instances([instance_id], dataset=dataset)[instance_id]
-
-def run_agent(
-    instance: dict,
-    output_dir: Path,
-    attempt: int,
-    previous_failure: str = "",
-    parent_timer: Timer | None = None,
-    mode: str = "jingu",
-    cp_state_holder: list | None = None,
-) -> tuple[str | None, str | None, dict | None, object | None]:
-    """Compatibility wrapper — delegates to JinguAgent.run_attempt() (p225-09).
-
-    Returns the original 4-tuple: (patch, exit_status, jingu_body, monitor).
-    """
-    from jingu_agent import JinguAgent
-    agent = JinguAgent(instance, Path(output_dir), governance=None, mode=mode)
-    agent._cp_state_holder = cp_state_holder if cp_state_holder is not None else []
-    outcome = agent.run_attempt(attempt, previous_failure, parent_timer=parent_timer)
-    r = outcome.result
-    return (r.patch, r.exit_status, r.jingu_body, r.monitor)
-
 
 # ── Main loop ─────────────────────────────────────────────────────────────────
 
