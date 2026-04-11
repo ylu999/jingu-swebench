@@ -86,6 +86,8 @@ COPY scripts/run_with_jingu_gate.py \
      /app/scripts/
 # B1-CP: reasoning control plane Python module
 COPY scripts/control/ /app/scripts/control/
+# p222: cognition contracts (single source of truth for phase/subtype definitions)
+COPY scripts/cognition_contracts/ /app/scripts/cognition_contracts/
 
 # Bundle JSON (compiled contract from jingu-cognition)
 COPY bundle.json /app/bundle.json
