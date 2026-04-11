@@ -4,10 +4,11 @@ analysis_gate.py — Phase boundary enforcement for ANALYZE phase.
 Evaluates whether the agent's analysis meets minimum quality thresholds
 before allowing advance to EXECUTE. Targets wrong_direction failures.
 
-Three rules:
+Four rules:
 1. Code grounding: root_cause must reference specific code (file/function/line)
 2. Alternative hypothesis: at least 2 hypotheses, non-chosen must be addressed
 3. Causal chain: must connect test failure -> condition -> code -> why it fails
+4. Invariant capture: analysis must identify the structural invariant being violated
 
 Events are system-generated facts, never LLM self-descriptions.
 Every field must be derived from system state, not from LLM output.
@@ -201,6 +202,50 @@ def _check_causal_chain(pr: PhaseRecord) -> float:
         return 0.0
 
 
+# ── Rule 4: Invariant Capture ──────────────────────────────────────────────
+
+# Structural signals indicating invariant identification.
+# NOT surface keywords — these indicate the agent structured its reasoning
+# around specific boundary/delimiter constraints.
+_INVARIANT_SIGNALS = {
+    "delimiter": re.compile(r'delimiter|separator|boundary\s+character', re.I),
+    "forbidden": re.compile(r'(?:must\s+not|cannot|should\s+not|forbidden|disallow)\s+(?:contain|allow|accept|appear)', re.I),
+    "structural_role": re.compile(r'(?:structural|parsing|syntactic)\s+(?:role|meaning|significance|boundary)', re.I),
+    "specific_char": re.compile(r'[`\'"]\s*[:@/\\#]\s*[`\'"]', re.I),
+}
+
+
+def _check_invariant_capture(pr: PhaseRecord) -> float:
+    """
+    Check that analysis identifies the structural invariant being violated.
+
+    Targets constraint_encoding_failure archetype: agent says "regex too permissive"
+    but fails to identify WHICH delimiter/boundary must not appear and WHY.
+
+    Score:
+      0.0 = no invariant mention
+      0.5 = mentions structure vaguely (1-2 signals)
+      1.0 = explicit invariant + delimiter identification (3+ signals)
+    """
+    text = (pr.root_cause or "") + " " + (pr.content or "")
+    if not text.strip():
+        return 0.0
+
+    matched = sum(1 for p in _INVARIANT_SIGNALS.values() if p.search(text))
+
+    # Also check causal_chain for invariant reasoning
+    if pr.causal_chain:
+        matched += sum(1 for p in _INVARIANT_SIGNALS.values() if p.search(pr.causal_chain))
+        matched = min(matched, len(_INVARIANT_SIGNALS))  # cap at max
+
+    if matched >= 3:
+        return 1.0
+    elif matched >= 1:
+        return 0.5
+    else:
+        return 0.0
+
+
 # ── ANALYZE contract (SDG p217) ──────────────────────────────────────────────
 
 _ANALYZE_CONTRACT = ContractView(
@@ -227,6 +272,11 @@ _ANALYZE_CONTRACT = ContractView(
             required=False,
             semantic_check="multiple_distinct_hypotheses",
         ),
+        "invariant_capture": FieldSpec(
+            description="Structural invariant: what delimiter/boundary must NOT appear and why",
+            required=False,
+            semantic_check="invariant_identified",
+        ),
     },
 )
 
@@ -243,6 +293,10 @@ _RULE_TO_FIELD: dict[str, tuple[str, str]] = {
     "causal_chain": (
         "causal_chain",
         "Explain step-by-step: test failure -> condition -> code -> why it fails",
+    ),
+    "invariant_capture": (
+        "root_cause",
+        "Identify the structural invariant: what delimiter/boundary must NOT be allowed in this position, and why?",
     ),
 }
 
@@ -311,6 +365,17 @@ def evaluate_analysis(pr: PhaseRecord, *, structured_output: bool = False) -> An
         reasons.append(
             "Analysis lacks a causal chain (test failure -> condition -> code -> why). "
             "Explain step-by-step how the test failure connects to the root cause."
+        )
+
+    # Rule 4: Invariant capture (semantic check — same as other rules)
+    score4 = _check_invariant_capture(pr)
+    scores["invariant_capture"] = score4
+    if score4 < _THRESHOLD:
+        failed.append("invariant_capture")
+        reasons.append(
+            "Analysis identifies the general area but not the structural invariant. "
+            "What delimiter or boundary character must NOT appear in this position? "
+            "Why does allowing it break the parser's structural assumptions?"
         )
 
     extracted = {
