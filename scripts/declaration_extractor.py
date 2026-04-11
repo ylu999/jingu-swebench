@@ -98,6 +98,93 @@ def extract_last_agent_message(messages: list[dict]) -> str:
     return ""
 
 
+# ── Structured output extraction (p221) ────────────────────────────────────────
+
+
+def extract_from_structured(parsed: dict) -> Declaration:
+    """Extract Declaration from a structured (schema-enforced) JSON response.
+
+    When STRUCTURED_OUTPUT_ENABLED=true, the LLM response is guaranteed to
+    conform to a phase schema (see phase_schemas.py). This function maps
+    the parsed JSON directly to a Declaration — no regex needed.
+
+    Args:
+        parsed: Parsed JSON dict from structured LLM output.
+
+    Returns:
+        Declaration dict with 'type' and 'principals' keys.
+        Returns {} if parsed is empty or missing required fields.
+    """
+    if not parsed:
+        return {}
+    fix_type = parsed.get("fix_type", "")
+    if not fix_type:
+        return {}
+    principals = [p.strip().lower() for p in (parsed.get("principals") or []) if p.strip()]
+    return {"type": fix_type.strip().lower(), "principals": principals}
+
+
+def extract_phase_record_from_structured(
+    parsed: dict,
+    phase: str,
+    from_steps: list[int] | None = None,
+):
+    """Build a PhaseRecord from structured (schema-enforced) JSON output.
+
+    When STRUCTURED_OUTPUT_ENABLED=true, this replaces regex-based extraction.
+    All fields come directly from the parsed JSON — no surface text parsing.
+
+    Args:
+        parsed: Parsed JSON dict from structured LLM output.
+        phase: Phase name (e.g. 'ANALYZE', 'EXECUTE', 'JUDGE').
+        from_steps: Step indices this record derives from (for gate provenance).
+
+    Returns:
+        PhaseRecord with fields populated from parsed JSON.
+    """
+    from phase_record import PhaseRecord
+
+    phase_upper = _PHASE_NORM.get(phase.upper(), phase.upper())
+    subtype = _PHASE_SUBTYPE_MAP.get(phase_upper, "unknown")
+    principals = [p.strip().lower() for p in (parsed.get("principals") or []) if p.strip()]
+
+    # Extract evidence_refs from structured evidence array
+    evidence_refs: list[str] = []
+    for ev in (parsed.get("evidence") or []):
+        if isinstance(ev, dict):
+            f = ev.get("file", "")
+            line = ev.get("line")
+            if f:
+                ref = f"{f}:{line}" if line else f
+                evidence_refs.append(ref)
+
+    # Build content from available fields for backward compatibility
+    content_parts = []
+    if parsed.get("root_cause"):
+        content_parts.append(f"ROOT_CAUSE: {parsed['root_cause']}")
+    if parsed.get("plan"):
+        content_parts.append(f"PLAN: {parsed['plan']}")
+    if parsed.get("causal_chain"):
+        content_parts.append(f"CAUSAL_CHAIN: {parsed['causal_chain']}")
+    if parsed.get("alternative_hypotheses"):
+        for i, h in enumerate(parsed["alternative_hypotheses"], 1):
+            content_parts.append(f"Hypothesis {i}: {h}")
+    content = "\n".join(content_parts)[:500]
+
+    return PhaseRecord(
+        phase=phase_upper,
+        subtype=subtype,
+        principals=principals,
+        claims=[],
+        evidence_refs=evidence_refs,
+        from_steps=from_steps if from_steps is not None else [],
+        content=content,
+        root_cause=parsed.get("root_cause", ""),
+        causal_chain=parsed.get("causal_chain", ""),
+        plan=parsed.get("plan", ""),
+    )
+
+
 if __name__ == "__main__":
     # Smoke test
     sample = """

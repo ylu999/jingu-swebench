@@ -50,7 +50,10 @@ from swebench_failure_reroute_pack import SWEBENCH_FAILURE_REROUTE_PACK
 from phase_record_pack import PHASE_RECORD_PACK
 from strategy_logger import log_strategy_entry, make_entry as make_strategy_entry
 # B4: cognition gate (declaration-vs-patch consistency check)
-from declaration_extractor import extract_declaration, extract_last_agent_message
+from declaration_extractor import (
+    extract_declaration, extract_last_agent_message,
+    extract_from_structured, extract_phase_record_from_structured,
+)
 from patch_signals import extract_patch_signals
 from cognition_check import check_cognition, format_cognition_feedback
 from preflight import run_preflight
@@ -99,6 +102,49 @@ def early_stop_scope(reason: str) -> str:
     return "unknown"
 
 
+# ── Structured output helper (p221) ──────────────────────────────────────────
+
+def _try_parse_structured_output(agent_messages: list[dict]) -> dict | None:
+    """Attempt to extract structured JSON from the last assistant tool_call.
+
+    When STRUCTURED_OUTPUT_ENABLED=true, the LLM is forced to call a
+    'structured_output' tool. The tool call arguments contain the schema-valid
+    JSON output. This function extracts that JSON.
+
+    Returns:
+        Parsed dict if a structured_output tool call was found, else None.
+    """
+    if not STRUCTURED_OUTPUT_ENABLED:
+        return None
+    for msg in reversed(agent_messages):
+        if msg.get("role") != "assistant":
+            continue
+        tool_calls = msg.get("tool_calls", [])
+        for tc in tool_calls:
+            fn = tc.get("function", {})
+            if fn.get("name") == "structured_output":
+                try:
+                    return json.loads(fn.get("arguments", "{}"))
+                except (json.JSONDecodeError, TypeError):
+                    return None
+        # Also check content blocks (some litellm versions use this format)
+        content = msg.get("content", [])
+        if isinstance(content, list):
+            for block in content:
+                if isinstance(block, dict) and block.get("type") == "tool_use":
+                    if block.get("name") == "structured_output":
+                        inp = block.get("input")
+                        if isinstance(inp, dict):
+                            return inp
+                        if isinstance(inp, str):
+                            try:
+                                return json.loads(inp)
+                            except (json.JSONDecodeError, TypeError):
+                                return None
+        break  # Only check the last assistant message
+    return None
+
+
 # P-INV-001: run environment invariant checks before any batch work
 run_preflight()
 
@@ -106,6 +152,8 @@ run_preflight()
 GATE_MODE = "trust_gate"
 REVIEWER_ENABLED = False  # B2 reviewer — set True to re-enable
 RETRY_CONTROLLER_ENABLED = True  # B3 retry-controller — diagnoses attempt 1, guides attempt 2
+# p221: structured output — when True, LLM output is schema-enforced JSON (no regex extraction needed)
+STRUCTURED_OUTPUT_ENABLED = os.environ.get("STRUCTURED_OUTPUT_ENABLED", "false").lower() == "true"
 # p178: strategy learning — set paths to enable log + table
 STRATEGY_LOG_PATH = os.environ.get("STRATEGY_LOG_PATH")   # e.g. /root/results/strategy_log.jsonl
 STRATEGY_TABLE_PATH = os.environ.get("STRATEGY_TABLE_PATH")  # e.g. /root/results/strategy_table.json
@@ -159,6 +207,7 @@ def print_activation_proof(identity: dict) -> None:
     print(f"[init] declaration_protocol=enabled")
     print(f"[init] strategy_log_path={STRATEGY_LOG_PATH or 'disabled'}")
     print(f"[init] strategy_table_path={STRATEGY_TABLE_PATH or 'disabled'}")
+    print(f"[init] structured_output_enabled={STRUCTURED_OUTPUT_ENABLED}")
     # p186: verdict-driven attempt control — activation proof (RT4)
     from control.reasoning_state import NO_PROGRESS_THRESHOLD as _NPT
     print(f"[init] verdict_routing_enabled=True")
@@ -772,11 +821,34 @@ def _step_cp_update_and_verdict(
                 _pr_source = "cache"
             else:
                 # No cached record — extract with target_phase enforced.
-                _pr, _declared_phase, _foreign = _extract_for_phase(
-                    latest_assistant_text, str(_old_phase)
-                )
-                state.phase_records.append(_pr)
-                _pr_source = "extracted"
+                # p221: try structured output first, fall back to regex extraction.
+                _structured_parsed = _try_parse_structured_output(agent_self.messages)
+                if _structured_parsed is not None:
+                    _pr = extract_phase_record_from_structured(
+                        _structured_parsed, str(_old_phase)
+                    )
+                    state.phase_records.append(_pr)
+                    _pr_source = "structured"
+                    _declared_phase = (_structured_parsed.get("phase") or "").upper()
+                    _foreign = bool(_declared_phase and _declared_phase != _eval_phase)
+                    print(
+                        f"    [phase_record] extraction_method=structured"
+                        f" structured_output_used=true",
+                        flush=True,
+                    )
+                else:
+                    _pr, _declared_phase, _foreign = _extract_for_phase(
+                        latest_assistant_text, str(_old_phase)
+                    )
+                    state.phase_records.append(_pr)
+                    _pr_source = "extracted"
+                    if STRUCTURED_OUTPUT_ENABLED:
+                        print(
+                            f"    [phase_record] extraction_method=regex"
+                            f" structured_output_used=false"
+                            f" (structured_output_enabled but no tool_call found)",
+                            flush=True,
+                        )
                 if _foreign:
                     _pr_foreign_phase = _declared_phase
                     # Soft signal: agent declared a foreign phase in this message.
@@ -3327,8 +3399,13 @@ def run_agent(
             _cg_decl = {}
             try:
                 _cg_msgs = getattr(self_agent, "messages", [])
-                _cg_last = extract_last_agent_message(_cg_msgs)
-                _cg_decl = extract_declaration(_cg_last) if _cg_last else {}
+                # p221: try structured output first
+                _cg_structured = _try_parse_structured_output(_cg_msgs)
+                if _cg_structured is not None:
+                    _cg_decl = extract_from_structured(_cg_structured)
+                else:
+                    _cg_last = extract_last_agent_message(_cg_msgs)
+                    _cg_decl = extract_declaration(_cg_last) if _cg_last else {}
             except Exception:
                 pass
             _cg_signals = extract_patch_signals(submitted) if submitted else []
@@ -4059,8 +4136,14 @@ def run_with_jingu(instance_id: str, output_dir: Path, max_attempts: int = 3,
                     if _traj_path.exists():
                         try:
                             _traj_msgs_for_signal = json.loads(_traj_path.read_text()).get("messages", [])
-                            _last_msg = extract_last_agent_message(_traj_msgs_for_signal)
-                            _decl = extract_declaration(_last_msg)
+                            # p221: try structured output first for declaration extraction
+                            _structured_decl = _try_parse_structured_output(_traj_msgs_for_signal)
+                            if _structured_decl is not None:
+                                _decl = extract_from_structured(_structured_decl)
+                                print(f"    [cognition] extraction_method=structured", flush=True)
+                            else:
+                                _last_msg = extract_last_agent_message(_traj_msgs_for_signal)
+                                _decl = extract_declaration(_last_msg)
                             if _decl:
                                 _signals = extract_patch_signals(patch)
                                 _cog = check_cognition(_decl, _signals)
