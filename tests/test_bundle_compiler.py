@@ -12,6 +12,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
 from bundle_compiler import (
     CompilationError,
     CompilationWarning,
+    CompiledRoute,
+    CompiledRetryRouter,
     CompiledValidator,
     ParseResult,
     ResolvedBundle,
@@ -21,6 +23,8 @@ from bundle_compiler import (
     _check_consistency,
     _compile_prompts,
     _compile_validators,
+    _compile_retry_router,
+    get_route,
     DEFAULT_BUNDLE_PATH,
 )
 
@@ -1488,3 +1492,238 @@ class TestCompileValidatorsS6:
             assert isinstance(v.fake_check_eligible, frozenset)
             assert isinstance(v.required_principals, tuple)
             assert isinstance(v.forbidden_principals, tuple)
+
+
+# ---------------------------------------------------------------------------
+# S7 — _compile_retry_router + get_route tests
+# ---------------------------------------------------------------------------
+
+def _make_resolved_for_router() -> ResolvedBundle:
+    """Build a ResolvedBundle with routing data for S7 testing."""
+    contracts = {
+        "observation.fact_gathering": {
+            "phase": "OBSERVE",
+            "subtype": "observation.fact_gathering",
+            "policy": {
+                "required_principals": ["ontology_alignment", "evidence_completeness"],
+            },
+            "principals": [],
+            "repair_templates": {
+                "ontology_alignment": "[ontology_alignment] Ensure your response is grounded.",
+                "evidence_completeness": "[evidence_completeness] Add more evidence_refs.",
+            },
+            "routing": {
+                "principal_routes": {
+                    "ontology_alignment": {
+                        "next_phase": "OBSERVE",
+                        "strategy": "fix_ontology",
+                    },
+                    "evidence_completeness": {
+                        "next_phase": "OBSERVE",
+                        "strategy": "gather_more_evidence",
+                    },
+                },
+                "default_route": {
+                    "next_phase": "OBSERVE",
+                    "strategy": "retry",
+                    "repair_template": "[default] Please revise your response.",
+                },
+            },
+        },
+        "analysis.root_cause": {
+            "phase": "ANALYZE",
+            "subtype": "analysis.root_cause",
+            "policy": {
+                "required_principals": ["causal_grounding"],
+            },
+            "principals": [],
+            "repair_templates": {
+                "causal_grounding": "[causal_grounding] Provide causal chain.",
+            },
+            "routing": {
+                "principal_routes": {
+                    "causal_grounding": {
+                        "next_phase": "ANALYZE",
+                        "strategy": "deepen_analysis",
+                    },
+                },
+                # No default_route for ANALYZE
+            },
+        },
+    }
+    return ResolvedBundle(
+        raw={},
+        phase_to_subtype={
+            "OBSERVE": "observation.fact_gathering",
+            "ANALYZE": "analysis.root_cause",
+        },
+        subtype_to_contract=contracts,
+        schema_registry={},
+        principal_registry={},
+        phases_with_contracts=frozenset({"OBSERVE", "ANALYZE"}),
+        phases_without_contracts=frozenset({"UNDERSTAND"}),
+    )
+
+
+class TestCompileRetryRouterS7:
+    """Tests for S7 — _compile_retry_router and get_route."""
+
+    def test_basic_compilation_returns_compiled_retry_router(self):
+        resolved = _make_resolved_for_router()
+        router = _compile_retry_router(resolved)
+        assert isinstance(router, CompiledRetryRouter)
+
+    def test_routes_dict_populated(self):
+        resolved = _make_resolved_for_router()
+        router = _compile_retry_router(resolved)
+        assert isinstance(router.routes, dict)
+        # OBSERVE has 2 principal routes
+        assert ("OBSERVE", "ontology_alignment") in router.routes
+        assert ("OBSERVE", "evidence_completeness") in router.routes
+        # ANALYZE has 1 principal route
+        assert ("ANALYZE", "causal_grounding") in router.routes
+
+    def test_compiled_route_fields(self):
+        resolved = _make_resolved_for_router()
+        router = _compile_retry_router(resolved)
+        route = router.routes[("OBSERVE", "ontology_alignment")]
+        assert isinstance(route, CompiledRoute)
+        assert route.failure_principal == "ontology_alignment"
+        assert route.next_phase == "OBSERVE"
+        assert route.strategy == "fix_ontology"
+
+    def test_repair_template_pre_resolved(self):
+        """repair_template is resolved at compile time from repair_templates dict."""
+        resolved = _make_resolved_for_router()
+        router = _compile_retry_router(resolved)
+        route = router.routes[("OBSERVE", "ontology_alignment")]
+        assert route.repair_template == "[ontology_alignment] Ensure your response is grounded."
+        route2 = router.routes[("OBSERVE", "evidence_completeness")]
+        assert route2.repair_template == "[evidence_completeness] Add more evidence_refs."
+
+    def test_repair_template_empty_when_not_in_templates(self):
+        """Principal with no repair_template entry gets empty string."""
+        contracts = {
+            "analysis.root_cause": {
+                "phase": "ANALYZE",
+                "subtype": "analysis.root_cause",
+                "policy": {"required_principals": ["causal_grounding"]},
+                "principals": [],
+                "repair_templates": {},  # empty — no template for causal_grounding
+                "routing": {
+                    "principal_routes": {
+                        "causal_grounding": {"next_phase": "ANALYZE", "strategy": "retry"},
+                    },
+                },
+            },
+        }
+        resolved = ResolvedBundle(
+            raw={},
+            phase_to_subtype={"ANALYZE": "analysis.root_cause"},
+            subtype_to_contract=contracts,
+            schema_registry={},
+            principal_registry={},
+            phases_with_contracts=frozenset({"ANALYZE"}),
+            phases_without_contracts=frozenset(),
+        )
+        router = _compile_retry_router(resolved)
+        route = router.routes[("ANALYZE", "causal_grounding")]
+        assert route.repair_template == ""
+
+    def test_default_routes_populated(self):
+        """default_route in routing compiles into default_routes dict keyed by phase."""
+        resolved = _make_resolved_for_router()
+        router = _compile_retry_router(resolved)
+        assert "OBSERVE" in router.default_routes
+        default = router.default_routes["OBSERVE"]
+        assert isinstance(default, CompiledRoute)
+        assert default.failure_principal == "__default__"
+        assert default.next_phase == "OBSERVE"
+        assert default.strategy == "retry"
+        assert default.repair_template == "[default] Please revise your response."
+
+    def test_no_default_route_when_absent(self):
+        """Phase without default_route does not appear in default_routes."""
+        resolved = _make_resolved_for_router()
+        router = _compile_retry_router(resolved)
+        assert "ANALYZE" not in router.default_routes
+
+    def test_router_is_frozen_dataclass(self):
+        """CompiledRetryRouter must be a frozen dataclass."""
+        resolved = _make_resolved_for_router()
+        router = _compile_retry_router(resolved)
+        from dataclasses import FrozenInstanceError
+        with pytest.raises(FrozenInstanceError):
+            router.routes = {}  # type: ignore[misc]
+
+    def test_empty_contracts_returns_empty_router(self):
+        resolved = ResolvedBundle(
+            raw={},
+            phase_to_subtype={},
+            subtype_to_contract={},
+            schema_registry={},
+            principal_registry={},
+            phases_with_contracts=frozenset(),
+            phases_without_contracts=frozenset(),
+        )
+        router = _compile_retry_router(resolved)
+        assert router.routes == {}
+        assert router.default_routes == {}
+
+    # --- get_route tests ---
+
+    def test_get_route_specific_match(self):
+        resolved = _make_resolved_for_router()
+        router = _compile_retry_router(resolved)
+        route = get_route(router, "OBSERVE", "ontology_alignment")
+        assert route is not None
+        assert route.failure_principal == "ontology_alignment"
+        assert route.strategy == "fix_ontology"
+
+    def test_get_route_falls_back_to_default(self):
+        """Unknown principal for a phase with a default_route returns the default."""
+        resolved = _make_resolved_for_router()
+        router = _compile_retry_router(resolved)
+        route = get_route(router, "OBSERVE", "unknown_principal")
+        assert route is not None
+        assert route.failure_principal == "__default__"
+        assert route.strategy == "retry"
+
+    def test_get_route_returns_none_when_no_default(self):
+        """Unknown principal for a phase with no default_route returns None."""
+        resolved = _make_resolved_for_router()
+        router = _compile_retry_router(resolved)
+        route = get_route(router, "ANALYZE", "unknown_principal")
+        assert route is None
+
+    def test_get_route_unknown_phase_returns_none(self):
+        resolved = _make_resolved_for_router()
+        router = _compile_retry_router(resolved)
+        route = get_route(router, "NONEXISTENT_PHASE", "causal_grounding")
+        assert route is None
+
+    def test_get_route_specific_takes_priority_over_default(self):
+        """Specific principal route is returned even when a default exists."""
+        resolved = _make_resolved_for_router()
+        router = _compile_retry_router(resolved)
+        # evidence_completeness has a specific route AND OBSERVE has a default
+        route = get_route(router, "OBSERVE", "evidence_completeness")
+        assert route is not None
+        assert route.failure_principal == "evidence_completeness"
+        assert route.strategy == "gather_more_evidence"
+
+    def test_real_bundle_router(self):
+        """Real bundle.json: _compile_retry_router returns non-empty routes."""
+        bundle_path = os.path.join(os.path.dirname(__file__), "..", "bundle.json")
+        if not os.path.exists(bundle_path):
+            pytest.skip("bundle.json not found")
+        parsed = _parse_bundle(bundle_path)
+        resolved = _resolve_refs(parsed)
+        router = _compile_retry_router(resolved)
+        assert isinstance(router, CompiledRetryRouter)
+        assert len(router.routes) > 0
+        # All routes are CompiledRoute
+        for key, route in router.routes.items():
+            assert isinstance(key, tuple) and len(key) == 2
+            assert isinstance(route, CompiledRoute)
+            assert route.next_phase != ""
