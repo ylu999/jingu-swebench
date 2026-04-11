@@ -65,7 +65,8 @@ class SubtypeContract(TypedDict, total=False):
 # Principals WITHOUT inference rules (required_enforced, stage 2 — expected only):
 #   ontology_alignment, phase_boundary_discipline, evidence_completeness,
 #   action_grounding, option_comparison, constraint_satisfaction,
-#   scope_minimality, result_verification, uncertainty_honesty, residual_risk_detection
+#   scope_minimality, result_verification, uncertainty_honesty, residual_risk_detection,
+#   invariant_capture, design_comparison, constraint_encoding_justification
 #
 # This table is the enforcement boundary. Update it when inference rules are added.
 # ─────────────────────────────────────────────────────────────────────────────
@@ -106,6 +107,7 @@ SUBTYPE_CONTRACTS: dict[str, SubtypeContract] = {
             "phase_boundary_discipline",  # stage=required_enforced, no inference rule
             "alternative_hypothesis_check",
             "uncertainty_honesty",
+            "invariant_capture",          # stage=required_enforced, no inference rule — constraint encoding
         ],
         "forbidden_principals": ["action_grounding", "minimal_change"],
         # P16 fix: evidence_refs removed from required_fields.
@@ -143,6 +145,8 @@ SUBTYPE_CONTRACTS: dict[str, SubtypeContract] = {
             "phase_boundary_discipline",  # stage=required_enforced, no inference rule
             "invariant_preservation",     # inference rule exists but applies_to=judge.verification only
             "scope_minimality",           # stage=required_enforced, no inference rule
+            "design_comparison",          # stage=required_enforced, no inference rule — constraint encoding
+            "constraint_encoding_justification",  # stage=required_enforced, no inference rule — constraint encoding
         ],
         "forbidden_principals": ["minimal_change"],
         "required_fields": [],
