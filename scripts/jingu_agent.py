@@ -309,8 +309,14 @@ class JinguAgent:
         """Called before each attempt. Returns initial hint string (may be empty)."""
         return ""
 
-    def on_container_ready(self, container_id: str) -> None:  # noqa: ARG002
-        """Called once the SWE-bench container is running."""
+    def on_container_ready(self, container_id: str) -> None:
+        """Called once when container_id is first observed in on_step_start().
+
+        Sets self._state.container_id so in-loop controlled_verify can begin.
+        Equivalent to: _verifying_run's container_id injection at _orig_run() start.
+        """
+        assert self._state is not None
+        self._state.container_id = container_id
 
     def on_attempt_end(self, agent_self: Any, submission: str | None) -> None:
         """Called after each attempt completes. Must be overridden."""
