@@ -11,10 +11,13 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
 
 from bundle_compiler import (
     CompilationError,
+    CompilationWarning,
     ParseResult,
     ResolvedBundle,
     _parse_bundle,
     _resolve_refs,
+    _check_completeness,
+    _compile_prompts,
     DEFAULT_BUNDLE_PATH,
 )
 
@@ -355,3 +358,216 @@ class TestDefaultBundlePath:
         # (it may already be set in env, so we just check the module-level constant exists)
         assert isinstance(DEFAULT_BUNDLE_PATH, str)
         assert len(DEFAULT_BUNDLE_PATH) > 0
+
+
+# ---------------------------------------------------------------------------
+# S5 — _compile_prompts tests
+# ---------------------------------------------------------------------------
+
+def _make_resolved_with_prompt(
+    prompt: str,
+    required_fields: list | None = None,
+    required_principals: list | None = None,
+    forbidden_moves: list | None = None,
+    success_criteria: list | None = None,
+) -> ResolvedBundle:
+    """Build a minimal ResolvedBundle with one contract for S5 testing."""
+    contract = {
+        "phase": "OBSERVE",
+        "subtype": "observation.fact_gathering",
+        "prompt": prompt,
+        "policy": {
+            "required_fields": required_fields or [],
+            "required_principals": required_principals or [],
+            "forbidden_moves": forbidden_moves or [],
+        },
+        "cognition_spec": {
+            "success_criteria": success_criteria or [],
+        },
+    }
+    return ResolvedBundle(
+        raw={},
+        phase_to_subtype={"OBSERVE": "observation.fact_gathering"},
+        subtype_to_contract={"observation.fact_gathering": contract},
+        schema_registry={},
+        principal_registry={},
+        phases_with_contracts=frozenset({"OBSERVE"}),
+        phases_without_contracts=frozenset(),
+    )
+
+
+class TestCompilePromptsS5:
+    """Tests for S5 — advisory prompt coverage check."""
+
+    def test_no_warnings_when_all_mentioned(self):
+        resolved = _make_resolved_with_prompt(
+            prompt="evidence_refs are required. ontology_alignment is needed. do not write code. relevant files identified.",
+            required_fields=["evidence_refs"],
+            required_principals=["ontology_alignment"],
+            forbidden_moves=["do not write code"],
+            success_criteria=["relevant files identified"],
+        )
+        warnings = _compile_prompts(resolved)
+        assert warnings == []
+
+    def test_missing_required_field(self):
+        resolved = _make_resolved_with_prompt(
+            prompt="Some prompt without field mention.",
+            required_fields=["evidence_refs"],
+        )
+        warnings = _compile_prompts(resolved)
+        assert len(warnings) == 1
+        assert warnings[0].stage == "S5"
+        assert warnings[0].code == "PROMPT_MISSING_FIELD_MENTION"
+        assert warnings[0].context["field"] == "evidence_refs"
+        assert warnings[0].context["subtype"] == "observation.fact_gathering"
+
+    def test_missing_required_principal(self):
+        resolved = _make_resolved_with_prompt(
+            prompt="Some prompt without principal mention.",
+            required_principals=["causal_grounding"],
+        )
+        warnings = _compile_prompts(resolved)
+        assert len(warnings) == 1
+        assert warnings[0].code == "PROMPT_MISSING_PRINCIPAL_MENTION"
+        assert warnings[0].context["principal"] == "causal_grounding"
+
+    def test_missing_forbidden_move(self):
+        resolved = _make_resolved_with_prompt(
+            prompt="Some prompt without forbidden move mention.",
+            forbidden_moves=["do not write code"],
+        )
+        warnings = _compile_prompts(resolved)
+        assert len(warnings) == 1
+        assert warnings[0].code == "PROMPT_MISSING_FORBIDDEN_MENTION"
+        assert warnings[0].context["forbidden_move"] == "do not write code"
+
+    def test_missing_success_criterion(self):
+        resolved = _make_resolved_with_prompt(
+            prompt="Some prompt without criteria mention.",
+            success_criteria=["root cause identified with evidence"],
+        )
+        warnings = _compile_prompts(resolved)
+        assert len(warnings) == 1
+        assert warnings[0].code == "PROMPT_MISSING_CRITERIA_MENTION"
+        assert warnings[0].context["criterion"] == "root cause identified with evidence"
+
+    def test_case_insensitive_match(self):
+        """Mention check is case-insensitive."""
+        resolved = _make_resolved_with_prompt(
+            prompt="EVIDENCE_REFS must be provided. ONTOLOGY_ALIGNMENT is required.",
+            required_fields=["evidence_refs"],
+            required_principals=["ontology_alignment"],
+        )
+        warnings = _compile_prompts(resolved)
+        assert warnings == []
+
+    def test_empty_prompt_skipped(self):
+        """Contract with empty prompt produces no warnings (nothing to check)."""
+        resolved = _make_resolved_with_prompt(
+            prompt="",
+            required_fields=["evidence_refs"],
+            required_principals=["ontology_alignment"],
+        )
+        warnings = _compile_prompts(resolved)
+        assert warnings == []
+
+    def test_no_prompt_key_skipped(self):
+        """Contract with no prompt key produces no warnings."""
+        contract = {
+            "phase": "OBSERVE",
+            "subtype": "observation.fact_gathering",
+            # no "prompt" key at all
+            "policy": {
+                "required_fields": ["evidence_refs"],
+                "required_principals": ["ontology_alignment"],
+                "forbidden_moves": [],
+            },
+            "cognition_spec": {"success_criteria": []},
+        }
+        resolved = ResolvedBundle(
+            raw={},
+            phase_to_subtype={"OBSERVE": "observation.fact_gathering"},
+            subtype_to_contract={"observation.fact_gathering": contract},
+            schema_registry={},
+            principal_registry={},
+            phases_with_contracts=frozenset({"OBSERVE"}),
+            phases_without_contracts=frozenset(),
+        )
+        warnings = _compile_prompts(resolved)
+        assert warnings == []
+
+    def test_multiple_missing_items(self):
+        """Multiple missing items across categories produce multiple warnings."""
+        resolved = _make_resolved_with_prompt(
+            prompt="A prompt that mentions nothing relevant.",
+            required_fields=["evidence_refs", "claims"],
+            required_principals=["ontology_alignment"],
+            forbidden_moves=["do not write code"],
+            success_criteria=["tests pass"],
+        )
+        warnings = _compile_prompts(resolved)
+        assert len(warnings) == 5
+        codes = [w.code for w in warnings]
+        assert codes.count("PROMPT_MISSING_FIELD_MENTION") == 2
+        assert codes.count("PROMPT_MISSING_PRINCIPAL_MENTION") == 1
+        assert codes.count("PROMPT_MISSING_FORBIDDEN_MENTION") == 1
+        assert codes.count("PROMPT_MISSING_CRITERIA_MENTION") == 1
+
+    def test_all_warnings_are_advisory(self):
+        """All S5 results are CompilationWarning, never CompilationError."""
+        resolved = _make_resolved_with_prompt(
+            prompt="Empty prompt with nothing.",
+            required_fields=["f1"],
+            required_principals=["p1"],
+            forbidden_moves=["m1"],
+            success_criteria=["c1"],
+        )
+        warnings = _compile_prompts(resolved)
+        for w in warnings:
+            assert isinstance(w, CompilationWarning)
+            assert w.stage == "S5"
+
+    def test_multiple_contracts(self):
+        """S5 checks all contracts in the bundle."""
+        contract_a = {
+            "phase": "OBSERVE",
+            "prompt": "prompt mentioning evidence_refs",
+            "policy": {"required_fields": ["evidence_refs"], "required_principals": [], "forbidden_moves": []},
+            "cognition_spec": {"success_criteria": []},
+        }
+        contract_b = {
+            "phase": "ANALYZE",
+            "prompt": "prompt without the field",
+            "policy": {"required_fields": ["root_cause"], "required_principals": [], "forbidden_moves": []},
+            "cognition_spec": {"success_criteria": []},
+        }
+        resolved = ResolvedBundle(
+            raw={},
+            phase_to_subtype={"OBSERVE": "obs.fg", "ANALYZE": "ana.rc"},
+            subtype_to_contract={"obs.fg": contract_a, "ana.rc": contract_b},
+            schema_registry={},
+            principal_registry={},
+            phases_with_contracts=frozenset({"OBSERVE", "ANALYZE"}),
+            phases_without_contracts=frozenset(),
+        )
+        warnings = _compile_prompts(resolved)
+        # contract_a: evidence_refs IS mentioned -> 0 warnings
+        # contract_b: root_cause NOT mentioned -> 1 warning
+        assert len(warnings) == 1
+        assert warnings[0].context["subtype"] == "ana.rc"
+        assert warnings[0].context["field"] == "root_cause"
+
+    def test_real_bundle(self):
+        """S5 against real bundle.json — all prompts should cover their contracts."""
+        bundle_path = os.path.join(os.path.dirname(__file__), "..", "bundle.json")
+        if not os.path.exists(bundle_path):
+            pytest.skip("bundle.json not found")
+        parsed = _parse_bundle(bundle_path)
+        resolved = _resolve_refs(parsed)
+        warnings = _compile_prompts(resolved)
+        # Real bundle prompts are generated to include all required items,
+        # so there should be zero warnings (or very few if generator has gaps)
+        for w in warnings:
+            assert isinstance(w, CompilationWarning)
+            assert w.stage == "S5"

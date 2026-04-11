@@ -30,6 +30,12 @@ from typing import Any
 #   BC-CV001 inference_without_rule   — principal marked inference_eligible but no rule
 #   BC-CV002 fake_without_inference   — principal marked fake_check_eligible but not inference_eligible
 #
+# Stage: COMPILE_PROMPTS
+#   BC-CP001 prompt_missing_field_mention     — prompt does not mention a required field
+#   BC-CP002 prompt_missing_principal_mention — prompt does not mention a required principal
+#   BC-CP003 prompt_missing_forbidden_mention — prompt does not mention a forbidden move
+#   BC-CP004 prompt_missing_criteria_mention  — prompt does not mention a success criterion
+#
 # Stage: COMPILE_ROUTES
 #   BC-CR001 missing_next_phase       — route references non-existent phase
 #   BC-CR002 duplicate_route          — same (phase, principal) route defined twice
@@ -322,3 +328,195 @@ def _resolve_refs(parsed: ParseResult) -> ResolvedBundle:
         phases_with_contracts=phases_with,
         phases_without_contracts=phases_without,
     )
+
+
+# ---------------------------------------------------------------------------
+# S3 — COMPLETENESS CHECK
+# ---------------------------------------------------------------------------
+
+def _check_completeness(
+    resolved: ResolvedBundle,
+    allowed_no_contract_phases: frozenset[str] = frozenset({"UNDERSTAND"}),
+) -> list[CompilationError]:
+    """S3: Verify every phase has a contract (or is explicitly allowed) and each contract is complete.
+
+    NEVER raises — always returns a (possibly empty) list of errors.
+    """
+    errors: list[CompilationError] = []
+
+    # --- Phase coverage check ---
+    for phase in sorted(resolved.phases_without_contracts):
+        if phase not in allowed_no_contract_phases:
+            errors.append(CompilationError(
+                "S3",
+                "PHASE_NO_CONTRACT_NOT_ALLOWLISTED",
+                f"Phase '{phase}' has no contract and is not in the allowed list",
+                {"phase": phase},
+            ))
+
+    # --- Per-contract checks ---
+    for phase, subtype in sorted(resolved.phase_to_subtype.items()):
+        contract = resolved.subtype_to_contract.get(subtype, {})
+        ctx = {"phase": phase, "subtype": subtype}
+
+        # prompt
+        if not contract.get("prompt", ""):
+            errors.append(CompilationError(
+                "S3", "MISSING_PROMPT",
+                f"Contract '{subtype}' has no prompt",
+                ctx,
+            ))
+
+        # schema
+        schema = contract.get("schema")
+        if not isinstance(schema, dict) or not schema:
+            errors.append(CompilationError(
+                "S3", "MISSING_SCHEMA",
+                f"Contract '{subtype}' has no schema",
+                ctx,
+            ))
+        else:
+            # schema shape check
+            for required_key in ("type", "properties", "required"):
+                if required_key not in schema:
+                    errors.append(CompilationError(
+                        "S3", "INVALID_SCHEMA_SHAPE",
+                        f"Contract '{subtype}' schema missing key '{required_key}'",
+                        {**ctx, "missing_key": required_key},
+                    ))
+
+        # policy.required_principals
+        policy = contract.get("policy", {})
+        if "required_principals" not in policy:
+            errors.append(CompilationError(
+                "S3", "MISSING_POLICY_KEY",
+                f"Contract '{subtype}' policy missing 'required_principals'",
+                ctx,
+            ))
+
+        # principals array
+        principals = contract.get("principals")
+        if not isinstance(principals, list):
+            errors.append(CompilationError(
+                "S3", "MISSING_PRINCIPALS_ARRAY",
+                f"Contract '{subtype}' has no principals array",
+                ctx,
+            ))
+
+        # cognition_spec.task_shape
+        cognition_spec = contract.get("cognition_spec", {})
+        if "task_shape" not in cognition_spec:
+            errors.append(CompilationError(
+                "S3", "MISSING_COGNITION_SPEC",
+                f"Contract '{subtype}' cognition_spec missing 'task_shape'",
+                ctx,
+            ))
+
+        # repair_templates
+        repair_templates = contract.get("repair_templates")
+        if not isinstance(repair_templates, dict):
+            errors.append(CompilationError(
+                "S3", "MISSING_REPAIR_TEMPLATES",
+                f"Contract '{subtype}' has no repair_templates",
+                ctx,
+            ))
+
+        # routing.principal_routes
+        routing = contract.get("routing", {})
+        principal_routes = routing.get("principal_routes")
+        if not isinstance(principal_routes, dict):
+            errors.append(CompilationError(
+                "S3", "MISSING_ROUTING",
+                f"Contract '{subtype}' routing missing 'principal_routes'",
+                ctx,
+            ))
+
+        # phase_spec.allowed_next_phases
+        phase_spec = contract.get("phase_spec", {})
+        allowed_next = phase_spec.get("allowed_next_phases", [])
+        if not allowed_next:
+            errors.append(CompilationError(
+                "S3", "MISSING_ALLOWED_NEXT_PHASES",
+                f"Contract '{subtype}' phase_spec missing or empty 'allowed_next_phases'",
+                ctx,
+            ))
+
+    return errors
+
+
+# ---------------------------------------------------------------------------
+# S5 — COMPILE_PROMPTS (advisory)
+# ---------------------------------------------------------------------------
+
+def _compile_prompts(resolved: ResolvedBundle) -> list[CompilationWarning]:
+    """S5: Advisory prompt coverage check.
+
+    Uses string.lower() mention check — intentionally surface-level.
+    All results are CompilationWarning (never CompilationError).
+    String mention != semantic correctness. See design doc Stage 5 + Q4.
+    """
+    warnings: list[CompilationWarning] = []
+
+    for subtype_key, contract in resolved.subtype_to_contract.items():
+        prompt_lower = contract.get("prompt", "").lower()
+
+        # Skip contracts with no prompt — nothing to check
+        if not prompt_lower:
+            continue
+
+        policy = contract.get("policy", {})
+        cognition_spec = contract.get("cognition_spec", {})
+
+        # Check required_fields mentioned in prompt
+        for field in policy.get("required_fields", []):
+            if field.lower() not in prompt_lower:
+                warnings.append(CompilationWarning(
+                    stage="S5",
+                    code="PROMPT_MISSING_FIELD_MENTION",
+                    message=(
+                        f"Contract '{subtype_key}' prompt does not mention "
+                        f"required field '{field}'"
+                    ),
+                    context={"subtype": subtype_key, "field": field},
+                ))
+
+        # Check required_principals mentioned in prompt
+        for principal in policy.get("required_principals", []):
+            if principal.lower() not in prompt_lower:
+                warnings.append(CompilationWarning(
+                    stage="S5",
+                    code="PROMPT_MISSING_PRINCIPAL_MENTION",
+                    message=(
+                        f"Contract '{subtype_key}' prompt does not mention "
+                        f"required principal '{principal}'"
+                    ),
+                    context={"subtype": subtype_key, "principal": principal},
+                ))
+
+        # Check forbidden_moves mentioned in prompt
+        for move in policy.get("forbidden_moves", []):
+            if move.lower() not in prompt_lower:
+                warnings.append(CompilationWarning(
+                    stage="S5",
+                    code="PROMPT_MISSING_FORBIDDEN_MENTION",
+                    message=(
+                        f"Contract '{subtype_key}' prompt does not mention "
+                        f"forbidden move '{move}'"
+                    ),
+                    context={"subtype": subtype_key, "forbidden_move": move},
+                ))
+
+        # Check success_criteria mentioned in prompt
+        for criterion in cognition_spec.get("success_criteria", []):
+            if criterion.lower() not in prompt_lower:
+                warnings.append(CompilationWarning(
+                    stage="S5",
+                    code="PROMPT_MISSING_CRITERIA_MENTION",
+                    message=(
+                        f"Contract '{subtype_key}' prompt does not mention "
+                        f"success criterion '{criterion}'"
+                    ),
+                    context={"subtype": subtype_key, "criterion": criterion},
+                ))
+
+    return warnings
