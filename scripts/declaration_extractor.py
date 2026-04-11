@@ -319,6 +319,19 @@ def extract_phase_record(agent_message: str, phase: str, from_steps: list[int] |
     evidence_refs = _extract_evidence_refs(agent_message)
 
     structured = extract_structured_fields(agent_message or "")
+
+    # p223: assemble content from structured fields so analysis_gate checkers
+    # can find signals beyond the raw [:500] prefix (which is mostly boilerplate).
+    content = (agent_message or "")[:500]
+    if structured:
+        parts: list[str] = []
+        for fld in ("root_cause", "causal_chain", "alternatives", "uncertainty", "plan"):
+            val = structured.get(fld, "")
+            if val:
+                parts.append(f"{fld.upper()}: {val}")
+        if parts:
+            content = "\n".join(parts)
+
     return PhaseRecord(
         phase=phase_upper or phase,
         subtype=subtype,
@@ -326,7 +339,7 @@ def extract_phase_record(agent_message: str, phase: str, from_steps: list[int] |
         claims=[],
         evidence_refs=evidence_refs,
         from_steps=from_steps if from_steps is not None else [],
-        content=(agent_message or "")[:500],
+        content=content,
         root_cause=structured.get("root_cause", ""),
         causal_chain=structured.get("causal_chain", ""),
         plan=structured.get("plan", ""),
@@ -392,6 +405,23 @@ def extract_record_for_phase(
         content = (agent_message or "")[:500]
 
     structured = extract_structured_fields(agent_message or "") if not foreign_phase_declared else {}
+
+    # p223: build content from structured fields so analysis_gate checkers
+    # (_check_alternative_hypothesis, _check_invariant_capture) can find
+    # signals.  The raw [:500] prefix is mostly PHASE/PRINCIPALS boilerplate;
+    # the substantive reasoning (ALTERNATIVES, CAUSAL_CHAIN, UNCERTAINTY) is
+    # often beyond char 500.  Assemble content from extracted fields first,
+    # fall back to raw prefix when no fields were found.
+    if not foreign_phase_declared and structured:
+        parts: list[str] = []
+        for fld in ("root_cause", "causal_chain", "alternatives", "uncertainty", "plan"):
+            val = structured.get(fld, "")
+            if val:
+                parts.append(f"{fld.upper()}: {val}")
+        content = "\n".join(parts) if parts else content
+    # If no structured fields extracted, keep the raw [:500] fallback (content
+    # already set above).
+
     record = PhaseRecord(
         phase=target_upper or target_phase,
         subtype=subtype,
