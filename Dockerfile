@@ -70,9 +70,25 @@ COPY scripts/run_with_jingu_gate.py \
      scripts/failure_classifier.py \
      scripts/repair_prompts.py \
      scripts/analysis_gate.py \
+     scripts/gate_rejection.py \
+     scripts/failure_routing.py \
+     scripts/extract_failure_events.py \
+     scripts/compute_routing_stats.py \
+     scripts/suggest_routing.py \
+     scripts/strategy_prompts.py \
+     scripts/jingu_loader.py \
+     scripts/policy_onboarding.py \
+     scripts/check_onboarding.py \
+     scripts/cognition_loader.py \
+     scripts/phase_validator.py \
+     scripts/phase_schemas.py \
+     scripts/cognition_prompts.py \
      /app/scripts/
 # B1-CP: reasoning control plane Python module
 COPY scripts/control/ /app/scripts/control/
+
+# Bundle JSON (compiled contract from jingu-cognition)
+COPY bundle.json /app/bundle.json
 
 # Bake provenance into image (RT6: artifacts carry their own identity)
 ARG GIT_COMMIT=unknown
