@@ -540,6 +540,48 @@ class JinguAgent:
         if previous_failure:
             extra_parts.append(f"Previous attempt failed: {previous_failure[:300]}")
 
+        # p229: prompt assembly snapshot — persist assembled prompt for offline analysis.
+        try:
+            def _classify_part(idx: int, part: str) -> str:
+                if "FORBIDDEN" in part:
+                    return "forbidden_actions"
+                if "REASONING PROTOCOL" in part:
+                    return "reasoning_protocol"
+                if "IMPORTANT: Your fix must" in part or "FAIL_TO_PASS" in part:
+                    return "fail_to_pass"
+                if "Previous attempt failed" in part:
+                    return "retry_hint"
+                return f"section_{idx}"
+
+            _snap_sections = []
+            _snap_total_chars = 0
+            for _i, _part in enumerate(extra_parts):
+                _snap_sections.append({
+                    "name": _classify_part(_i, _part),
+                    "char_count": len(_part),
+                    "content": _part,
+                })
+                _snap_total_chars += len(_part)
+
+            _snap_instance_id = self._instance.get("instance_id", "unknown")
+            prompt_snapshot = {
+                "attempt": attempt,
+                "instance_id": _snap_instance_id,
+                "mode": self._mode,
+                "sections": _snap_sections,
+                "has_retry_hint": bool(previous_failure),
+                "fail_to_pass_count": len(self._instance.get("FAIL_TO_PASS", [])),
+                "total_chars": _snap_total_chars,
+            }
+
+            _snap_dir = self._output_dir / _snap_instance_id / f"attempt_{attempt}"
+            _snap_dir.mkdir(parents=True, exist_ok=True)
+            _snap_path = _snap_dir / "prompt_snapshot.json"
+            with open(_snap_path, "w") as _snap_f:
+                json.dump(prompt_snapshot, _snap_f, indent=2)
+        except Exception as _snap_exc:
+            logging.getLogger(__name__).warning("[p229] prompt snapshot failed: %s", _snap_exc)
+
         return extra_parts
 
     def on_container_ready(self, container_id: str) -> None:
