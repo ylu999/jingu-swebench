@@ -155,20 +155,36 @@ class CompiledRetryRouter:
 
 @dataclass(frozen=True)
 class ActivationReport:
-    """Report emitted by the ACTIVATE stage — summary of compilation."""
+    """Report emitted by the ACTIVATE stage (S8) — activation proof for RT4."""
 
+    # Activation status
+    activation_ok: bool
+
+    # Bundle metadata
     bundle_version: str
     compiler_version: str
-    compiled_at: str
-    phases_covered: frozenset[str]
-    phases_missing: frozenset[str]
+    generated_at: str
+    generator_commit: str
+
+    # Phase coverage
+    phases_compiled: list[str]
+    phases_missing: list[str]
+    phases_allowed_missing: list[str]
+
+    # Counts
+    contracts_compiled: int
     principals_total: int
-    principals_fake_eligible: int
-    validators_compiled: int
-    routes_compiled: int
-    warnings: list[CompilationWarning]
-    errors: list[CompilationError]
-    is_valid: bool
+    principals_inference_eligible: int
+    principals_fake_check_eligible: int
+
+    # Per-stage diagnostics
+    completeness_errors: list[str]
+    consistency_errors: list[str]
+    prompt_warnings: list[str]
+
+    # Completeness flags
+    transition_matrix_complete: bool
+    routing_coverage_complete: bool
 
 
 @dataclass(frozen=True)
@@ -791,3 +807,137 @@ def get_route(
     Returns None if neither a specific nor a default route is found.
     """
     return router.routes.get((phase, principal)) or router.default_routes.get(phase)
+
+
+# ---------------------------------------------------------------------------
+# S8 — ACTIVATION REPORT
+# ---------------------------------------------------------------------------
+
+_ALLOWED_MISSING_PHASES: frozenset[str] = frozenset({"UNDERSTAND"})
+
+
+def _build_activation_report(
+    resolved: ResolvedBundle,
+    validators: dict[str, "CompiledValidator"],
+    fatal_errors: list[CompilationError],
+    warnings: list[CompilationWarning],
+) -> ActivationReport:
+    """S8: Build the activation proof report summarising the full compilation."""
+
+    # Principal counts (summed across all contracts)
+    principals_total = sum(
+        len(contract.get("principals", []))
+        for contract in resolved.subtype_to_contract.values()
+    )
+    principals_inference = sum(
+        len(v.inference_eligible) for v in validators.values()
+    )
+    principals_fake = sum(
+        len(v.fake_check_eligible) for v in validators.values()
+    )
+
+    return ActivationReport(
+        activation_ok=len(fatal_errors) == 0,
+        bundle_version=resolved.raw.get("version", ""),
+        compiler_version=resolved.raw.get("compiler_version", ""),
+        generated_at=resolved.raw.get("generated_at", ""),
+        generator_commit=resolved.raw.get("generator_commit", ""),
+
+        phases_compiled=sorted(resolved.phases_with_contracts),
+        phases_missing=sorted(resolved.phases_without_contracts - _ALLOWED_MISSING_PHASES),
+        phases_allowed_missing=sorted(resolved.phases_without_contracts & _ALLOWED_MISSING_PHASES),
+
+        contracts_compiled=len(resolved.subtype_to_contract),
+        principals_total=principals_total,
+        principals_inference_eligible=principals_inference,
+        principals_fake_check_eligible=principals_fake,
+
+        completeness_errors=[str(e) for e in fatal_errors if e.stage == "S3"],
+        consistency_errors=[str(e) for e in fatal_errors if e.stage == "S4"],
+        prompt_warnings=[str(w) for w in warnings if w.stage == "S5"],
+
+        transition_matrix_complete=not any(
+            w.code == "TRANSITION_MATRIX_INCOMPLETE" for w in warnings
+        ),
+        routing_coverage_complete=not any(
+            e.code == "ROUTING_COVERAGE_MISSING" for e in fatal_errors
+        ),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Module-level cache
+# ---------------------------------------------------------------------------
+
+_cached_bundle: "CompiledBundle | None" = None
+
+
+# ---------------------------------------------------------------------------
+# compile_bundle — single public entry point (P4a)
+# ---------------------------------------------------------------------------
+
+def _compile_bundle_uncached(path: "str | None") -> "CompiledBundle":
+    """Run all 8 stages and return a CompiledBundle. Raises CompilationError on fatal errors."""
+    bundle_path = path or os.environ.get("JINGU_BUNDLE_PATH", DEFAULT_BUNDLE_PATH)
+
+    # S1: Parse
+    parsed = _parse_bundle(bundle_path)
+
+    # S2: Resolve references
+    resolved = _resolve_refs(parsed)
+
+    # S3: Completeness (returns errors list — never raises)
+    completeness_errors = _check_completeness(resolved)
+
+    # S4: Consistency (returns errors + warnings — never raises)
+    consistency_errors, s4_warnings = _check_consistency(resolved)
+
+    fatal_errors = completeness_errors + consistency_errors
+
+    # S5: Compile prompts (warnings only)
+    prompt_warnings = _compile_prompts(resolved)
+
+    all_warnings = s4_warnings + prompt_warnings
+
+    # Fail fast: any fatal error aborts compilation
+    if fatal_errors:
+        raise CompilationError(
+            stage="COMPILE",
+            code="FATAL_ERRORS",
+            message=f"{len(fatal_errors)} fatal error(s) during compilation",
+            context={"errors": [str(e) for e in fatal_errors]},
+        )
+
+    # S6: Compile validators
+    validators = _compile_validators(resolved)
+
+    # S7: Compile retry router
+    retry_router = _compile_retry_router(resolved)
+
+    # S8: Activation report
+    activation_report = _build_activation_report(resolved, validators, fatal_errors, all_warnings)
+
+    # governance: placeholder until p224-09 implements _build_governance_from_compiled()
+    governance: Any = None
+
+    return CompiledBundle(
+        governance=governance,
+        activation_report=activation_report,
+        validators=validators,
+        retry_router=retry_router,
+    )
+
+
+def compile_bundle(path: "str | None" = None, *, force_reload: bool = False) -> CompiledBundle:
+    """8-stage bundle compiler. Single public entry point (P4a).
+
+    Returns CompiledBundle iff ALL fatal checks pass.
+    Raises CompilationError on ANY fatal failure — there is no middle state.
+
+    Results are cached at module level. Pass force_reload=True to recompile.
+    """
+    global _cached_bundle
+    if _cached_bundle is not None and not force_reload:
+        return _cached_bundle
+    _cached_bundle = _compile_bundle_uncached(path)
+    return _cached_bundle

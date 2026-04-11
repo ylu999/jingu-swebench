@@ -10,13 +10,16 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
 
 from bundle_compiler import (
+    ActivationReport,
     CompilationError,
     CompilationWarning,
+    CompiledBundle,
     CompiledRoute,
     CompiledRetryRouter,
     CompiledValidator,
     ParseResult,
     ResolvedBundle,
+    _build_activation_report,
     _parse_bundle,
     _resolve_refs,
     _check_completeness,
@@ -25,6 +28,7 @@ from bundle_compiler import (
     _compile_validators,
     _compile_retry_router,
     get_route,
+    compile_bundle,
     DEFAULT_BUNDLE_PATH,
 )
 
@@ -1727,3 +1731,351 @@ class TestCompileRetryRouterS7:
             assert isinstance(key, tuple) and len(key) == 2
             assert isinstance(route, CompiledRoute)
             assert route.next_phase != ""
+
+
+# ---------------------------------------------------------------------------
+# S8 — _build_activation_report tests
+# ---------------------------------------------------------------------------
+
+def _make_resolved_and_validators() -> tuple:
+    """Return (resolved, validators) for a minimal valid bundle."""
+    contracts = {
+        "observation.fact_gathering": {
+            "phase": "OBSERVE",
+            "subtype": "observation.fact_gathering",
+            "policy": {
+                "required_fields": ["phase"],
+                "required_principals": ["ontology_alignment"],
+                "forbidden_principals": [],
+                "forbidden_moves": [],
+            },
+            "principals": [
+                {
+                    "name": "ontology_alignment",
+                    "applies_to": ["observation.fact_gathering"],
+                    "inference_rule_exists": False,
+                    "fake_check_eligible": False,
+                    "semantic_checks": [],
+                    "required_evidence_fields": [],
+                },
+            ],
+        },
+        "analysis.root_cause": {
+            "phase": "ANALYZE",
+            "subtype": "analysis.root_cause",
+            "policy": {
+                "required_fields": ["root_cause"],
+                "required_principals": ["causal_grounding"],
+                "forbidden_principals": [],
+                "forbidden_moves": [],
+            },
+            "principals": [
+                {
+                    "name": "causal_grounding",
+                    "applies_to": ["analysis.root_cause"],
+                    "inference_rule_exists": True,
+                    "fake_check_eligible": True,
+                    "semantic_checks": [],
+                    "required_evidence_fields": [],
+                },
+            ],
+        },
+    }
+    resolved = ResolvedBundle(
+        raw={
+            "version": "1.0.0",
+            "compiler_version": "0.2.0",
+            "generated_at": "2026-04-11T00:00:00Z",
+            "generator_commit": "deadbeef",
+        },
+        phase_to_subtype={"OBSERVE": "observation.fact_gathering", "ANALYZE": "analysis.root_cause"},
+        subtype_to_contract=contracts,
+        schema_registry={},
+        principal_registry={
+            "ontology_alignment": contracts["observation.fact_gathering"]["principals"][0],
+            "causal_grounding": contracts["analysis.root_cause"]["principals"][0],
+        },
+        phases_with_contracts=frozenset({"OBSERVE", "ANALYZE"}),
+        phases_without_contracts=frozenset({"UNDERSTAND"}),
+    )
+    validators = _compile_validators(resolved)
+    return resolved, validators
+
+
+class TestBuildActivationReportS8:
+    """Tests for S8 — _build_activation_report."""
+
+    def test_activation_ok_true_when_no_fatal_errors(self):
+        resolved, validators = _make_resolved_and_validators()
+        report = _build_activation_report(resolved, validators, [], [])
+        assert report.activation_ok is True
+
+    def test_activation_ok_false_when_fatal_errors_present(self):
+        resolved, validators = _make_resolved_and_validators()
+        err = CompilationError("S3", "MISSING_PROMPT", "missing prompt", {})
+        report = _build_activation_report(resolved, validators, [err], [])
+        assert report.activation_ok is False
+
+    def test_bundle_metadata_extracted(self):
+        resolved, validators = _make_resolved_and_validators()
+        report = _build_activation_report(resolved, validators, [], [])
+        assert report.bundle_version == "1.0.0"
+        assert report.compiler_version == "0.2.0"
+        assert report.generated_at == "2026-04-11T00:00:00Z"
+        assert report.generator_commit == "deadbeef"
+
+    def test_phases_compiled_sorted(self):
+        resolved, validators = _make_resolved_and_validators()
+        report = _build_activation_report(resolved, validators, [], [])
+        assert report.phases_compiled == sorted(["OBSERVE", "ANALYZE"])
+
+    def test_phases_missing_excludes_allowed(self):
+        """phases_missing should not include UNDERSTAND (it's in allowed_missing)."""
+        resolved, validators = _make_resolved_and_validators()
+        # UNDERSTAND is in phases_without_contracts
+        report = _build_activation_report(resolved, validators, [], [])
+        assert "UNDERSTAND" not in report.phases_missing
+        assert "UNDERSTAND" in report.phases_allowed_missing
+
+    def test_phases_missing_includes_unexpected_missing(self):
+        """A phase without contract that is NOT in allowed list appears in phases_missing."""
+        contracts = {
+            "observation.fact_gathering": {
+                "phase": "OBSERVE",
+                "principals": [],
+                "policy": {"required_fields": [], "required_principals": [], "forbidden_principals": [], "forbidden_moves": []},
+            },
+        }
+        resolved = ResolvedBundle(
+            raw={"version": "1.0.0", "compiler_version": "", "generated_at": "", "generator_commit": ""},
+            phase_to_subtype={"OBSERVE": "observation.fact_gathering"},
+            subtype_to_contract=contracts,
+            schema_registry={},
+            principal_registry={},
+            phases_with_contracts=frozenset({"OBSERVE"}),
+            phases_without_contracts=frozenset({"UNDERSTAND", "NEWPHASE"}),
+        )
+        validators = _compile_validators(resolved)
+        report = _build_activation_report(resolved, validators, [], [])
+        assert "NEWPHASE" in report.phases_missing
+        assert "UNDERSTAND" not in report.phases_missing
+
+    def test_contracts_compiled_count(self):
+        resolved, validators = _make_resolved_and_validators()
+        report = _build_activation_report(resolved, validators, [], [])
+        assert report.contracts_compiled == 2
+
+    def test_principals_total_count(self):
+        """principals_total = sum of principals[] lengths across all contracts."""
+        resolved, validators = _make_resolved_and_validators()
+        report = _build_activation_report(resolved, validators, [], [])
+        # observation.fact_gathering: 1, analysis.root_cause: 1 → total = 2
+        assert report.principals_total == 2
+
+    def test_principals_inference_eligible_count(self):
+        """principals_inference_eligible = sum of inference_eligible frozensets."""
+        resolved, validators = _make_resolved_and_validators()
+        report = _build_activation_report(resolved, validators, [], [])
+        # Only causal_grounding (ANALYZE) has inference_rule_exists=True
+        assert report.principals_inference_eligible == 1
+
+    def test_principals_fake_check_eligible_count(self):
+        """principals_fake_check_eligible = sum of fake_check_eligible frozensets."""
+        resolved, validators = _make_resolved_and_validators()
+        report = _build_activation_report(resolved, validators, [], [])
+        # Only causal_grounding has fake_check_eligible=True
+        assert report.principals_fake_check_eligible == 1
+
+    def test_completeness_errors_from_s3_fatal(self):
+        resolved, validators = _make_resolved_and_validators()
+        s3_err = CompilationError("S3", "MISSING_PROMPT", "no prompt", {})
+        s4_err = CompilationError("S4", "ROUTING_COVERAGE_MISSING", "no route", {})
+        report = _build_activation_report(resolved, validators, [s3_err, s4_err], [])
+        assert len(report.completeness_errors) == 1
+        assert "MISSING_PROMPT" in report.completeness_errors[0]
+        assert len(report.consistency_errors) == 1
+        assert "ROUTING_COVERAGE_MISSING" in report.consistency_errors[0]
+
+    def test_prompt_warnings_from_s5(self):
+        resolved, validators = _make_resolved_and_validators()
+        s5_warn = CompilationWarning("S5", "PROMPT_MISSING_FIELD_MENTION", "no mention", {})
+        s4_warn = CompilationWarning("S4", "TRANSITION_MATRIX_INCOMPLETE", "incomplete", {})
+        report = _build_activation_report(resolved, validators, [], [s4_warn, s5_warn])
+        assert len(report.prompt_warnings) == 1
+        assert "PROMPT_MISSING_FIELD_MENTION" in report.prompt_warnings[0]
+
+    def test_transition_matrix_complete_true_when_no_warning(self):
+        resolved, validators = _make_resolved_and_validators()
+        report = _build_activation_report(resolved, validators, [], [])
+        assert report.transition_matrix_complete is True
+
+    def test_transition_matrix_complete_false_when_warning_present(self):
+        resolved, validators = _make_resolved_and_validators()
+        warn = CompilationWarning("S4", "TRANSITION_MATRIX_INCOMPLETE", "missing transitions", {})
+        report = _build_activation_report(resolved, validators, [], [warn])
+        assert report.transition_matrix_complete is False
+
+    def test_routing_coverage_complete_true_when_no_error(self):
+        resolved, validators = _make_resolved_and_validators()
+        report = _build_activation_report(resolved, validators, [], [])
+        assert report.routing_coverage_complete is True
+
+    def test_routing_coverage_complete_false_when_error_present(self):
+        resolved, validators = _make_resolved_and_validators()
+        err = CompilationError("S4", "ROUTING_COVERAGE_MISSING", "no route for principal", {})
+        report = _build_activation_report(resolved, validators, [err], [])
+        assert report.routing_coverage_complete is False
+
+    def test_report_is_frozen_dataclass(self):
+        from dataclasses import FrozenInstanceError
+        resolved, validators = _make_resolved_and_validators()
+        report = _build_activation_report(resolved, validators, [], [])
+        with pytest.raises(FrozenInstanceError):
+            report.activation_ok = False  # type: ignore[misc]
+
+
+# ---------------------------------------------------------------------------
+# compile_bundle — integration tests
+# ---------------------------------------------------------------------------
+
+import bundle_compiler as _bundle_compiler_module
+
+
+@pytest.fixture(autouse=True)
+def reset_cache():
+    """Reset the module-level cache before each test in this class."""
+    yield
+    _bundle_compiler_module._cached_bundle = None
+
+
+class TestCompileBundle:
+    """Integration tests for compile_bundle() and caching."""
+
+    def test_compile_bundle_returns_compiled_bundle(self):
+        bundle_path = os.path.join(os.path.dirname(__file__), "..", "bundle.json")
+        if not os.path.exists(bundle_path):
+            pytest.skip("bundle.json not found")
+        result = compile_bundle(bundle_path)
+        assert isinstance(result, CompiledBundle)
+
+    def test_activation_report_activation_ok(self):
+        bundle_path = os.path.join(os.path.dirname(__file__), "..", "bundle.json")
+        if not os.path.exists(bundle_path):
+            pytest.skip("bundle.json not found")
+        result = compile_bundle(bundle_path)
+        assert result.activation_report.activation_ok is True
+
+    def test_phases_compiled_from_real_bundle(self):
+        bundle_path = os.path.join(os.path.dirname(__file__), "..", "bundle.json")
+        if not os.path.exists(bundle_path):
+            pytest.skip("bundle.json not found")
+        result = compile_bundle(bundle_path)
+        phases = result.activation_report.phases_compiled
+        # Real bundle has ANALYZE, DECIDE, DESIGN, EXECUTE, JUDGE, OBSERVE (sorted)
+        assert phases == sorted(phases), "phases_compiled must be sorted"
+        for p in ["ANALYZE", "EXECUTE", "JUDGE", "OBSERVE"]:
+            assert p in phases
+
+    def test_phases_allowed_missing_contains_understand(self):
+        bundle_path = os.path.join(os.path.dirname(__file__), "..", "bundle.json")
+        if not os.path.exists(bundle_path):
+            pytest.skip("bundle.json not found")
+        result = compile_bundle(bundle_path)
+        assert "UNDERSTAND" in result.activation_report.phases_allowed_missing
+
+    def test_validators_non_empty(self):
+        bundle_path = os.path.join(os.path.dirname(__file__), "..", "bundle.json")
+        if not os.path.exists(bundle_path):
+            pytest.skip("bundle.json not found")
+        result = compile_bundle(bundle_path)
+        assert len(result.validators) > 0
+        for v in result.validators.values():
+            assert isinstance(v, CompiledValidator)
+
+    def test_retry_router_non_empty(self):
+        bundle_path = os.path.join(os.path.dirname(__file__), "..", "bundle.json")
+        if not os.path.exists(bundle_path):
+            pytest.skip("bundle.json not found")
+        result = compile_bundle(bundle_path)
+        assert isinstance(result.retry_router, CompiledRetryRouter)
+        assert len(result.retry_router.routes) > 0
+
+    def test_governance_is_none_placeholder(self):
+        """governance is None until p224-09 implements _build_governance_from_compiled."""
+        bundle_path = os.path.join(os.path.dirname(__file__), "..", "bundle.json")
+        if not os.path.exists(bundle_path):
+            pytest.skip("bundle.json not found")
+        result = compile_bundle(bundle_path)
+        assert result.governance is None
+
+    def test_caching_returns_same_object(self):
+        """Second call returns the cached object (same identity)."""
+        bundle_path = os.path.join(os.path.dirname(__file__), "..", "bundle.json")
+        if not os.path.exists(bundle_path):
+            pytest.skip("bundle.json not found")
+        first = compile_bundle(bundle_path)
+        second = compile_bundle(bundle_path)
+        assert first is second
+
+    def test_force_reload_returns_new_object(self):
+        """force_reload=True bypasses cache and returns a fresh object."""
+        bundle_path = os.path.join(os.path.dirname(__file__), "..", "bundle.json")
+        if not os.path.exists(bundle_path):
+            pytest.skip("bundle.json not found")
+        first = compile_bundle(bundle_path)
+        second = compile_bundle(bundle_path, force_reload=True)
+        # They should be equal in value but different objects
+        assert second is not first
+        assert second.activation_report.activation_ok == first.activation_report.activation_ok
+
+    def test_bad_path_raises_file_not_found(self):
+        with pytest.raises(FileNotFoundError):
+            compile_bundle("/nonexistent/path/bundle.json")
+
+    def test_fatal_s3_error_raises_compilation_error(self):
+        """Bundle with a fatal S3 error raises CompilationError with code=FATAL_ERRORS."""
+        # Use a bundle that passes S1/S2 but fails S3 (missing prompt)
+        data = {
+            "version": "1.0.0",
+            "phases": ["OBSERVE"],
+            "contracts": {
+                "observation.fact_gathering": {
+                    "phase": "OBSERVE",
+                    "subtype": "observation.fact_gathering",
+                    # No "prompt" key → MISSING_PROMPT in S3
+                    "schema": {
+                        "type": "object",
+                        "properties": {"phase": {"type": "string"}},
+                        "required": ["phase"],
+                    },
+                    "policy": {"required_principals": ["ontology_alignment"]},
+                    "principals": [
+                        {
+                            "name": "ontology_alignment",
+                            "applies_to": ["observation.fact_gathering"],
+                            "inference_rule_exists": False,
+                            "fake_check_eligible": False,
+                        }
+                    ],
+                    "cognition_spec": {"task_shape": "fact_gathering"},
+                    "repair_templates": {"ontology_alignment": "fix it"},
+                    "routing": {
+                        "principal_routes": {
+                            "ontology_alignment": {"next_phase": "OBSERVE", "strategy": "fix"},
+                        }
+                    },
+                    "phase_spec": {"allowed_next_phases": ["OBSERVE"]},
+                }
+            },
+            "cognition": {},
+        }
+        fd, path = tempfile.mkstemp(suffix=".json")
+        with os.fdopen(fd, "w") as f:
+            json.dump(data, f)
+        try:
+            with pytest.raises(CompilationError) as exc_info:
+                compile_bundle(path)
+            assert exc_info.value.code == "FATAL_ERRORS"
+            assert exc_info.value.stage == "COMPILE"
+        finally:
+            os.unlink(path)
