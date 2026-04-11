@@ -21,9 +21,10 @@ _PRINCIPALS_RE = re.compile(r"PRINCIPALS:\s*([^\n]+)", re.IGNORECASE)
 _PHASE_RE = re.compile(r"PHASE:\s*([a-z_]+)", re.IGNORECASE)
 
 # Structured field regexes for causal binding (p23)
-# Matches "FIELD_NAME:\n<content>" until the next ALL_CAPS_FIELD: or end of string
+# Matches "FIELD_NAME: <content>" (same line or next line) until the next ALL_CAPS_FIELD: or end
+# Agent may write "ROOT_CAUSE: The issue is..." (same line) or "ROOT_CAUSE:\n  The issue..." (next line)
 _STRUCTURED_FIELD_RE = re.compile(
-    r"^([A-Z_]{3,}):\s*\n(.*?)(?=\n[A-Z_]{3,}:|\Z)",
+    r"^([A-Z_]{3,}):\s*(.*?)(?=\n[A-Z_]{3,}:|\Z)",
     re.MULTILINE | re.DOTALL,
 )
 

@@ -284,6 +284,8 @@ class StepMonitorState:
         # p190: per-phase records — one PhaseRecord appended on each VerdictAdvance.
         # Written into jingu_body["phase_records"] at attempt end.
         self.phase_records: list = []              # list[PhaseRecord]
+        # p211: analysis gate reject counter — escape hatch after N rejects
+        self.analysis_gate_rejects: int = 0
         # P16: RETRYABLE loop breaker — counts consecutive identical (phase, reason) RETRYABLE.
         # Same phase + same reason N times in a row → ESCALATE_CONTRACT_BUG (VerdictStop).
         # This is a safety fuse, not a contract substitute. Prevents infinite gate loops.
@@ -811,17 +813,22 @@ def _step_cp_update_and_verdict(
 
         # p211: Analysis gate — enforce quality before EXECUTE advance
         _analysis_gate_rejected = False
+        _AG_MAX_REJECTS = 2  # escape hatch: after N rejects, let agent proceed
         if _eval_phase == "ANALYZE" and _pr is not None:
             try:
                 from analysis_gate import evaluate_analysis as _eval_analysis
                 _analysis_verdict = _eval_analysis(_pr)
+                _ag_reject_count = state.analysis_gate_rejects
                 print(
                     f"    [analysis_gate] passed={_analysis_verdict.passed}"
                     f" failed_rules={_analysis_verdict.failed_rules}"
-                    f" scores={_analysis_verdict.scores}",
+                    f" scores={_analysis_verdict.scores}"
+                    f" rejects_so_far={_ag_reject_count}",
                     flush=True,
                 )
-                if not _analysis_verdict.passed:
+                if not _analysis_verdict.passed and _ag_reject_count >= _AG_MAX_REJECTS:
+                    print(f"    [analysis_gate] FORCE_PASS — max_rejects={_AG_MAX_REJECTS} reached, allowing advance", flush=True)
+                elif not _analysis_verdict.passed:
                     _analysis_gate_rejected = True
                     # Reset phase back to ANALYZE — do not advance to EXECUTE
                     import dataclasses as _dc_ag
@@ -850,7 +857,8 @@ def _step_cp_update_and_verdict(
                         r for r in state.phase_records
                         if r.phase.upper() != _eval_phase
                     ]
-                    print(f"    [analysis_gate] REJECT — redirecting to ANALYZE", flush=True)
+                    state.analysis_gate_rejects += 1
+                    print(f"    [analysis_gate] REJECT ({state.analysis_gate_rejects}/{_AG_MAX_REJECTS}) — redirecting to ANALYZE", flush=True)
             except Exception as _ag_exc:
                 print(f"    [analysis_gate] error (non-fatal): {_ag_exc}", flush=True)
 
