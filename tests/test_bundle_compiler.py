@@ -17,6 +17,7 @@ from bundle_compiler import (
     _parse_bundle,
     _resolve_refs,
     _check_completeness,
+    _check_consistency,
     _compile_prompts,
     DEFAULT_BUNDLE_PATH,
 )
@@ -900,3 +901,336 @@ class TestCompilePromptsS5:
         for w in warnings:
             assert isinstance(w, CompilationWarning)
             assert w.stage == "S5"
+
+
+# ---------------------------------------------------------------------------
+# S4 — _check_consistency tests
+# ---------------------------------------------------------------------------
+
+def _consistency_bundle() -> dict:
+    """Return a bundle that passes all S4 consistency checks."""
+    return {
+        "version": "1.0.0",
+        "compiler_version": "0.1.0",
+        "generated_at": "2026-04-11T00:00:00Z",
+        "generator_commit": "abc1234",
+        "capabilities": ["prompt_only"],
+        "phases": ["OBSERVE", "ANALYZE", "UNDERSTAND"],
+        "contracts": {
+            "observation.fact_gathering": {
+                "phase": "OBSERVE",
+                "subtype": "observation.fact_gathering",
+                "prompt": "## Phase: OBSERVE\nGather evidence. ontology_alignment evidence_completeness",
+                "schema": {
+                    "type": "object",
+                    "properties": {"phase": {"type": "string"}},
+                    "required": ["phase"],
+                },
+                "policy": {
+                    "required_principals": ["ontology_alignment", "evidence_completeness"],
+                    "forbidden_principals": ["minimal_change"],
+                },
+                "principals": [
+                    {
+                        "name": "ontology_alignment",
+                        "applies_to": ["observation.fact_gathering"],
+                        "requires_fields": ["phase"],
+                        "inference_rule_exists": False,
+                        "fake_check_eligible": False,
+                    },
+                    {
+                        "name": "evidence_completeness",
+                        "applies_to": ["observation.fact_gathering"],
+                        "requires_fields": ["evidence_refs"],
+                        "inference_rule_exists": False,
+                        "fake_check_eligible": False,
+                    },
+                ],
+                "cognition_spec": {
+                    "type": "observation.fact_gathering",
+                    "phase": "OBSERVE",
+                    "task_shape": "fact_gathering",
+                    "schema_ref": "observation.fact_gathering",
+                },
+                "repair_templates": {
+                    "ontology_alignment": "[ontology_alignment] fix it",
+                    "evidence_completeness": "[evidence_completeness] fix it",
+                },
+                "routing": {
+                    "principal_routes": {
+                        "ontology_alignment": {"next_phase": "OBSERVE", "strategy": "fix"},
+                        "evidence_completeness": {"next_phase": "OBSERVE", "strategy": "fix"},
+                    },
+                },
+                "phase_spec": {
+                    "name": "OBSERVE",
+                    "allowed_next_phases": ["ANALYZE", "OBSERVE"],
+                },
+            },
+        },
+        "cognition": {
+            "phases": [{"name": "OBSERVE"}, {"name": "ANALYZE"}, {"name": "UNDERSTAND"}],
+            "subtypes": [
+                {
+                    "name": "observation.fact_gathering",
+                    "phase": "OBSERVE",
+                    "required_principals": ["ontology_alignment", "evidence_completeness"],
+                    "forbidden_principals": ["minimal_change"],
+                },
+            ],
+            "transitions": [
+                {"from": "OBSERVE", "to": "ANALYZE", "allowed": True},
+                {"from": "OBSERVE", "to": "OBSERVE", "allowed": True},
+            ],
+        },
+    }
+
+
+def _resolve_for_consistency(data: dict) -> ResolvedBundle:
+    """Parse + resolve a bundle dict for S4 testing."""
+    fd, path = tempfile.mkstemp(suffix=".json")
+    with os.fdopen(fd, "w") as f:
+        json.dump(data, f)
+    try:
+        parsed = _parse_bundle(path)
+        return _resolve_refs(parsed)
+    finally:
+        os.unlink(path)
+
+
+class TestCheckConsistencyS4:
+    """Tests for _check_consistency (S4)."""
+
+    def test_consistent_bundle_no_errors(self):
+        resolved = _resolve_for_consistency(_consistency_bundle())
+        errors, warnings = _check_consistency(resolved)
+        assert errors == []
+        assert warnings == []
+
+    def test_never_raises(self):
+        """Even a broken bundle returns lists, not exceptions."""
+        resolved = _resolve_for_consistency(_consistency_bundle())
+        # Corrupt cognition subtypes phase
+        resolved.raw["cognition"]["subtypes"][0]["phase"] = "WRONG"
+        errors, warnings = _check_consistency(resolved)
+        assert isinstance(errors, list)
+        assert isinstance(warnings, list)
+
+    # --- 4.1 Subtype/phase alignment ---
+
+    def test_subtype_phase_mismatch(self):
+        data = _consistency_bundle()
+        data["cognition"]["subtypes"][0]["phase"] = "ANALYZE"
+        resolved = _resolve_for_consistency(data)
+        errors, _ = _check_consistency(resolved)
+        mismatch = [e for e in errors if e.code == "SUBTYPE_PHASE_MISMATCH"]
+        assert len(mismatch) == 1
+        assert mismatch[0].context["subtype"] == "observation.fact_gathering"
+        assert mismatch[0].context["cognition_phase"] == "ANALYZE"
+        assert mismatch[0].context["contract_phase"] == "OBSERVE"
+
+    def test_subtype_phase_alignment_ok(self):
+        data = _consistency_bundle()
+        resolved = _resolve_for_consistency(data)
+        errors, _ = _check_consistency(resolved)
+        assert not any(e.code == "SUBTYPE_PHASE_MISMATCH" for e in errors)
+
+    def test_subtype_not_in_contracts_skipped(self):
+        """Cognition subtype with no matching contract is silently skipped."""
+        data = _consistency_bundle()
+        data["cognition"]["subtypes"].append({
+            "name": "nonexistent.subtype",
+            "phase": "OBSERVE",
+        })
+        resolved = _resolve_for_consistency(data)
+        errors, _ = _check_consistency(resolved)
+        assert not any(
+            e.code == "SUBTYPE_PHASE_MISMATCH" and e.context.get("subtype") == "nonexistent.subtype"
+            for e in errors
+        )
+
+    # --- 4.2 Principal scope cross-check ---
+
+    def test_principal_not_in_array(self):
+        data = _consistency_bundle()
+        # First add ghost_principal to principals[] so S2 passes, then remove after resolve
+        data["contracts"]["observation.fact_gathering"]["principals"].append({
+            "name": "ghost_principal",
+            "applies_to": ["observation.fact_gathering"],
+            "inference_rule_exists": False,
+            "fake_check_eligible": False,
+        })
+        data["contracts"]["observation.fact_gathering"]["policy"]["required_principals"].append(
+            "ghost_principal"
+        )
+        resolved = _resolve_for_consistency(data)
+        # Now remove ghost_principal from the contract's principals array (post-resolve)
+        # to simulate a principal in policy but not in the local array
+        contract = resolved.subtype_to_contract["observation.fact_gathering"]
+        contract["principals"] = [
+            p for p in contract["principals"] if p.get("name") != "ghost_principal"
+        ]
+        errors, _ = _check_consistency(resolved)
+        not_in_array = [e for e in errors if e.code == "PRINCIPAL_NOT_IN_ARRAY"]
+        assert len(not_in_array) == 1
+        assert not_in_array[0].context["principal"] == "ghost_principal"
+
+    def test_principal_scope_mismatch(self):
+        data = _consistency_bundle()
+        # Change ontology_alignment's applies_to to NOT include observation.fact_gathering
+        for p in data["contracts"]["observation.fact_gathering"]["principals"]:
+            if p["name"] == "ontology_alignment":
+                p["applies_to"] = ["analysis.root_cause"]
+        resolved = _resolve_for_consistency(data)
+        errors, _ = _check_consistency(resolved)
+        scope_errors = [e for e in errors if e.code == "PRINCIPAL_SCOPE_MISMATCH"]
+        assert len(scope_errors) == 1
+        assert scope_errors[0].context["principal"] == "ontology_alignment"
+        assert scope_errors[0].context["subtype"] == "observation.fact_gathering"
+
+    def test_principal_scope_ok(self):
+        data = _consistency_bundle()
+        resolved = _resolve_for_consistency(data)
+        errors, _ = _check_consistency(resolved)
+        assert not any(e.code == "PRINCIPAL_SCOPE_MISMATCH" for e in errors)
+        assert not any(e.code == "PRINCIPAL_NOT_IN_ARRAY" for e in errors)
+
+    # --- 4.3 Forbidden/required disjoint ---
+
+    def test_forbidden_required_overlap(self):
+        data = _consistency_bundle()
+        # Put ontology_alignment in both required AND forbidden
+        data["contracts"]["observation.fact_gathering"]["policy"]["forbidden_principals"] = [
+            "ontology_alignment"
+        ]
+        resolved = _resolve_for_consistency(data)
+        errors, _ = _check_consistency(resolved)
+        overlap_errors = [e for e in errors if e.code == "FORBIDDEN_REQUIRED_OVERLAP"]
+        assert len(overlap_errors) == 1
+        assert "ontology_alignment" in overlap_errors[0].context["overlap"]
+
+    def test_no_overlap_when_disjoint(self):
+        data = _consistency_bundle()
+        resolved = _resolve_for_consistency(data)
+        errors, _ = _check_consistency(resolved)
+        assert not any(e.code == "FORBIDDEN_REQUIRED_OVERLAP" for e in errors)
+
+    # --- 4.4 Principal lifecycle ---
+
+    def test_lifecycle_violation(self):
+        data = _consistency_bundle()
+        # Set fake_check_eligible=true but inference_rule_exists=false
+        for p in data["contracts"]["observation.fact_gathering"]["principals"]:
+            if p["name"] == "ontology_alignment":
+                p["fake_check_eligible"] = True
+                p["inference_rule_exists"] = False
+        resolved = _resolve_for_consistency(data)
+        errors, _ = _check_consistency(resolved)
+        lc_errors = [e for e in errors if e.code == "LIFECYCLE_VIOLATION"]
+        assert len(lc_errors) == 1
+        assert lc_errors[0].context["principal"] == "ontology_alignment"
+
+    def test_lifecycle_ok_when_both_true(self):
+        data = _consistency_bundle()
+        for p in data["contracts"]["observation.fact_gathering"]["principals"]:
+            if p["name"] == "ontology_alignment":
+                p["fake_check_eligible"] = True
+                p["inference_rule_exists"] = True
+        resolved = _resolve_for_consistency(data)
+        errors, _ = _check_consistency(resolved)
+        assert not any(e.code == "LIFECYCLE_VIOLATION" for e in errors)
+
+    def test_lifecycle_ok_when_both_false(self):
+        data = _consistency_bundle()
+        resolved = _resolve_for_consistency(data)
+        errors, _ = _check_consistency(resolved)
+        assert not any(e.code == "LIFECYCLE_VIOLATION" for e in errors)
+
+    # --- 4.5 Routing coverage ---
+
+    def test_routing_coverage_missing(self):
+        data = _consistency_bundle()
+        # Remove evidence_completeness from routing
+        del data["contracts"]["observation.fact_gathering"]["routing"]["principal_routes"]["evidence_completeness"]
+        resolved = _resolve_for_consistency(data)
+        errors, _ = _check_consistency(resolved)
+        route_errors = [e for e in errors if e.code == "ROUTING_COVERAGE_MISSING"]
+        assert len(route_errors) == 1
+        assert route_errors[0].context["principal"] == "evidence_completeness"
+
+    def test_routing_coverage_ok(self):
+        data = _consistency_bundle()
+        resolved = _resolve_for_consistency(data)
+        errors, _ = _check_consistency(resolved)
+        assert not any(e.code == "ROUTING_COVERAGE_MISSING" for e in errors)
+
+    # --- 4.6 Transition matrix completeness ---
+
+    def test_transition_matrix_incomplete(self):
+        data = _consistency_bundle()
+        # Remove OBSERVE->ANALYZE from transitions
+        data["cognition"]["transitions"] = [
+            {"from": "OBSERVE", "to": "OBSERVE", "allowed": True},
+        ]
+        resolved = _resolve_for_consistency(data)
+        _, warnings = _check_consistency(resolved)
+        tw = [w for w in warnings if w.code == "TRANSITION_MATRIX_INCOMPLETE"]
+        assert len(tw) == 1
+        assert "OBSERVE->ANALYZE" in tw[0].context["missing"]
+
+    def test_transition_matrix_complete(self):
+        data = _consistency_bundle()
+        resolved = _resolve_for_consistency(data)
+        _, warnings = _check_consistency(resolved)
+        assert not any(w.code == "TRANSITION_MATRIX_INCOMPLETE" for w in warnings)
+
+    def test_transition_matrix_empty_cognition(self):
+        """No transitions in cognition means all contract transitions are missing."""
+        data = _consistency_bundle()
+        data["cognition"]["transitions"] = []
+        resolved = _resolve_for_consistency(data)
+        _, warnings = _check_consistency(resolved)
+        tw = [w for w in warnings if w.code == "TRANSITION_MATRIX_INCOMPLETE"]
+        assert len(tw) == 1
+        # Should flag both OBSERVE->ANALYZE and OBSERVE->OBSERVE
+        assert len(tw[0].context["missing"]) == 2
+
+    # --- All errors have stage S4 ---
+
+    def test_all_errors_stage_s4(self):
+        data = _consistency_bundle()
+        # Trigger multiple error types
+        data["cognition"]["subtypes"][0]["phase"] = "WRONG"
+        data["contracts"]["observation.fact_gathering"]["policy"]["forbidden_principals"] = [
+            "ontology_alignment"
+        ]
+        resolved = _resolve_for_consistency(data)
+        errors, warnings = _check_consistency(resolved)
+        assert all(e.stage == "S4" for e in errors)
+        assert all(w.stage == "S4" for w in warnings)
+
+    # --- Return type is always tuple[list, list] ---
+
+    def test_return_type(self):
+        resolved = _resolve_for_consistency(_consistency_bundle())
+        result = _check_consistency(resolved)
+        assert isinstance(result, tuple)
+        assert len(result) == 2
+        assert isinstance(result[0], list)
+        assert isinstance(result[1], list)
+
+    # --- Real bundle integration ---
+
+    def test_real_bundle_consistency(self):
+        """Real bundle.json should pass S4 with zero errors."""
+        bundle_path = os.path.join(os.path.dirname(__file__), "..", "bundle.json")
+        if not os.path.exists(bundle_path):
+            pytest.skip("bundle.json not found")
+        parsed = _parse_bundle(bundle_path)
+        resolved = _resolve_refs(parsed)
+        errors, warnings = _check_consistency(resolved)
+        assert errors == [], f"Real bundle has S4 errors: {errors}"
+        # Warnings are acceptable but should be CompilationWarning
+        for w in warnings:
+            assert isinstance(w, CompilationWarning)
+            assert w.stage == "S4"

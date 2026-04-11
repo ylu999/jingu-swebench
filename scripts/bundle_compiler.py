@@ -445,6 +445,159 @@ def _check_completeness(
 
 
 # ---------------------------------------------------------------------------
+# S4 — CONSISTENCY CHECK
+# ---------------------------------------------------------------------------
+
+def _check_consistency(
+    resolved: ResolvedBundle,
+) -> tuple[list[CompilationError], list[CompilationWarning]]:
+    """S4: Cross-contract consistency validation.
+
+    Six checks (4.1–4.6) that verify contracts, principals, routing, and
+    transitions are mutually consistent.
+
+    NEVER raises — always returns (errors, warnings).
+    """
+    errors: list[CompilationError] = []
+    warnings: list[CompilationWarning] = []
+
+    cognition = resolved.raw.get("cognition", {})
+    cognition_subtypes = cognition.get("subtypes", [])
+
+    # --- 4.1 Subtype/phase alignment (CC1) ---
+    for cog_sub in cognition_subtypes:
+        sub_name = cog_sub.get("name", "")
+        cog_phase = cog_sub.get("phase", "").upper()
+        contract = resolved.subtype_to_contract.get(sub_name)
+        if contract is None:
+            continue
+        contract_phase = contract.get("phase", "").upper()
+        if cog_phase and contract_phase and cog_phase != contract_phase:
+            errors.append(CompilationError(
+                "S4",
+                "SUBTYPE_PHASE_MISMATCH",
+                f"Cognition subtype '{sub_name}' declares phase '{cog_phase}' "
+                f"but contract declares phase '{contract_phase}'",
+                {"subtype": sub_name, "cognition_phase": cog_phase, "contract_phase": contract_phase},
+            ))
+
+    # --- 4.2 Principal scope cross-check (CC3) ---
+    for subtype_key, contract in resolved.subtype_to_contract.items():
+        policy = contract.get("policy", {})
+        principals_array = contract.get("principals", [])
+        principal_names_in_array = {
+            p.get("name", "") for p in principals_array if isinstance(p, dict)
+        }
+
+        for req_principal in policy.get("required_principals", []):
+            # Check: principal must be in the contract's principals[] array
+            if req_principal not in principal_names_in_array:
+                errors.append(CompilationError(
+                    "S4",
+                    "PRINCIPAL_NOT_IN_ARRAY",
+                    f"Contract '{subtype_key}' requires principal '{req_principal}' "
+                    f"but it is not in the contract's principals array",
+                    {"subtype": subtype_key, "principal": req_principal},
+                ))
+                continue  # skip scope check if not even in array
+
+            # Check: principal's applies_to must include current subtype
+            principal_def = None
+            for p in principals_array:
+                if isinstance(p, dict) and p.get("name") == req_principal:
+                    principal_def = p
+                    break
+            if principal_def is not None:
+                applies_to = principal_def.get("applies_to", [])
+                if applies_to and subtype_key not in applies_to:
+                    errors.append(CompilationError(
+                        "S4",
+                        "PRINCIPAL_SCOPE_MISMATCH",
+                        f"Contract '{subtype_key}' requires principal '{req_principal}' "
+                        f"but its applies_to does not include '{subtype_key}'",
+                        {"subtype": subtype_key, "principal": req_principal, "applies_to": applies_to},
+                    ))
+
+    # --- 4.3 Forbidden/required disjoint ---
+    for subtype_key, contract in resolved.subtype_to_contract.items():
+        policy = contract.get("policy", {})
+        required = set(policy.get("required_principals", []))
+        forbidden = set(policy.get("forbidden_principals", []))
+        overlap = required & forbidden
+        if overlap:
+            errors.append(CompilationError(
+                "S4",
+                "FORBIDDEN_REQUIRED_OVERLAP",
+                f"Contract '{subtype_key}' has principals in both required and forbidden: "
+                f"{sorted(overlap)}",
+                {"subtype": subtype_key, "overlap": sorted(overlap)},
+            ))
+
+    # --- 4.4 Principal lifecycle (CC3) ---
+    for principal_name, principal_def in resolved.principal_registry.items():
+        fake_eligible = principal_def.get("fake_check_eligible", False)
+        inference_exists = principal_def.get("inference_rule_exists", False)
+        if fake_eligible and not inference_exists:
+            errors.append(CompilationError(
+                "S4",
+                "LIFECYCLE_VIOLATION",
+                f"Principal '{principal_name}' has fake_check_eligible=true "
+                f"but inference_rule_exists=false",
+                {"principal": principal_name},
+            ))
+
+    # --- 4.5 Routing coverage ---
+    for subtype_key, contract in resolved.subtype_to_contract.items():
+        policy = contract.get("policy", {})
+        routing = contract.get("routing", {})
+        principal_routes = routing.get("principal_routes", {})
+        if not isinstance(principal_routes, dict):
+            principal_routes = {}
+
+        for req_principal in policy.get("required_principals", []):
+            if req_principal not in principal_routes:
+                errors.append(CompilationError(
+                    "S4",
+                    "ROUTING_COVERAGE_MISSING",
+                    f"Contract '{subtype_key}' requires principal '{req_principal}' "
+                    f"but routing.principal_routes has no entry for it",
+                    {"subtype": subtype_key, "principal": req_principal},
+                ))
+
+    # --- 4.6 Transition matrix completeness (WARNING only) ---
+    # Collect all allowed_next_phases from contracts
+    declared_transitions: set[tuple[str, str]] = set()
+    for subtype_key, contract in resolved.subtype_to_contract.items():
+        phase_spec = contract.get("phase_spec", {})
+        from_phase = contract.get("phase", "").upper()
+        for next_phase in phase_spec.get("allowed_next_phases", []):
+            declared_transitions.add((from_phase, next_phase.upper()))
+
+    # Build set of transitions present in cognition.transitions[]
+    cognition_transitions = cognition.get("transitions", [])
+    covered_transitions: set[tuple[str, str]] = set()
+    for t in cognition_transitions:
+        from_p = t.get("from", "").upper()
+        to_p = t.get("to", "").upper()
+        if from_p and to_p:
+            covered_transitions.add((from_p, to_p))
+
+    missing_transitions = declared_transitions - covered_transitions
+    if missing_transitions:
+        warnings.append(CompilationWarning(
+            stage="S4",
+            code="TRANSITION_MATRIX_INCOMPLETE",
+            message=(
+                f"Transition matrix missing {len(missing_transitions)} transition(s) "
+                f"declared in contract allowed_next_phases"
+            ),
+            context={"missing": sorted(f"{f}->{t}" for f, t in missing_transitions)},
+        ))
+
+    return errors, warnings
+
+
+# ---------------------------------------------------------------------------
 # S5 — COMPILE_PROMPTS (advisory)
 # ---------------------------------------------------------------------------
 
