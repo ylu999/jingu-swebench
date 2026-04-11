@@ -1,7 +1,8 @@
 {
   "version": "1.0.0",
-  "generated_at": "2026-04-11T06:17:18.635Z",
-  "generator_commit": "5f27f26",
+  "compiler_version": "0.1.0",
+  "generated_at": "2026-04-11T06:47:16.078Z",
+  "generator_commit": "1ffc8dc",
   "capabilities": [
     "prompt_only",
     "schema_enforced",
@@ -21,7 +22,7 @@
     "observation.fact_gathering": {
       "phase": "OBSERVE",
       "subtype": "observation.fact_gathering",
-      "compiled_at": "2026-04-11T06:17:18.633Z",
+      "compiled_at": "2026-04-11T06:47:16.076Z",
       "phase_spec": {
         "name": "OBSERVE",
         "goal": "Gather evidence from the environment: read files, traces, logs, tests.",
@@ -214,7 +215,7 @@
     "analysis.root_cause": {
       "phase": "ANALYZE",
       "subtype": "analysis.root_cause",
-      "compiled_at": "2026-04-11T06:17:18.635Z",
+      "compiled_at": "2026-04-11T06:47:16.077Z",
       "phase_spec": {
         "name": "ANALYZE",
         "goal": "Root-cause analysis: connect evidence to a causal hypothesis.",
@@ -490,7 +491,7 @@
     "decision.fix_direction": {
       "phase": "DECIDE",
       "subtype": "decision.fix_direction",
-      "compiled_at": "2026-04-11T06:17:18.635Z",
+      "compiled_at": "2026-04-11T06:47:16.078Z",
       "phase_spec": {
         "name": "DECIDE",
         "goal": "Choose a fix direction among alternatives with explicit tradeoff reasoning.",
@@ -754,7 +755,7 @@
     "design.solution_shape": {
       "phase": "DESIGN",
       "subtype": "design.solution_shape",
-      "compiled_at": "2026-04-11T06:17:18.635Z",
+      "compiled_at": "2026-04-11T06:47:16.078Z",
       "phase_spec": {
         "name": "DESIGN",
         "goal": "Define the solution shape: scope, invariants, structure — before writing code.",
@@ -975,7 +976,7 @@
     "execution.code_patch": {
       "phase": "EXECUTE",
       "subtype": "execution.code_patch",
-      "compiled_at": "2026-04-11T06:17:18.635Z",
+      "compiled_at": "2026-04-11T06:47:16.078Z",
       "phase_spec": {
         "name": "EXECUTE",
         "goal": "Produce the minimal code patch grounded in the admitted design.",
@@ -1208,7 +1209,7 @@
     "judge.verification": {
       "phase": "JUDGE",
       "subtype": "judge.verification",
-      "compiled_at": "2026-04-11T06:17:18.635Z",
+      "compiled_at": "2026-04-11T06:47:16.078Z",
       "phase_spec": {
         "name": "JUDGE",
         "goal": "Verify that the patch satisfies the original task constraints.",
@@ -1444,5 +1445,395 @@
         }
       }
     }
+  },
+  "cognition": {
+    "phases": [
+      {
+        "name": "UNDERSTAND",
+        "required_fields": [],
+        "forbidden_outputs": [
+          "do not gather evidence (that is OBSERVE)",
+          "do not propose solutions",
+          "do not write code"
+        ]
+      },
+      {
+        "name": "OBSERVE",
+        "required_fields": [
+          "evidence_refs"
+        ],
+        "forbidden_outputs": [
+          "do not analyze or hypothesize (that is ANALYZE)",
+          "do not propose solutions",
+          "do not write code"
+        ]
+      },
+      {
+        "name": "ANALYZE",
+        "required_fields": [
+          "evidence_refs"
+        ],
+        "forbidden_outputs": [
+          "do not write code",
+          "do not skip evidence",
+          "do not jump to a fix without causal reasoning"
+        ]
+      },
+      {
+        "name": "DECIDE",
+        "required_fields": [],
+        "forbidden_outputs": [
+          "do not write code",
+          "do not skip option comparison",
+          "do not commit to a direction without explicit tradeoffs"
+        ]
+      },
+      {
+        "name": "DESIGN",
+        "required_fields": [],
+        "forbidden_outputs": [
+          "do not write production code (that is EXECUTE)",
+          "do not skip invariant checks"
+        ]
+      },
+      {
+        "name": "EXECUTE",
+        "required_fields": [],
+        "forbidden_outputs": [
+          "do not re-analyze the problem (that is ANALYZE)",
+          "do not expand scope beyond the admitted design"
+        ]
+      },
+      {
+        "name": "JUDGE",
+        "required_fields": [],
+        "forbidden_outputs": [
+          "do not write new code (that is EXECUTE)",
+          "do not skip verification against success criteria"
+        ]
+      }
+    ],
+    "subtypes": [
+      {
+        "name": "observation.fact_gathering",
+        "phase": "OBSERVE",
+        "required_principals": [
+          "ontology_alignment",
+          "phase_boundary_discipline",
+          "evidence_completeness"
+        ],
+        "forbidden_principals": [
+          "action_grounding",
+          "minimal_change"
+        ]
+      },
+      {
+        "name": "analysis.root_cause",
+        "phase": "ANALYZE",
+        "required_principals": [
+          "ontology_alignment",
+          "phase_boundary_discipline",
+          "causal_grounding",
+          "evidence_linkage"
+        ],
+        "forbidden_principals": [
+          "action_grounding",
+          "minimal_change"
+        ]
+      },
+      {
+        "name": "decision.fix_direction",
+        "phase": "DECIDE",
+        "required_principals": [
+          "ontology_alignment",
+          "phase_boundary_discipline",
+          "option_comparison",
+          "constraint_satisfaction"
+        ],
+        "forbidden_principals": []
+      },
+      {
+        "name": "design.solution_shape",
+        "phase": "DESIGN",
+        "required_principals": [
+          "ontology_alignment",
+          "phase_boundary_discipline",
+          "invariant_preservation",
+          "scope_minimality"
+        ],
+        "forbidden_principals": [
+          "minimal_change"
+        ]
+      },
+      {
+        "name": "execution.code_patch",
+        "phase": "EXECUTE",
+        "required_principals": [
+          "ontology_alignment",
+          "phase_boundary_discipline",
+          "action_grounding",
+          "minimal_change"
+        ],
+        "forbidden_principals": []
+      },
+      {
+        "name": "judge.verification",
+        "phase": "JUDGE",
+        "required_principals": [
+          "ontology_alignment",
+          "result_verification",
+          "uncertainty_honesty"
+        ],
+        "forbidden_principals": []
+      }
+    ],
+    "principal_mapping": {
+      "observation.fact_gathering": [
+        "ontology_alignment",
+        "phase_boundary_discipline",
+        "evidence_completeness"
+      ],
+      "analysis.root_cause": [
+        "ontology_alignment",
+        "phase_boundary_discipline",
+        "causal_grounding",
+        "evidence_linkage"
+      ],
+      "decision.fix_direction": [
+        "ontology_alignment",
+        "phase_boundary_discipline",
+        "option_comparison",
+        "constraint_satisfaction"
+      ],
+      "design.solution_shape": [
+        "ontology_alignment",
+        "phase_boundary_discipline",
+        "invariant_preservation",
+        "scope_minimality"
+      ],
+      "execution.code_patch": [
+        "ontology_alignment",
+        "phase_boundary_discipline",
+        "action_grounding",
+        "minimal_change"
+      ],
+      "judge.verification": [
+        "ontology_alignment",
+        "result_verification",
+        "uncertainty_honesty"
+      ]
+    },
+    "transitions": [
+      {
+        "from": "OBSERVE",
+        "to": "UNDERSTAND",
+        "allowed": false
+      },
+      {
+        "from": "OBSERVE",
+        "to": "OBSERVE",
+        "allowed": true
+      },
+      {
+        "from": "OBSERVE",
+        "to": "ANALYZE",
+        "allowed": true
+      },
+      {
+        "from": "OBSERVE",
+        "to": "DECIDE",
+        "allowed": false
+      },
+      {
+        "from": "OBSERVE",
+        "to": "DESIGN",
+        "allowed": false
+      },
+      {
+        "from": "OBSERVE",
+        "to": "EXECUTE",
+        "allowed": false
+      },
+      {
+        "from": "OBSERVE",
+        "to": "JUDGE",
+        "allowed": false
+      },
+      {
+        "from": "ANALYZE",
+        "to": "UNDERSTAND",
+        "allowed": false
+      },
+      {
+        "from": "ANALYZE",
+        "to": "OBSERVE",
+        "allowed": true
+      },
+      {
+        "from": "ANALYZE",
+        "to": "ANALYZE",
+        "allowed": true
+      },
+      {
+        "from": "ANALYZE",
+        "to": "DECIDE",
+        "allowed": true
+      },
+      {
+        "from": "ANALYZE",
+        "to": "DESIGN",
+        "allowed": false
+      },
+      {
+        "from": "ANALYZE",
+        "to": "EXECUTE",
+        "allowed": false
+      },
+      {
+        "from": "ANALYZE",
+        "to": "JUDGE",
+        "allowed": false
+      },
+      {
+        "from": "DECIDE",
+        "to": "UNDERSTAND",
+        "allowed": false
+      },
+      {
+        "from": "DECIDE",
+        "to": "OBSERVE",
+        "allowed": false
+      },
+      {
+        "from": "DECIDE",
+        "to": "ANALYZE",
+        "allowed": true
+      },
+      {
+        "from": "DECIDE",
+        "to": "DECIDE",
+        "allowed": true
+      },
+      {
+        "from": "DECIDE",
+        "to": "DESIGN",
+        "allowed": true
+      },
+      {
+        "from": "DECIDE",
+        "to": "EXECUTE",
+        "allowed": false
+      },
+      {
+        "from": "DECIDE",
+        "to": "JUDGE",
+        "allowed": false
+      },
+      {
+        "from": "DESIGN",
+        "to": "UNDERSTAND",
+        "allowed": false
+      },
+      {
+        "from": "DESIGN",
+        "to": "OBSERVE",
+        "allowed": false
+      },
+      {
+        "from": "DESIGN",
+        "to": "ANALYZE",
+        "allowed": false
+      },
+      {
+        "from": "DESIGN",
+        "to": "DECIDE",
+        "allowed": true
+      },
+      {
+        "from": "DESIGN",
+        "to": "DESIGN",
+        "allowed": true
+      },
+      {
+        "from": "DESIGN",
+        "to": "EXECUTE",
+        "allowed": true
+      },
+      {
+        "from": "DESIGN",
+        "to": "JUDGE",
+        "allowed": false
+      },
+      {
+        "from": "EXECUTE",
+        "to": "UNDERSTAND",
+        "allowed": false
+      },
+      {
+        "from": "EXECUTE",
+        "to": "OBSERVE",
+        "allowed": false
+      },
+      {
+        "from": "EXECUTE",
+        "to": "ANALYZE",
+        "allowed": true
+      },
+      {
+        "from": "EXECUTE",
+        "to": "DECIDE",
+        "allowed": false
+      },
+      {
+        "from": "EXECUTE",
+        "to": "DESIGN",
+        "allowed": false
+      },
+      {
+        "from": "EXECUTE",
+        "to": "EXECUTE",
+        "allowed": true
+      },
+      {
+        "from": "EXECUTE",
+        "to": "JUDGE",
+        "allowed": true
+      },
+      {
+        "from": "JUDGE",
+        "to": "UNDERSTAND",
+        "allowed": false
+      },
+      {
+        "from": "JUDGE",
+        "to": "OBSERVE",
+        "allowed": false
+      },
+      {
+        "from": "JUDGE",
+        "to": "ANALYZE",
+        "allowed": true
+      },
+      {
+        "from": "JUDGE",
+        "to": "DECIDE",
+        "allowed": false
+      },
+      {
+        "from": "JUDGE",
+        "to": "DESIGN",
+        "allowed": false
+      },
+      {
+        "from": "JUDGE",
+        "to": "EXECUTE",
+        "allowed": true
+      },
+      {
+        "from": "JUDGE",
+        "to": "JUDGE",
+        "allowed": false
+      }
+    ]
   }
 }
