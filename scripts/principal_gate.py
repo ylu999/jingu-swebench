@@ -10,6 +10,11 @@ The main flow is always wrapped in try/except to ensure robustness.
 
 from __future__ import annotations
 
+from gate_rejection import (
+    GateRejection, ContractView, FieldSpec, FieldFailure,
+    build_gate_rejection, SDG_ENABLED,
+)
+
 # Load required principals from canonical source (subtype_contracts, p193).
 # Exception-safe: if import fails, fallback to static dict (no crash).
 try:
@@ -224,14 +229,143 @@ class AdmissionResult:
       RETRYABLE: right phase, incomplete output — agent can fix in-loop
       REJECTED:  wrong phase position or boundary violation — no in-loop fix possible
     """
-    __slots__ = ("status", "reasons")
+    __slots__ = ("status", "reasons", "rejection")
 
-    def __init__(self, status: str, reasons: list[str]) -> None:
+    def __init__(self, status: str, reasons: list[str], rejection: GateRejection | None = None) -> None:
         self.status = status    # "ADMITTED" | "RETRYABLE" | "REJECTED"
         self.reasons = reasons  # violation codes
+        self.rejection = rejection  # p217: structured SDG rejection (populated on RETRYABLE/REJECTED)
 
     def __repr__(self) -> str:
         return f"AdmissionResult({self.status}, {self.reasons})"
+
+
+def _build_principal_contract(phase: str) -> ContractView:
+    """Build a ContractView for the principal/admission gate of a given phase."""
+    required = PHASE_REQUIRED_PRINCIPALS.get(phase.upper(), [])
+    field_specs = {}
+    for p in required:
+        feedback = _FEEDBACK.get(f"missing_{p}", f"Declare {p}")
+        field_specs[p] = FieldSpec(
+            description=feedback,
+            required=True,
+            semantic_check="principal_declared",
+        )
+    # Add required fields from subtype_contracts if available
+    try:
+        from subtype_contracts import get_required_fields as _get_rf
+        for f_name in _get_rf(phase):
+            field_specs[f_name] = FieldSpec(
+                description=f"Required field: {f_name}",
+                required=True,
+            )
+    except Exception:
+        pass
+    all_required = list(required)
+    try:
+        from subtype_contracts import get_required_fields as _get_rf2
+        all_required.extend(_get_rf2(phase))
+    except Exception:
+        pass
+    return ContractView(required_fields=all_required, field_specs=field_specs)
+
+
+def _build_admission_rejection(
+    phase: str, reasons: list[str], phase_record, status: str,
+) -> GateRejection | None:
+    """Build GateRejection from admission check reasons (p217 SDG)."""
+    if not SDG_ENABLED or not reasons:
+        return None
+
+    contract = _build_principal_contract(phase)
+    failures = []
+    extracted = {}
+
+    # Extract declared principals for the extracted dict
+    declared = [p.lower() for p in (getattr(phase_record, "principals", None) or [])]
+    extracted["declared_principals"] = declared
+
+    for reason_code in reasons:
+        if reason_code.startswith("missing_required_principal:"):
+            principal = reason_code.split(":", 1)[1]
+            feedback = _FEEDBACK.get(f"missing_{principal}", f"Declare {principal}")
+            failures.append(FieldFailure(
+                field=principal,
+                reason="principal_violation",
+                hint=feedback,
+                expected=f"Principal '{principal}' must be declared",
+                actual=None,
+            ))
+        elif reason_code.startswith("forbidden_principal:"):
+            principal = reason_code.split(":", 1)[1]
+            failures.append(FieldFailure(
+                field=principal,
+                reason="principal_violation",
+                hint=f"Principal '{principal}' is forbidden in this phase",
+                expected=f"Principal '{principal}' must NOT be declared",
+                actual=principal,
+            ))
+        elif reason_code.startswith("missing_required_field:"):
+            field_name = reason_code.split(":", 1)[1]
+            failures.append(FieldFailure(
+                field=field_name,
+                reason="missing",
+                hint=f"Required field '{field_name}' must be non-empty",
+                expected=f"Non-empty {field_name}",
+                actual=None,
+            ))
+        elif reason_code.startswith("missing_"):
+            # Generic missing field (e.g. missing_root_cause, missing_plan)
+            field_name = reason_code.replace("missing_", "")
+            feedback = _FEEDBACK.get(reason_code, f"Provide {field_name}")
+            failures.append(FieldFailure(
+                field=field_name,
+                reason="missing",
+                hint=feedback,
+                expected=f"Non-empty {field_name}",
+                actual=None,
+            ))
+        elif reason_code.startswith("plan_not_grounded"):
+            failures.append(FieldFailure(
+                field="plan",
+                reason="semantic_fail",
+                hint=_FEEDBACK.get("plan_not_grounded_in_root_cause", "Ground plan in root cause"),
+                expected="Plan must reference the root cause from ANALYZE",
+                actual=getattr(phase_record, "plan", "")[:80] if hasattr(phase_record, "plan") else None,
+            ))
+        elif reason_code.startswith("forbidden_transition:"):
+            transition = reason_code.split(":", 1)[1]
+            failures.append(FieldFailure(
+                field="phase_transition",
+                reason="format_invalid",
+                hint=f"Phase transition {transition} is not allowed",
+                expected="Allowed phase transition",
+                actual=transition,
+            ))
+        elif reason_code.startswith("missing_evidence_basis"):
+            failures.append(FieldFailure(
+                field="evidence_basis",
+                reason="missing",
+                hint="Provide evidence_refs, from_steps, or use observation tools",
+                expected="Evidence basis (evidence_refs or from_steps or tool usage)",
+                actual=None,
+            ))
+        else:
+            # Catch-all for unknown reason codes
+            failures.append(FieldFailure(
+                field=reason_code,
+                reason="format_invalid",
+                hint=f"Violation: {reason_code}",
+                expected="No violation",
+                actual=reason_code,
+            ))
+
+    return build_gate_rejection(
+        gate_name="principal_gate",
+        contract=contract,
+        extracted=extracted,
+        failures=failures,
+    )
 
 
 def evaluate_admission(phase_record, phase: str, next_phase: str = "", observe_tool_signal: bool = False, last_analyze_root_cause: str = "") -> AdmissionResult:
@@ -333,9 +467,12 @@ def evaluate_admission(phase_record, phase: str, next_phase: str = "", observe_t
                 rejected.append(f"forbidden_transition:{phase}->{next_phase}")
 
         if rejected:
-            return AdmissionResult("REJECTED", rejected + retryable)
+            all_reasons = rejected + retryable
+            rejection = _build_admission_rejection(phase, all_reasons, phase_record, "REJECTED")
+            return AdmissionResult("REJECTED", all_reasons, rejection=rejection)
         if retryable:
-            return AdmissionResult("RETRYABLE", retryable)
+            rejection = _build_admission_rejection(phase, retryable, phase_record, "RETRYABLE")
+            return AdmissionResult("RETRYABLE", retryable, rejection=rejection)
         return AdmissionResult("ADMITTED", [])
 
     except Exception as _e:

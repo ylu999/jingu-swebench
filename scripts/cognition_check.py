@@ -11,6 +11,10 @@ CDP v1 contradiction rules (phase × signal):
 """
 
 from typing import TypedDict
+from gate_rejection import (
+    GateRejection, ContractView, FieldSpec, FieldFailure,
+    build_gate_rejection, SDG_ENABLED,
+)
 
 
 class CognitionViolation(TypedDict):
@@ -18,9 +22,10 @@ class CognitionViolation(TypedDict):
     reason: str
 
 
-class CognitionResult(TypedDict):
+class CognitionResult(TypedDict, total=False):
     valid: bool
     violations: list[CognitionViolation]
+    rejection: GateRejection | None  # p217: structured SDG rejection
 
 
 # Contradiction rules: (cdp_type, signal_or_principal) → violation reason
@@ -79,7 +84,44 @@ def check_cognition(declaration: dict, patch_signals: list[str]) -> CognitionRes
         if fix_type == rule_type and principal in principals:
             violations.append({"kind": "principal_contradiction", "reason": reason})
 
-    return {"valid": len(violations) == 0, "violations": violations}
+    result: CognitionResult = {"valid": len(violations) == 0, "violations": violations}
+
+    # p217: build structured GateRejection on violation
+    if violations and SDG_ENABLED:
+        contract = ContractView(
+            required_fields=["fix_type", "principals"],
+            field_specs={
+                "fix_type": FieldSpec(
+                    description="Declaration type must be consistent with patch signals",
+                    required=True,
+                    semantic_check="no_signal_contradiction",
+                ),
+                "principals": FieldSpec(
+                    description="Declared principals must be consistent with declaration type",
+                    required=True,
+                    semantic_check="no_principal_contradiction",
+                ),
+            },
+        )
+        failures = []
+        for v in violations:
+            failures.append(FieldFailure(
+                field="fix_type" if v["kind"] == "signal_contradiction" else "principals",
+                reason="semantic_fail",
+                hint=v["reason"],
+                expected="Consistent declaration-patch pair",
+                actual=f"type={fix_type}, signals={patch_signals}",
+            ))
+        result["rejection"] = build_gate_rejection(
+            gate_name="cognition_check",
+            contract=contract,
+            extracted={"fix_type": fix_type, "principals": principals, "patch_signals": patch_signals},
+            failures=failures,
+        )
+    else:
+        result["rejection"] = None
+
+    return result
 
 
 def format_cognition_feedback(result: CognitionResult) -> str:
