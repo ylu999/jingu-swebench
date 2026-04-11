@@ -295,6 +295,8 @@ class JinguAgent:
         self._max_attempts = max_attempts
         self._cp_state_holder: list[Any] = []
         self._state: Any | None = None  # StepMonitorState, populated in run()
+        self._step_emitter: Any | None = None  # StepEventEmitter, per-attempt
+        self._step_start_ts: float = 0.0  # ms timestamp set in on_step_start
 
     # -- step-level hooks (called by JinguProgressTrackingAgent.step) --------
 
@@ -304,7 +306,11 @@ class JinguAgent:
         Runs observation (Section 1) and detects container readiness.
         Stores observation results on self for use by on_step_end().
         """
+        import time as _time_mod
         from step_sections import _step_observe
+
+        # p228: record step start time for duration calculation
+        self._step_start_ts = _time_mod.time() * 1000
 
         # Wire monitor state onto agent instance for _step_observe dedup
         if self._state is not None:
@@ -398,18 +404,83 @@ class JinguAgent:
             patch_non_empty=patch_non_empty,
         )
 
-        # Check for early stop or redirect from state
+        # Determine step decision
+        _decision: StepDecision
         if self._state.early_stop_verdict:
-            return StepDecision(
+            _decision = StepDecision(
                 action="stop",
                 reason=getattr(self._state.early_stop_verdict, "reason", "no_signal"),
             )
-        if self._state.pending_redirect_hint:
+        elif self._state.pending_redirect_hint:
             hint = self._state.pending_redirect_hint
             self._state.pending_redirect_hint = ""
-            return StepDecision(action="redirect", message=hint)
+            _decision = StepDecision(action="redirect", message=hint)
+        else:
+            _decision = StepDecision(action="continue")
 
-        return StepDecision(action="continue")
+        # p228: emit step event (never crashes the run)
+        try:
+            self._emit_step_event(agent_self, step_n, env_error, patch_non_empty, _decision)
+        except Exception:
+            pass
+
+        return _decision
+
+    def _emit_step_event(
+        self,
+        agent_self: Any,
+        step_n: int,
+        env_error: bool,
+        patch_non_empty: bool,
+        decision: StepDecision,
+    ) -> None:
+        """Build and emit a StepEvent. Called from on_step_end. Never raises to caller."""
+        import time as _time_mod
+        if self._step_emitter is None:
+            return
+
+        from step_event_emitter import StepEvent, extract_tool_usage
+
+        # cp_state snapshot
+        cp = self._cp_state_holder[0] if self._cp_state_holder else None
+        cp_snapshot = {
+            "phase": str(getattr(cp, "phase", None)),
+            "step": getattr(cp, "step", 0),
+            "no_progress_steps": getattr(cp, "no_progress_steps", 0),
+            "patch_first_write": getattr(cp, "patch_first_write", False),
+            "phase_records_count": len(getattr(cp, "phase_records", [])),
+        } if cp else None
+
+        # gate verdict from decision
+        gate_verdict: str | None = None
+        gate_reason: str | None = None
+        if decision.action == "stop":
+            gate_verdict = "stop"
+            gate_reason = decision.reason
+        elif decision.action == "redirect":
+            gate_verdict = "redirect"
+            gate_reason = decision.reason or "redirect"
+
+        # tool usage extraction
+        msgs = getattr(agent_self, "messages", [])
+        tool_calls_count, files_read, files_written = extract_tool_usage(msgs, step_n)
+
+        now_ms = _time_mod.time() * 1000
+        event = StepEvent(
+            step_n=step_n,
+            timestamp_ms=now_ms,
+            phase=str(getattr(cp, "phase", None)) if cp else None,
+            gate_verdict=gate_verdict,
+            gate_reason=gate_reason,
+            cp_state_snapshot=cp_snapshot,
+            tool_calls_count=tool_calls_count,
+            files_read=files_read,
+            files_written=files_written,
+            step_duration_ms=now_ms - self._step_start_ts if self._step_start_ts else 0.0,
+            patch_non_empty=patch_non_empty,
+            env_error=env_error,
+        )
+        self._step_emitter.emit(event)
 
     # -- attempt-level hooks ------------------------------------------------
 
@@ -611,6 +682,14 @@ class JinguAgent:
         from controlled_verify import run_controlled_verify
         from control.reasoning_state import VerdictStop
 
+        # p228: close step event emitter (before any early return)
+        if self._step_emitter is not None:
+            try:
+                self._step_emitter.close()
+            except Exception:
+                pass
+            self._step_emitter = None
+
         _monitor = self._state
         if _monitor is None:
             return
@@ -780,6 +859,16 @@ class JinguAgent:
             )
         t_cfg.stop()
 
+        # p228: create step event emitter for this attempt
+        try:
+            from step_event_emitter import StepEventEmitter
+            self._step_emitter = StepEventEmitter(
+                self._output_dir / instance_id, attempt
+            )
+        except Exception as _emit_exc:
+            print(f"    [step-emitter] WARNING: init failed: {_emit_exc}", flush=True)
+            self._step_emitter = None
+
         print(f"    [agent] running {instance_id} attempt={attempt}...")
 
         preds_path = attempt_dir / "preds.json"
@@ -818,6 +907,14 @@ class JinguAgent:
         except Exception as e:
             print(f"    [agent] ERROR: {e}")
             traceback.print_exc()
+        finally:
+            # p228: ensure emitter is closed even if on_attempt_end was skipped
+            if self._step_emitter is not None:
+                try:
+                    self._step_emitter.close()
+                except Exception:
+                    pass
+                self._step_emitter = None
         t_llm.stop()
 
         # Parse traj for usage + submission
