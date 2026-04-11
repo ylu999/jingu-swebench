@@ -201,6 +201,18 @@ BATCH_GUARD_THRESHOLD = 3  # more than this many instances requires --confirmed
 
 _RUNBOOK_PATH = ".claude/smoke-test-runbook.md"
 
+def _parse_env_args(args) -> list[dict]:
+    """Parse --env KEY=VALUE pairs into ECS environment override dicts."""
+    extra_env = []
+    for item in getattr(args, "env", None) or []:
+        if "=" not in item:
+            print(f"[ops] ERROR: --env value must be KEY=VALUE, got: {item}")
+            sys.exit(1)
+        k, v = item.split("=", 1)
+        extra_env.append({"name": k, "value": v})
+    return extra_env
+
+
 def _check_runbook_ack(args) -> None:
     """P1 enforcement: runbook must be explicitly acknowledged before any launch.
     Passing --runbook-ack is the structural proof that the runbook was read this session.
@@ -243,6 +255,10 @@ def cmd_run(args) -> None:
     print(f"[ops] instances: {instance_ids_str}")
     print(f"[ops] mode={args.mode} attempts={args.max_attempts} workers={args.workers}")
 
+    extra_env = _parse_env_args(args)
+    if extra_env:
+        print(f"[ops] env overrides: {' '.join(f'{e['name']}={e['value']}' for e in extra_env)}")
+
     resp = ecs.run_task(
         cluster=ECS_CLUSTER,
         taskDefinition=ECS_TASK_DEF,
@@ -257,6 +273,7 @@ def cmd_run(args) -> None:
                         [{"name": "JINGU_MODEL", "value": args.model}]
                         if getattr(args, "model", None) else []
                     ),
+                    *extra_env,
                 ],
             }]
         },
@@ -791,6 +808,10 @@ def cmd_smoke(args) -> None:
     print(f"[smoke] dataset={args.dataset} mode={args.mode} attempts={args.max_attempts} workers={args.workers}", flush=True)
     print(f"[smoke] {filter_desc}", flush=True)
 
+    extra_env = _parse_env_args(args)
+    if extra_env:
+        print(f"[smoke] env overrides: {' '.join(f'{e['name']}={e['value']}' for e in extra_env)}", flush=True)
+
     resp = ecs.run_task(
         cluster=ECS_CLUSTER,
         taskDefinition=ECS_TASK_DEF,
@@ -805,6 +826,7 @@ def cmd_smoke(args) -> None:
                         [{"name": "JINGU_MODEL", "value": args.model}]
                         if getattr(args, "model", None) else []
                     ),
+                    *extra_env,
                 ],
             }]
         },
@@ -2260,6 +2282,8 @@ def main():
                        help=f"Required when launching more than {BATCH_GUARD_THRESHOLD} instances (batch guard)")
     p_run.add_argument("--runbook-ack", action="store_true",
                        help=f"Required for all launches: confirms runbook ({_RUNBOOK_PATH}) was read this session")
+    p_run.add_argument("--env", nargs="+", default=None,
+                       help="Extra env vars as KEY=VALUE (e.g. --env STRUCTURED_OUTPUT_ENABLED=true)")
 
     # smoke — launch + live tail, OR attach to existing task
     p_smoke = sub.add_parser(
@@ -2286,6 +2310,8 @@ def main():
                          help=f"Required when launching more than {BATCH_GUARD_THRESHOLD} instances (batch guard)")
     p_smoke.add_argument("--runbook-ack", action="store_true",
                          help=f"Required for all launches: confirms runbook ({_RUNBOOK_PATH}) was read this session")
+    p_smoke.add_argument("--env", nargs="+", default=None,
+                         help="Extra env vars as KEY=VALUE (e.g. --env STRUCTURED_OUTPUT_ENABLED=true)")
 
     # eval — run SWE-bench evaluation on predictions via ECS
     p_eval = sub.add_parser("eval", help="Run SWE-bench eval on S3 predictions via ECS")
