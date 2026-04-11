@@ -21,6 +21,7 @@ from gate_rejection import (
     GateRejection, ContractView, FieldSpec, FieldFailure,
     build_gate_rejection, SDG_ENABLED,
 )
+from cognition_contracts import analysis_root_cause as _arc
 
 
 @dataclass
@@ -248,62 +249,30 @@ def _check_invariant_capture(pr: PhaseRecord) -> float:
 
 # ── ANALYZE contract (SDG p217) ──────────────────────────────────────────────
 
+# Derived from cognition_contracts/analysis_root_cause.py (single source of truth).
 _ANALYZE_CONTRACT = ContractView(
-    required_fields=["root_cause", "causal_chain", "evidence_refs"],
+    required_fields=list(_arc.GATE_REQUIRED_FIELDS),
     field_specs={
-        "root_cause": FieldSpec(
-            description="Identified root cause with specific code reference (file/function/line)",
-            required=True,
-            min_length=10,
-            semantic_check="grounded_in_code",
-        ),
-        "causal_chain": FieldSpec(
-            description="Causal chain: test failure -> condition -> code -> why it fails",
-            required=True,
-            min_length=20,
-            semantic_check="connects_test_to_code",
-        ),
-        "evidence_refs": FieldSpec(
-            description="Code and test references supporting the analysis",
-            required=True,
-        ),
-        "alternative_hypothesis": FieldSpec(
-            description="At least 2 hypotheses with rejection reasoning for non-chosen",
-            required=False,
-            semantic_check="multiple_distinct_hypotheses",
-        ),
-        "invariant_capture": FieldSpec(
-            description="Structural invariant: what delimiter/boundary must NOT appear and why",
-            required=False,
-            semantic_check="invariant_identified",
-        ),
+        fs.name: FieldSpec(
+            description=fs.description,
+            required=fs.required,
+            min_length=fs.min_length,
+            semantic_check=fs.semantic_check,
+        )
+        for fs in _arc.FIELD_SPECS
     },
 )
 
-# Rule name -> (field, hint) mapping for SDG FieldFailure construction
+# Rule name -> (field, hint) mapping for SDG FieldFailure construction.
+# Derived from contract GATE_RULES.
 _RULE_TO_FIELD: dict[str, tuple[str, str]] = {
-    "code_grounding": (
-        "root_cause",
-        "Point to exact code location (file:line or function name) causing the issue",
-    ),
-    "alternative_hypothesis": (
-        "alternative_hypothesis",
-        "Consider at least 2 hypotheses and explain why non-chosen ones were rejected",
-    ),
-    "causal_chain": (
-        "causal_chain",
-        "Explain step-by-step: test failure -> condition -> code -> why it fails",
-    ),
-    "invariant_capture": (
-        "root_cause",
-        "Identify the structural invariant: what delimiter/boundary must NOT be allowed in this position, and why?",
-    ),
+    rule.name: (rule.field, rule.repair_hint) for rule in _arc.GATE_RULES
 }
 
 
 # ── Main evaluation function ─────────────────────────────────────────────────
 
-_THRESHOLD = 0.5  # Soft gate: reject only clearly inadequate analyses
+_THRESHOLD = _arc.GATE_THRESHOLD  # From contract (single source of truth)
 
 
 def evaluate_analysis(pr: PhaseRecord, *, structured_output: bool = False) -> AnalysisVerdict:

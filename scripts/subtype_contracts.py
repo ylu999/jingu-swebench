@@ -28,6 +28,8 @@ from __future__ import annotations
 
 from typing import TypedDict
 
+from cognition_contracts import analysis_root_cause as _arc
+
 
 class SubtypeContract(TypedDict, total=False):
     """Contract definition for a phase subtype. Mirrors CognitionContract in jingu-cognition."""
@@ -95,29 +97,15 @@ SUBTYPE_CONTRACTS: dict[str, SubtypeContract] = {
         "repair_target": "OBSERVE",
     },
     "analysis.root_cause": {
-        "phase": "ANALYZE",
-        # causal_grounding + evidence_linkage are fake_checkable for analysis.root_cause.
-        # ontology_alignment + phase_boundary_discipline have no inference rule → expected only.
-        "required_principals": [
-            "causal_grounding",
-            "evidence_linkage",
-        ],
-        "expected_principals": [
-            "ontology_alignment",         # stage=required_enforced, no inference rule
-            "phase_boundary_discipline",  # stage=required_enforced, no inference rule
-            "alternative_hypothesis_check",
-            "uncertainty_honesty",
-            "invariant_capture",          # stage=required_enforced, no inference rule — constraint encoding
-        ],
-        "forbidden_principals": ["action_grounding", "minimal_change"],
-        # P16 fix: evidence_refs removed from required_fields.
-        # ANALYZE requires evidence *basis* (evidence_refs OR from_steps), not
-        # specifically file.py:line regex matches from the current step message.
-        # The has_evidence_basis check in principal_gate handles this semantic requirement.
-        "required_fields": [],
-        "has_evidence_basis_required": True,   # checked by principal_gate, not field-presence
-        "allowed_next": ["DECIDE", "ANALYZE", "OBSERVE"],
-        "repair_target": "OBSERVE",
+        # Derived from cognition_contracts/analysis_root_cause.py (single source of truth).
+        "phase": _arc.PHASE,
+        "required_principals": list(_arc.REQUIRED_PRINCIPALS),
+        "expected_principals": list(_arc.EXPECTED_PRINCIPALS),
+        "forbidden_principals": list(_arc.FORBIDDEN_PRINCIPALS),
+        "required_fields": list(_arc.REQUIRED_RECORD_FIELDS),
+        "has_evidence_basis_required": _arc.HAS_EVIDENCE_BASIS_REQUIRED,
+        "allowed_next": list(_arc.ALLOWED_NEXT),
+        "repair_target": _arc.REPAIR_TARGET,
     },
     "decision.fix_direction": {
         "phase": "DECIDE",

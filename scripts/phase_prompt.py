@@ -89,28 +89,9 @@ _OBSERVE_GUIDANCE = (
     + _OBSERVE_PRINCIPAL
 )
 
-_ANALYZE_GUIDANCE = (
-    "Identify the root cause with causal evidence. Do NOT write any fix yet.\n\n"
-    "You MUST produce your analysis in this exact format:\n\n"
-    "PHASE: analyze\n"
-    "PRINCIPALS: causal_grounding, evidence_linkage\n\n"
-    "ROOT_CAUSE:\n<one specific root cause — not vague>\n\n"
-    "EVIDENCE:\n- file/path.py:line - what this shows\n- file/path.py:line - what this shows\n\n"
-    "CAUSAL_CHAIN:\n<step-by-step reasoning from evidence to root cause>\n\n"
-    "ALTERNATIVES:\n- <other hypothesis> — why ruled out\n\n"
-    "UNCERTAINTY:\n<what you are NOT sure about — be honest>\n\n"
-    "ROOT_CAUSE is MANDATORY. If you do not produce a ROOT_CAUSE: field with a specific "
-    "file:line location, this analysis step is incomplete and you will be redirected back to ANALYZE.\n\n"
-    "Rules: ROOT_CAUSE must be specific. EVIDENCE must reference real files. "
-    "CAUSAL_CHAIN must connect evidence → root cause. Do NOT propose fixes here.\n\n"
-    "Required output structure (will be checked before advancing to EXECUTE):\n"
-    "- ROOT_CAUSE: one sentence, grounded in specific file/function\n"
-    "- CAUSAL_CHAIN: step-by-step from failing test -> condition -> code -> bug\n"
-    "- ALTERNATIVES: at least one alternative hypothesis + why rejected\n\n"
-    "If any field is missing, you will be returned to ANALYZE with specific feedback.\n"
-    "Fix only the missing fields. Do not rewrite fields already present.\n"
-    + _ANALYZE_PRINCIPAL
-)
+# Derived from cognition_contracts/analysis_root_cause.py (single source of truth).
+from cognition_contracts import analysis_root_cause as _arc
+_ANALYZE_GUIDANCE = _arc.PROMPT_GUIDANCE + _ANALYZE_PRINCIPAL
 
 _DECIDE_GUIDANCE = (
     "Choose the best fix strategy based on your analysis.\n\n"

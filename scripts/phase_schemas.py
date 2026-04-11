@@ -240,31 +240,15 @@ OBSERVE_RECORD_SCHEMA: dict[str, Any] = {
 }
 
 # ANALYZE phase: root cause with evidence
+# Derived from cognition_contracts/analysis_root_cause.py (single source of truth).
+from cognition_contracts import analysis_root_cause as _arc
 ANALYZE_RECORD_SCHEMA: dict[str, Any] = {
     **PHASE_RECORD_BASE_SCHEMA,
     "properties": {
         **PHASE_RECORD_BASE_SCHEMA["properties"],
-        "phase": {
-            "type": "string",
-            "enum": ["ANALYZE"],
-            "description": "The current reasoning phase.",
-        },
-        "subtype": {
-            "type": "string",
-            "enum": ["analysis.root_cause"],
-            "description": "Analysis subtype.",
-        },
-        "root_cause": {
-            "type": "string",
-            "minLength": 20,
-            "description": "The identified root cause with specific file/function reference.",
-        },
-        "causal_chain": {
-            "type": "string",
-            "description": "Step-by-step causal chain from evidence to root cause.",
-        },
+        **_arc.SCHEMA_PROPERTIES,
     },
-    "required": ["phase", "subtype", "principals", "evidence_refs", "content", "root_cause"],
+    "required": list(_arc.SCHEMA_REQUIRED) + ["content"],
 }
 
 # DECIDE phase: fix direction selection
