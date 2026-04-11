@@ -12,29 +12,51 @@ ANALYZE/EXECUTE/JUDGE guidance is derived from subtype_contracts.py (p193)
 so prompt vocabulary stays in sync with principal_gate.py enforcement.
 """
 
-# Load canonical principal guidance from subtype_contracts (p193).
-# build_phase_principal_guidance returns "You MUST declare ... You SHOULD also declare ..."
-# This is appended to the phase behavior text below.
-# Exception-safe: if import fails, fallback to empty strings (SST2 — no stale copies).
+# ── Principal Guidance Source Selection ──────────────────────────────────────
+# Feature flag: USE_BUNDLE_LOADER switches between:
+#   - New path: JinguLoader reads compiled bundle (p219)
+#   - Legacy path: subtype_contracts.py (will be deprecated)
+
 try:
-    from subtype_contracts import build_phase_principal_guidance as _build_pg
-    _UNDERSTAND_PRINCIPAL = _build_pg("UNDERSTAND") or ""
-    _OBSERVE_PRINCIPAL = _build_pg("OBSERVE") or ""
-    _ANALYZE_PRINCIPAL = _build_pg("ANALYZE") or ""
-    _DECIDE_PRINCIPAL = _build_pg("DECIDE") or ""
-    _DESIGN_PRINCIPAL = _build_pg("DESIGN") or ""
-    _EXECUTE_PRINCIPAL = _build_pg("EXECUTE") or ""
-    _JUDGE_PRINCIPAL = _build_pg("JUDGE") or ""
-except Exception:
-    # Fallback: subtype_contracts unavailable. Use empty string rather than stale
-    # hardcoded names — consumers should degrade gracefully without principal hint.
-    _UNDERSTAND_PRINCIPAL = ""
-    _OBSERVE_PRINCIPAL = ""
-    _ANALYZE_PRINCIPAL = ""
-    _DECIDE_PRINCIPAL = ""
-    _DESIGN_PRINCIPAL = ""
-    _EXECUTE_PRINCIPAL = ""
-    _JUDGE_PRINCIPAL = ""
+    from jingu_loader import USE_BUNDLE_LOADER
+except ImportError:
+    USE_BUNDLE_LOADER = False
+
+
+def _load_principal_guidance_from_bundle(phase: str) -> str:
+    """Load principal guidance from the compiled bundle via policy_onboarding."""
+    try:
+        from policy_onboarding import get_prompt_slice
+        return get_prompt_slice(phase) or ""
+    except Exception:
+        return ""
+
+
+def _load_principal_guidance_legacy(phase: str) -> str:
+    """Load principal guidance from subtype_contracts.py (legacy path)."""
+    try:
+        from subtype_contracts import build_phase_principal_guidance
+        return build_phase_principal_guidance(phase) or ""
+    except Exception:
+        return ""
+
+
+def _get_principal_guidance(phase: str) -> str:
+    """Get principal guidance for a phase, using feature-flagged source."""
+    if USE_BUNDLE_LOADER:
+        return _load_principal_guidance_from_bundle(phase)
+    return _load_principal_guidance_legacy(phase)
+
+
+# Load principal guidance for each phase.
+# Exception-safe: if either source fails, fallback to empty strings (SST2).
+_UNDERSTAND_PRINCIPAL = _get_principal_guidance("UNDERSTAND")
+_OBSERVE_PRINCIPAL = _get_principal_guidance("OBSERVE")
+_ANALYZE_PRINCIPAL = _get_principal_guidance("ANALYZE")
+_DECIDE_PRINCIPAL = _get_principal_guidance("DECIDE")
+_DESIGN_PRINCIPAL = _get_principal_guidance("DESIGN")
+_EXECUTE_PRINCIPAL = _get_principal_guidance("EXECUTE")
+_JUDGE_PRINCIPAL = _get_principal_guidance("JUDGE")
 
 # ── Phase guidance templates ─────────────────────────────────────────────────
 # Each phase has a complete structure template that the gate can validate.
