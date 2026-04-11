@@ -12,6 +12,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
 from bundle_compiler import (
     CompilationError,
     CompilationWarning,
+    CompiledValidator,
     ParseResult,
     ResolvedBundle,
     _parse_bundle,
@@ -19,6 +20,7 @@ from bundle_compiler import (
     _check_completeness,
     _check_consistency,
     _compile_prompts,
+    _compile_validators,
     DEFAULT_BUNDLE_PATH,
 )
 
@@ -1234,3 +1236,255 @@ class TestCheckConsistencyS4:
         for w in warnings:
             assert isinstance(w, CompilationWarning)
             assert w.stage == "S4"
+
+
+# ---------------------------------------------------------------------------
+# S6 — _compile_validators tests
+# ---------------------------------------------------------------------------
+
+def _make_resolved_for_validators() -> ResolvedBundle:
+    """Build a ResolvedBundle with two contracts for S6 testing."""
+    contracts = {
+        "observation.fact_gathering": {
+            "phase": "OBSERVE",
+            "subtype": "observation.fact_gathering",
+            "policy": {
+                "required_fields": ["phase", "evidence_refs"],
+                "required_principals": ["ontology_alignment", "evidence_completeness"],
+                "forbidden_principals": ["minimal_change"],
+                "forbidden_moves": ["do not skip evidence"],
+            },
+            "principals": [
+                {
+                    "name": "ontology_alignment",
+                    "applies_to": ["observation.fact_gathering"],
+                    "inference_rule_exists": False,
+                    "fake_check_eligible": False,
+                    "semantic_checks": [],
+                    "required_evidence_fields": ["phase"],
+                },
+                {
+                    "name": "evidence_completeness",
+                    "applies_to": ["observation.fact_gathering"],
+                    "inference_rule_exists": False,
+                    "fake_check_eligible": False,
+                    "semantic_checks": ["check_evidence_count"],
+                    "required_evidence_fields": ["evidence_refs"],
+                },
+            ],
+        },
+        "analysis.root_cause": {
+            "phase": "ANALYZE",
+            "subtype": "analysis.root_cause",
+            "policy": {
+                "required_fields": ["root_cause"],
+                "required_principals": ["causal_grounding", "ontology_alignment"],
+                "forbidden_principals": [],
+                "forbidden_moves": [],
+            },
+            "principals": [
+                {
+                    "name": "causal_grounding",
+                    "applies_to": ["analysis.root_cause"],
+                    "inference_rule_exists": True,
+                    "fake_check_eligible": True,
+                    "semantic_checks": ["check_evidence_linkage"],
+                    "required_evidence_fields": ["evidence_refs", "root_cause"],
+                },
+                {
+                    "name": "ontology_alignment",
+                    "applies_to": ["analysis.root_cause"],
+                    "inference_rule_exists": False,
+                    "fake_check_eligible": False,
+                    "semantic_checks": [],
+                    "required_evidence_fields": [],
+                },
+            ],
+        },
+    }
+    return ResolvedBundle(
+        raw={},
+        phase_to_subtype={"OBSERVE": "observation.fact_gathering", "ANALYZE": "analysis.root_cause"},
+        subtype_to_contract=contracts,
+        schema_registry={},
+        principal_registry={
+            "ontology_alignment": contracts["observation.fact_gathering"]["principals"][0],
+            "evidence_completeness": contracts["observation.fact_gathering"]["principals"][1],
+            "causal_grounding": contracts["analysis.root_cause"]["principals"][0],
+        },
+        phases_with_contracts=frozenset({"OBSERVE", "ANALYZE"}),
+        phases_without_contracts=frozenset({"UNDERSTAND"}),
+    )
+
+
+class TestCompileValidatorsS6:
+    """Tests for S6 — _compile_validators."""
+
+    def test_basic_compilation_returns_dict_keyed_by_phase(self):
+        resolved = _make_resolved_for_validators()
+        validators = _compile_validators(resolved)
+        assert isinstance(validators, dict)
+        assert "OBSERVE" in validators
+        assert "ANALYZE" in validators
+
+    def test_understand_not_in_result(self):
+        """Phases without contracts (UNDERSTAND) should not appear in result."""
+        resolved = _make_resolved_for_validators()
+        validators = _compile_validators(resolved)
+        assert "UNDERSTAND" not in validators
+
+    def test_compiled_validator_is_frozen_dataclass(self):
+        """CompiledValidator must be a frozen dataclass — assigning a field raises."""
+        resolved = _make_resolved_for_validators()
+        validators = _compile_validators(resolved)
+        v = validators["OBSERVE"]
+        assert isinstance(v, CompiledValidator)
+        from dataclasses import FrozenInstanceError
+        with pytest.raises(FrozenInstanceError):
+            v.phase = "MUTATED"  # type: ignore[misc]
+
+    def test_phase_and_subtype_fields(self):
+        resolved = _make_resolved_for_validators()
+        validators = _compile_validators(resolved)
+        assert validators["ANALYZE"].phase == "ANALYZE"
+        assert validators["ANALYZE"].subtype == "analysis.root_cause"
+        assert validators["OBSERVE"].phase == "OBSERVE"
+        assert validators["OBSERVE"].subtype == "observation.fact_gathering"
+
+    def test_required_fields_tuple(self):
+        resolved = _make_resolved_for_validators()
+        validators = _compile_validators(resolved)
+        v = validators["OBSERVE"]
+        assert isinstance(v.required_fields, tuple)
+        assert set(v.required_fields) == {"phase", "evidence_refs"}
+
+    def test_required_principals_tuple(self):
+        resolved = _make_resolved_for_validators()
+        validators = _compile_validators(resolved)
+        v = validators["OBSERVE"]
+        assert isinstance(v.required_principals, tuple)
+        assert set(v.required_principals) == {"ontology_alignment", "evidence_completeness"}
+
+    def test_forbidden_principals_tuple(self):
+        resolved = _make_resolved_for_validators()
+        validators = _compile_validators(resolved)
+        v = validators["OBSERVE"]
+        assert isinstance(v.forbidden_principals, tuple)
+        assert "minimal_change" in v.forbidden_principals
+
+    def test_forbidden_moves_tuple(self):
+        resolved = _make_resolved_for_validators()
+        validators = _compile_validators(resolved)
+        v = validators["OBSERVE"]
+        assert isinstance(v.forbidden_moves, tuple)
+        assert "do not skip evidence" in v.forbidden_moves
+
+    def test_inference_eligible_frozenset(self):
+        """Only principals with inference_rule_exists=True appear in inference_eligible."""
+        resolved = _make_resolved_for_validators()
+        validators = _compile_validators(resolved)
+        # ANALYZE has causal_grounding(inference=True), ontology_alignment(inference=False)
+        analyze_v = validators["ANALYZE"]
+        assert isinstance(analyze_v.inference_eligible, frozenset)
+        assert "causal_grounding" in analyze_v.inference_eligible
+        assert "ontology_alignment" not in analyze_v.inference_eligible
+
+    def test_fake_check_eligible_frozenset(self):
+        """Only principals with fake_check_eligible=True appear in fake_check_eligible."""
+        resolved = _make_resolved_for_validators()
+        validators = _compile_validators(resolved)
+        analyze_v = validators["ANALYZE"]
+        assert isinstance(analyze_v.fake_check_eligible, frozenset)
+        assert "causal_grounding" in analyze_v.fake_check_eligible
+        assert "ontology_alignment" not in analyze_v.fake_check_eligible
+
+    def test_inference_eligible_empty_when_no_rules(self):
+        """OBSERVE contract has no principal with inference_rule_exists=True."""
+        resolved = _make_resolved_for_validators()
+        validators = _compile_validators(resolved)
+        observe_v = validators["OBSERVE"]
+        assert len(observe_v.inference_eligible) == 0
+
+    def test_fake_check_eligible_empty_when_none(self):
+        """OBSERVE contract has no principal with fake_check_eligible=True."""
+        resolved = _make_resolved_for_validators()
+        validators = _compile_validators(resolved)
+        observe_v = validators["OBSERVE"]
+        assert len(observe_v.fake_check_eligible) == 0
+
+    def test_semantic_checks_dict(self):
+        """semantic_checks is a dict[str, tuple[str, ...]]."""
+        resolved = _make_resolved_for_validators()
+        validators = _compile_validators(resolved)
+        v = validators["OBSERVE"]
+        assert isinstance(v.semantic_checks, dict)
+        # ontology_alignment has no semantic_checks
+        assert v.semantic_checks["ontology_alignment"] == ()
+        # evidence_completeness has one
+        assert v.semantic_checks["evidence_completeness"] == ("check_evidence_count",)
+
+    def test_requires_fields_per_principal_dict(self):
+        """requires_fields_per_principal is a dict[str, tuple[str, ...]]."""
+        resolved = _make_resolved_for_validators()
+        validators = _compile_validators(resolved)
+        v = validators["ANALYZE"]
+        assert isinstance(v.requires_fields_per_principal, dict)
+        assert set(v.requires_fields_per_principal["causal_grounding"]) == {"evidence_refs", "root_cause"}
+        assert v.requires_fields_per_principal["ontology_alignment"] == ()
+
+    def test_empty_contracts_returns_empty_dict(self):
+        """No contracts -> empty dict returned."""
+        resolved = ResolvedBundle(
+            raw={},
+            phase_to_subtype={},
+            subtype_to_contract={},
+            schema_registry={},
+            principal_registry={},
+            phases_with_contracts=frozenset(),
+            phases_without_contracts=frozenset({"UNDERSTAND"}),
+        )
+        validators = _compile_validators(resolved)
+        assert validators == {}
+
+    def test_phase_uppercased(self):
+        """Phase is uppercased from contract."""
+        contract = {
+            "phase": "execute",  # lowercase in contract
+            "subtype": "execution.code_patch",
+            "policy": {"required_fields": [], "required_principals": [], "forbidden_principals": [], "forbidden_moves": []},
+            "principals": [],
+        }
+        resolved = ResolvedBundle(
+            raw={},
+            phase_to_subtype={"EXECUTE": "execution.code_patch"},
+            subtype_to_contract={"execution.code_patch": contract},
+            schema_registry={},
+            principal_registry={},
+            phases_with_contracts=frozenset({"EXECUTE"}),
+            phases_without_contracts=frozenset(),
+        )
+        validators = _compile_validators(resolved)
+        assert "EXECUTE" in validators
+        assert validators["EXECUTE"].phase == "EXECUTE"
+
+    def test_real_bundle(self):
+        """Real bundle.json: 6 validators (OBSERVE, ANALYZE, DECIDE, DESIGN, EXECUTE, JUDGE)."""
+        bundle_path = os.path.join(os.path.dirname(__file__), "..", "bundle.json")
+        if not os.path.exists(bundle_path):
+            pytest.skip("bundle.json not found")
+        parsed = _parse_bundle(bundle_path)
+        resolved = _resolve_refs(parsed)
+        validators = _compile_validators(resolved)
+        # 6 phases with contracts
+        assert len(validators) == 6
+        # UNDERSTAND not present
+        assert "UNDERSTAND" not in validators
+        # ANALYZE subtype is analysis.root_cause
+        assert validators["ANALYZE"].subtype == "analysis.root_cause"
+        # All values are CompiledValidator
+        for v in validators.values():
+            assert isinstance(v, CompiledValidator)
+            assert isinstance(v.inference_eligible, frozenset)
+            assert isinstance(v.fake_check_eligible, frozenset)
+            assert isinstance(v.required_principals, tuple)
+            assert isinstance(v.forbidden_principals, tuple)

@@ -673,3 +673,121 @@ def _compile_prompts(resolved: ResolvedBundle) -> list[CompilationWarning]:
                 ))
 
     return warnings
+
+
+# ---------------------------------------------------------------------------
+# S6 — COMPILE_VALIDATORS
+# ---------------------------------------------------------------------------
+
+def _compile_validators(resolved: ResolvedBundle) -> dict[str, CompiledValidator]:
+    """S6: Build one frozen CompiledValidator per phase from resolved bundle contracts.
+
+    Returns dict keyed by phase (e.g. "ANALYZE", "EXECUTE").
+    Phases without contracts (e.g. "UNDERSTAND") are not included.
+    """
+    validators: dict[str, CompiledValidator] = {}
+
+    for subtype, contract in resolved.subtype_to_contract.items():
+        phase = contract.get("phase", "").upper()
+        if not phase:
+            continue
+
+        policy = contract.get("policy", {})
+        principals_list = contract.get("principals", [])
+
+        # Build lifecycle frozensets from per-principal flags
+        inference_eligible: frozenset[str] = frozenset(
+            p["name"] for p in principals_list
+            if isinstance(p, dict) and p.get("inference_rule_exists")
+        )
+        fake_check_eligible: frozenset[str] = frozenset(
+            p["name"] for p in principals_list
+            if isinstance(p, dict) and p.get("fake_check_eligible")
+        )
+
+        # Build per-principal requirement maps
+        semantic_checks: dict[str, tuple[str, ...]] = {}
+        requires_fields_per_principal: dict[str, tuple[str, ...]] = {}
+        for p in principals_list:
+            if not isinstance(p, dict):
+                continue
+            name = p.get("name", "")
+            if not name:
+                continue
+            semantic_checks[name] = tuple(p.get("semantic_checks", []))
+            requires_fields_per_principal[name] = tuple(p.get("required_evidence_fields", []))
+
+        validators[phase] = CompiledValidator(
+            phase=phase,
+            subtype=subtype,
+            required_fields=tuple(policy.get("required_fields", [])),
+            required_principals=tuple(policy.get("required_principals", [])),
+            forbidden_principals=tuple(policy.get("forbidden_principals", [])),
+            forbidden_moves=tuple(policy.get("forbidden_moves", [])),
+            semantic_checks=semantic_checks,
+            requires_fields_per_principal=requires_fields_per_principal,
+            inference_eligible=inference_eligible,
+            fake_check_eligible=fake_check_eligible,
+        )
+
+    return validators
+
+
+# ---------------------------------------------------------------------------
+# S7 — COMPILE_ROUTES
+# ---------------------------------------------------------------------------
+
+def _compile_retry_router(resolved: ResolvedBundle) -> CompiledRetryRouter:
+    """S7: Pre-compile the failure→route lookup table from routing.principal_routes
+    and repair_templates.
+
+    repair_template is resolved at compile time — missing repair template for a
+    required principal is caught here, not at runtime.
+    """
+    routes: dict[tuple[str, str], CompiledRoute] = {}
+    default_routes: dict[str, CompiledRoute] = {}
+
+    for subtype, contract in resolved.subtype_to_contract.items():
+        phase = contract.get("phase", "").upper()
+        routing_raw = contract.get("routing", {}).get("principal_routes", {})
+        repair_templates = contract.get("repair_templates", {})
+
+        if not isinstance(routing_raw, dict):
+            routing_raw = {}
+        if not isinstance(repair_templates, dict):
+            repair_templates = {}
+
+        for principal, route_data in routing_raw.items():
+            # Pre-resolve repair template at compile time
+            repair = repair_templates.get(principal, "")
+            routes[(phase, principal)] = CompiledRoute(
+                failure_principal=principal,
+                next_phase=route_data.get("next_phase", ""),
+                strategy=route_data.get("strategy", ""),
+                repair_template=repair,
+            )
+
+        # Default route: catch-all if no specific principal route matches
+        default_raw = contract.get("routing", {}).get("default_route", {})
+        if default_raw and isinstance(default_raw, dict):
+            default_routes[phase] = CompiledRoute(
+                failure_principal="__default__",
+                next_phase=default_raw.get("next_phase", ""),
+                strategy=default_raw.get("strategy", ""),
+                repair_template=default_raw.get("repair_template", ""),
+            )
+
+    return CompiledRetryRouter(routes=routes, default_routes=default_routes)
+
+
+def get_route(
+    router: CompiledRetryRouter,
+    phase: str,
+    principal: str,
+) -> "CompiledRoute | None":
+    """Look up a compiled route by (phase, principal).
+
+    Falls back to the default route for the phase if no specific route exists.
+    Returns None if neither a specific nor a default route is found.
+    """
+    return router.routes.get((phase, principal)) or router.default_routes.get(phase)
