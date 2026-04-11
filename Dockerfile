@@ -28,6 +28,17 @@ RUN pip install --no-cache-dir \
     "boto3==1.42.1" \
     "pydantic==2.12.5"
 
+# p224: Install JinguModel into mini-swe-agent's model directory + register in mapping
+COPY mini-swe-agent/jingu_model.py /usr/local/lib/python3.12/site-packages/minisweagent/models/jingu_model.py
+RUN python3 -c "\
+import pathlib; \
+p = pathlib.Path('/usr/local/lib/python3.12/site-packages/minisweagent/models/__init__.py'); \
+t = p.read_text(); \
+old = '\"litellm\": \"minisweagent.models.litellm_model.LitellmModel\"'; \
+new = '\"jingu\": \"minisweagent.models.jingu_model.JinguModel\",\n    \"litellm\": \"minisweagent.models.litellm_model.LitellmModel\"'; \
+p.write_text(t.replace(old, new)); \
+print('JinguModel registered in _MODEL_CLASS_MAPPING')"
+
 # Copy jingu-swebench.yaml into the installed mini-swe-agent config directory.
 # mini-swe-agent 2.1.0 ships swebench.yaml; we add our fork alongside it.
 # This overrides ENVIRONMENT_NOT_AGENT_WORK violations from swebench.yaml defaults.
@@ -83,6 +94,7 @@ COPY scripts/run_with_jingu_gate.py \
      scripts/phase_validator.py \
      scripts/phase_schemas.py \
      scripts/cognition_prompts.py \
+     scripts/extraction_schemas.py \
      /app/scripts/
 # B1-CP: reasoning control plane Python module
 COPY scripts/control/ /app/scripts/control/

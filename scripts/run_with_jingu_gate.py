@@ -829,10 +829,35 @@ def _step_cp_update_and_verdict(
                 _pr = _prev_pr
                 _pr_source = "cache"
             else:
-                # No cached record — extract with target_phase enforced.
-                # p221: try structured output first, fall back to regex extraction.
-                _structured_parsed = _try_parse_structured_output(agent_self.messages)
+                # No cached record — extract phase data.
+                # p224: Primary path — structured extraction via JinguModel.
+                # Makes an independent LLM call with grammar-constrained sampling
+                # (response_format json_schema). Schema guarantees valid JSON.
+                # Fallback: regex extraction if structured extract fails.
+                _accumulated = state._phase_accumulated_text.get(_eval_phase, "")
+                _extract_text = _accumulated if _accumulated.strip() else latest_assistant_text
+                _structured_parsed = None
+
+                # Try structured extraction via JinguModel
+                try:
+                    from extraction_schemas import get_extraction_schema
+                    _extraction_schema = get_extraction_schema(_eval_phase)
+                    if _extraction_schema is not None and hasattr(agent_self, "model"):
+                        _model = agent_self.model
+                        if hasattr(_model, "structured_extract"):
+                            _structured_parsed = _model.structured_extract(
+                                accumulated_text=_extract_text,
+                                phase=_eval_phase,
+                                schema=_extraction_schema,
+                            )
+                except Exception as _se_exc:
+                    print(
+                        f"    [phase_record] structured_extract error (non-fatal): {_se_exc}",
+                        flush=True,
+                    )
+
                 if _structured_parsed is not None:
+                    # Build PhaseRecord from structured output — zero regex
                     _pr = extract_phase_record_from_structured(
                         _structured_parsed, str(_old_phase)
                     )
@@ -840,41 +865,30 @@ def _step_cp_update_and_verdict(
                     _pr_source = "structured"
                     _declared_phase = (_structured_parsed.get("phase") or "").upper()
                     _foreign = bool(_declared_phase and _declared_phase != _eval_phase)
+                    _acc_len = len(_accumulated) if _accumulated else 0
                     print(
                         f"    [phase_record] extraction_method=structured"
-                        f" structured_output_used=true",
+                        f" accumulated_chars={_acc_len}"
+                        f" fields={list(_structured_parsed.keys())}",
                         flush=True,
                     )
                 else:
-                    # p221: use accumulated text from all steps in this phase,
-                    # not just the latest single assistant message. This gives
-                    # the regex extractor much more material to find code refs,
-                    # root cause analysis, causal chains, etc.
-                    _accumulated = state._phase_accumulated_text.get(_eval_phase, "")
-                    _extract_text = _accumulated if _accumulated.strip() else latest_assistant_text
+                    # Fallback: regex extraction from accumulated text
                     _pr, _declared_phase, _foreign = _extract_for_phase(
                         _extract_text, str(_old_phase)
                     )
                     state.phase_records.append(_pr)
                     _pr_source = "extracted"
-                    # p221: log accumulated text stats for observability
                     _acc_len = len(_accumulated) if _accumulated else 0
                     _has_refs = bool(getattr(_pr, "evidence_refs", None))
                     _has_rc = bool((getattr(_pr, "root_cause", "") or "").strip())
                     print(
-                        f"    [phase_record] extraction_method=regex"
+                        f"    [phase_record] extraction_method=regex_fallback"
                         f" accumulated_chars={_acc_len}"
                         f" has_root_cause={_has_rc}"
                         f" has_evidence_refs={_has_refs}",
                         flush=True,
                     )
-                    if STRUCTURED_OUTPUT_ENABLED:
-                        print(
-                            f"    [phase_record] extraction_method=regex"
-                            f" structured_output_used=false"
-                            f" (structured_output_enabled but no tool_call found)",
-                            flush=True,
-                        )
                 if _foreign:
                     _pr_foreign_phase = _declared_phase
                     # Soft signal: agent declared a foreign phase in this message.
@@ -3514,7 +3528,7 @@ MODEL = __import__("os").environ.get("JINGU_MODEL", "bedrock/global.anthropic.cl
 
 BASE_CONFIG = {
     "model": {
-        "model_class": "litellm",
+        "model_class": "jingu",
         "model_name": MODEL,
         "model_kwargs": {
             "drop_params": True,
