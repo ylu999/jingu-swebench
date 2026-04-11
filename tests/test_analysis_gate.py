@@ -493,3 +493,60 @@ class TestAnalysisGateRejection:
         if not verdict.passed and verdict.rejection:
             # Should have failure count matching failed_rules
             assert len(verdict.rejection.failures) == len(verdict.failed_rules)
+
+
+# ── Tests: structured_output=True mode (p221) ────────────────────────────────
+
+class TestStructuredOutputMode:
+    """When structured_output=True, schema guarantees structural correctness.
+    Gate skips alternative_hypothesis enforcement (schema enforces presence),
+    keeps code_grounding and causal_chain as semantic checks."""
+
+    def test_good_analysis_still_passes(self):
+        """Well-formed analysis passes in structured mode too."""
+        pr = _make_good_pr()
+        verdict = evaluate_analysis(pr, structured_output=True)
+        assert verdict.passed is True
+        assert verdict.failed_rules == []
+
+    def test_single_hypothesis_not_blocked_in_structured_mode(self):
+        """Single hypothesis analysis is NOT blocked when structured_output=True.
+        Schema enforces alternative_hypotheses presence (minItems:1),
+        so the gate downgrades this to a quality signal."""
+        pr = _make_single_hypothesis_pr()
+        verdict = evaluate_analysis(pr, structured_output=True)
+        # alternative_hypothesis should NOT be in failed_rules
+        assert "alternative_hypothesis" not in verdict.failed_rules
+        # Score is still computed for telemetry
+        assert "alternative_hypothesis" in verdict.scores
+        # Quality note should be present
+        assert "alternative_hypothesis_note" in verdict.scores
+
+    def test_code_grounding_still_enforced_in_structured_mode(self):
+        """Code grounding is a semantic check — still enforced in structured mode."""
+        pr = _make_no_code_refs_pr()
+        verdict = evaluate_analysis(pr, structured_output=True)
+        assert "code_grounding" in verdict.failed_rules
+
+    def test_causal_chain_still_enforced_in_structured_mode(self):
+        """Causal chain is a semantic check — still enforced in structured mode."""
+        pr = _make_no_causal_chain_pr()
+        verdict = evaluate_analysis(pr, structured_output=True)
+        assert "causal_chain" in verdict.failed_rules
+
+    def test_empty_pr_fails_two_not_three_in_structured_mode(self):
+        """Empty PR fails code_grounding + causal_chain but NOT alternative_hypothesis."""
+        pr = _make_empty_pr()
+        verdict = evaluate_analysis(pr, structured_output=True)
+        assert verdict.passed is False
+        assert "code_grounding" in verdict.failed_rules
+        assert "causal_chain" in verdict.failed_rules
+        assert "alternative_hypothesis" not in verdict.failed_rules
+        assert len(verdict.failed_rules) == 2
+
+    def test_structured_mode_false_is_default(self):
+        """Default behavior (structured_output=False) keeps all 3 rules enforced."""
+        pr = _make_empty_pr()
+        verdict = evaluate_analysis(pr, structured_output=False)
+        assert len(verdict.failed_rules) == 3
+        assert "alternative_hypothesis" in verdict.failed_rules
