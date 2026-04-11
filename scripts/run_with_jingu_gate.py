@@ -341,6 +341,7 @@ class StepMonitorState:
         self.phase_records: list = []              # list[PhaseRecord]
         # p211: analysis gate reject counter — escape hatch after N rejects
         self.analysis_gate_rejects: int = 0
+        self.design_gate_rejects: int = 0
         # P16: RETRYABLE loop breaker — counts consecutive identical (phase, reason) RETRYABLE.
         # Same phase + same reason N times in a row → ESCALATE_CONTRACT_BUG (VerdictStop).
         # This is a safety fuse, not a contract substitute. Prevents infinite gate loops.
@@ -1040,6 +1041,85 @@ def _step_cp_update_and_verdict(
             except Exception as _ag_exc:
                 print(f"    [analysis_gate] error (non-fatal): {_ag_exc}", flush=True)
 
+        # Design gate — enforce design quality before EXECUTE advance
+        _design_gate_rejected = False
+        _design_gate_force_passed = False
+        _DG_MAX_REJECTS = 2
+        if _eval_phase == "DESIGN" and _pr is not None and not _cognition_rejected:
+            try:
+                from design_gate import evaluate_design as _eval_design
+                _design_verdict = _eval_design(_pr)
+                _dg_reject_count = getattr(state, 'design_gate_rejects', 0)
+                print(
+                    f"    [design_gate] passed={_design_verdict.passed}"
+                    f" failed_rules={_design_verdict.failed_rules}"
+                    f" scores={_design_verdict.scores}"
+                    f" rejects_so_far={_dg_reject_count}",
+                    flush=True,
+                )
+                if not _design_verdict.passed and _dg_reject_count >= _DG_MAX_REJECTS:
+                    print(f"    [design_gate] FORCE_PASS — max_rejects={_DG_MAX_REJECTS} reached, allowing advance", flush=True)
+                    _design_gate_force_passed = True
+                elif not _design_verdict.passed:
+                    _design_gate_rejected = True
+                    import dataclasses as _dc_dg
+                    if cp_state_holder is not None:
+                        cp_state_holder[0] = _dc_dg.replace(
+                            cp_state_holder[0], phase="DESIGN", no_progress_steps=0
+                        )
+                        _cp_s = cp_state_holder[0]
+                    else:
+                        state.cp_state = _dc_dg.replace(
+                            state.cp_state, phase="DESIGN", no_progress_steps=0
+                        )
+                        _cp_s = state.cp_state
+                    # SDG structured repair or fallback
+                    _dg_sdg_repair_used = False
+                    if _SDG_ENABLED and getattr(_design_verdict, "rejection", None):
+                        try:
+                            _dg_sdg_content = _build_sdg_repair(_design_verdict.rejection)
+                            _dg_sdg_content += "\n\nFix only the failing fields. Do not rewrite fields already OK.\nStay in DESIGN phase."
+                            agent_self.messages.append({
+                                "role": "user",
+                                "content": _dg_sdg_content,
+                            })
+                            _dg_sdg_repair_used = True
+                            print(f"    [design_gate] sdg_repair_used=true failures={len(_design_verdict.rejection.failures)}", flush=True)
+                        except Exception as _dg_sdg_exc:
+                            print(f"    [design_gate] sdg_repair error (fallback): {_dg_sdg_exc}", flush=True)
+
+                    if not _dg_sdg_repair_used:
+                        _dg_scores = _design_verdict.scores
+                        _dg_pass = 0.5
+                        _dg_field_status = (
+                            f"- INVARIANT_PRESERVATION: {'OK' if _dg_scores.get('invariant_preservation', 0) >= _dg_pass else 'MISSING'}"
+                            f" (score={_dg_scores.get('invariant_preservation', 0):.1f})\n"
+                            f"- DESIGN_COMPARISON: {'OK' if _dg_scores.get('design_comparison', 0) >= _dg_pass else 'MISSING'}"
+                            f" (score={_dg_scores.get('design_comparison', 0):.1f})\n"
+                            f"- CONSTRAINT_ENCODING: {'OK' if _dg_scores.get('constraint_encoding', 0) >= _dg_pass else 'MISSING'}"
+                            f" (score={_dg_scores.get('constraint_encoding', 0):.1f})"
+                        )
+                        agent_self.messages.append({
+                            "role": "user",
+                            "content": (
+                                f"[design_gate REJECT]\n"
+                                f"DESIGN gate result:\n"
+                                f"{_dg_field_status}\n\n"
+                                f"Fix only the MISSING fields. Do not rewrite fields already OK.\n"
+                                f"Stay in DESIGN phase."
+                            ),
+                        })
+                    state.phase_records = [
+                        r for r in state.phase_records
+                        if r.phase.upper() != _eval_phase
+                    ]
+                    if not hasattr(state, 'design_gate_rejects'):
+                        state.design_gate_rejects = 0
+                    state.design_gate_rejects += 1
+                    print(f"    [design_gate] REJECT ({state.design_gate_rejects}/{_DG_MAX_REJECTS}) — redirecting to DESIGN", flush=True)
+            except Exception as _dg_exc:
+                print(f"    [design_gate] error (non-fatal): {_dg_exc}", flush=True)
+
         try:
             if _cognition_rejected:
                 raise RuntimeError("cognition_validator rejected, skipping principal gate")
@@ -1047,6 +1127,10 @@ def _step_cp_update_and_verdict(
                 raise RuntimeError("analysis_gate rejected, skipping principal gate")
             if _analysis_gate_force_passed:
                 raise RuntimeError("analysis_gate FORCE_PASS, skipping principal gate to allow advance")
+            if _design_gate_rejected:
+                raise RuntimeError("design_gate rejected, skipping principal gate")
+            if _design_gate_force_passed:
+                raise RuntimeError("design_gate FORCE_PASS, skipping principal gate to allow advance")
             if _pr is None:
                 raise RuntimeError("phase_record unavailable, skipping principal gate")
             from principal_gate import (
