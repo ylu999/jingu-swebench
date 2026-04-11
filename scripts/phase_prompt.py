@@ -80,7 +80,13 @@ _ANALYZE_GUIDANCE = (
     "ROOT_CAUSE is MANDATORY. If you do not produce a ROOT_CAUSE: field with a specific "
     "file:line location, this analysis step is incomplete and you will be redirected back to ANALYZE.\n\n"
     "Rules: ROOT_CAUSE must be specific. EVIDENCE must reference real files. "
-    "CAUSAL_CHAIN must connect evidence → root cause. Do NOT propose fixes here.\n"
+    "CAUSAL_CHAIN must connect evidence → root cause. Do NOT propose fixes here.\n\n"
+    "Required output structure (will be checked before advancing to EXECUTE):\n"
+    "- ROOT_CAUSE: one sentence, grounded in specific file/function\n"
+    "- CAUSAL_CHAIN: step-by-step from failing test -> condition -> code -> bug\n"
+    "- ALTERNATIVES: at least one alternative hypothesis + why rejected\n\n"
+    "If any field is missing, you will be returned to ANALYZE with specific feedback.\n"
+    "Fix only the missing fields. Do not rewrite fields already present.\n"
     + _ANALYZE_PRINCIPAL
 )
 

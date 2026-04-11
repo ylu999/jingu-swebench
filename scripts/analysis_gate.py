@@ -25,6 +25,7 @@ class AnalysisVerdict:
     failed_rules: list  # e.g. ["code_grounding", "causal_chain"]
     reasons: list       # human-readable rejection reasons
     scores: dict        # per-rule scores for telemetry
+    extracted: dict = field(default_factory=dict)  # p214: field status for repair feedback
 
 
 # ── Code reference detection (structural) ────────────────────────────────────
@@ -246,4 +247,8 @@ def evaluate_analysis(pr: PhaseRecord) -> AnalysisVerdict:
         failed_rules=failed,
         reasons=reasons,
         scores=scores,
+        extracted={
+            "root_cause": pr.root_cause[:100] if pr.root_cause else "",
+            "causal_chain": pr.causal_chain[:100] if pr.causal_chain else "",
+        },
     )

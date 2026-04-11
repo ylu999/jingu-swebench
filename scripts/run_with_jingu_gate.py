@@ -842,14 +842,25 @@ def _step_cp_update_and_verdict(
                             state.cp_state, phase="ANALYZE", no_progress_steps=0
                         )
                         _cp_s = state.cp_state
-                    # Inject feedback to agent with specific rejection reasons
-                    _ag_reasons = "; ".join(_analysis_verdict.reasons)
+                    # Inject field-level contract feedback (p214)
+                    _ag_scores = _analysis_verdict.scores
+                    _ag_pass = 0.5  # must match analysis_gate._THRESHOLD
+                    _ag_field_status = (
+                        f"- ROOT_CAUSE: {'OK' if _ag_scores.get('code_grounding', 0) >= _ag_pass else 'MISSING'}"
+                        f" (score={_ag_scores.get('code_grounding', 0):.1f})\n"
+                        f"- CAUSAL_CHAIN: {'OK' if _ag_scores.get('causal_chain', 0) >= _ag_pass else 'MISSING'}"
+                        f" (score={_ag_scores.get('causal_chain', 0):.1f})\n"
+                        f"- ALTERNATIVES: {'OK' if _ag_scores.get('alternative_hypothesis', 0) >= _ag_pass else 'MISSING'}"
+                        f" (score={_ag_scores.get('alternative_hypothesis', 0):.1f})"
+                    )
                     agent_self.messages.append({
                         "role": "user",
                         "content": (
-                            f"[analysis_gate REJECT: {', '.join(_analysis_verdict.failed_rules)}] "
-                            f"Your analysis needs improvement before proceeding to execution. "
-                            f"Address the following: {_ag_reasons}"
+                            f"[analysis_gate REJECT]\n"
+                            f"ANALYZE gate result:\n"
+                            f"{_ag_field_status}\n\n"
+                            f"Fix only the MISSING fields. Do not rewrite fields already OK.\n"
+                            f"Stay in ANALYZE phase."
                         ),
                     })
                     # Invalidate cached phase record so next step re-extracts
