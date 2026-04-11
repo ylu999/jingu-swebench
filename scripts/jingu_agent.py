@@ -190,11 +190,117 @@ class JinguAgent:
 
     # -- step-level hooks (called by JinguProgressTrackingAgent.step) --------
 
-    def on_step_start(self, agent_self: Any, step_n: int) -> None:  # noqa: ARG002
-        """Called before each agent step. Override to add pre-step governance."""
+    def on_step_start(self, agent_self: Any, step_n: int) -> None:
+        """Called before each agent step.
+
+        Runs observation (Section 1) and detects container readiness.
+        Stores observation results on self for use by on_step_end().
+        """
+        from step_sections import _step_observe
+
+        # Wire monitor state onto agent instance for _step_observe dedup
+        if self._state is not None:
+            agent_self._jingu_monitor_state = self._state
+
+        text, snippet, env_error = _step_observe(
+            agent_self, step_n=step_n, mode=self._mode
+        )
+        # Stash for on_step_end
+        self._last_observe_result = (text, snippet, env_error)
+
+        # Accumulate text per phase for PhaseRecord extraction (p221)
+        if self._state is not None and text:
+            _cp = (
+                self._cp_state_holder[0]
+                if self._cp_state_holder
+                else self._state.cp_state
+            )
+            _phase = str(_cp.phase).upper()
+            self._state._phase_accumulated_text[_phase] = (
+                self._state._phase_accumulated_text.get(_phase, "") + "\n" + text
+            )
+
+        # Container readiness detection
+        cid = getattr(getattr(agent_self, "env", None), "container_id", None)
+        if cid and self._state is not None and self._state.container_id is None:
+            self.on_container_ready(cid)
 
     def on_step_end(self, agent_self: Any, step_n: int) -> StepDecision:  # noqa: ARG002
-        """Called after each agent step. Return a StepDecision to control flow."""
+        """Called after each agent step.
+
+        Runs sections 2-6 (verify, cp_update, structure, phase_inject, mat_gate).
+        Returns a StepDecision to control agent flow.
+        """
+        from step_sections import (
+            _step_verify_if_needed,
+            _step_cp_update_and_verdict,
+            _step_check_structure,
+            _step_inject_phase,
+            _check_materialization_gate,
+        )
+        from step_monitor_state import StopExecution
+
+        # Retrieve observation results from on_step_start
+        text, snippet, env_error = getattr(
+            self, "_last_observe_result", ("", "", False)
+        )
+
+        if self._state is None:
+            return StepDecision(action="continue")
+
+        cp_holder = self._cp_state_holder if self._cp_state_holder else None
+
+        # Section 2: verify
+        patch_non_empty = _step_verify_if_needed(
+            agent_self, state=self._state, verify_debounce_s=5.0
+        )
+
+        # Section 3: cp update + verdict
+        try:
+            _step_cp_update_and_verdict(
+                agent_self,
+                state=self._state,
+                cp_state_holder=cp_holder,
+                env_error_detected=env_error,
+                step_patch_non_empty=patch_non_empty,
+                latest_assistant_text=text,
+            )
+        except StopExecution:
+            return StepDecision(
+                action="stop",
+                reason=getattr(self._state.early_stop_verdict, "reason", "no_signal"),
+            )
+
+        # Section 5: phase inject (before structure check, matching _monitored_step order)
+        _step_inject_phase(agent_self, cp_state_holder=cp_holder, state=self._state)
+
+        # Section 4: structure check
+        _step_check_structure(
+            agent_self,
+            cp_state_holder=cp_holder,
+            state=self._state,
+            latest_assistant_text=text,
+        )
+
+        # Section 6: materialization gate
+        _check_materialization_gate(
+            agent_self,
+            cp_state_holder=cp_holder,
+            state=self._state,
+            patch_non_empty=patch_non_empty,
+        )
+
+        # Check for early stop or redirect from state
+        if self._state.early_stop_verdict:
+            return StepDecision(
+                action="stop",
+                reason=getattr(self._state.early_stop_verdict, "reason", "no_signal"),
+            )
+        if self._state.pending_redirect_hint:
+            hint = self._state.pending_redirect_hint
+            self._state.pending_redirect_hint = ""
+            return StepDecision(action="redirect", message=hint)
+
         return StepDecision(action="continue")
 
     # -- attempt-level hooks ------------------------------------------------
