@@ -1,0 +1,1448 @@
+{
+  "version": "1.0.0",
+  "generated_at": "2026-04-11T06:17:18.635Z",
+  "generator_commit": "5f27f26",
+  "capabilities": [
+    "prompt_only",
+    "schema_enforced",
+    "repair_view",
+    "routing_view"
+  ],
+  "phases": [
+    "UNDERSTAND",
+    "OBSERVE",
+    "ANALYZE",
+    "DECIDE",
+    "DESIGN",
+    "EXECUTE",
+    "JUDGE"
+  ],
+  "contracts": {
+    "observation.fact_gathering": {
+      "phase": "OBSERVE",
+      "subtype": "observation.fact_gathering",
+      "compiled_at": "2026-04-11T06:17:18.633Z",
+      "phase_spec": {
+        "name": "OBSERVE",
+        "goal": "Gather evidence from the environment: read files, traces, logs, tests.",
+        "forbidden_moves": [
+          "do not analyze or hypothesize (that is ANALYZE)",
+          "do not propose solutions",
+          "do not write code"
+        ],
+        "allowed_next_phases": [
+          "ANALYZE",
+          "OBSERVE"
+        ],
+        "default_schema": "observation.fact_gathering"
+      },
+      "cognition_spec": {
+        "type": "observation.fact_gathering",
+        "phase": "OBSERVE",
+        "task_shape": "fact_gathering",
+        "success_criteria": [
+          "relevant files identified",
+          "error messages captured",
+          "test output collected"
+        ],
+        "required_evidence_kinds": [
+          "file_reference",
+          "error_output"
+        ],
+        "schema_ref": "observation.fact_gathering"
+      },
+      "principals": [
+        {
+          "name": "ontology_alignment",
+          "applies_to": [
+            "observation.fact_gathering",
+            "analysis.root_cause",
+            "decision.fix_direction",
+            "design.solution_shape",
+            "execution.code_patch",
+            "judge.verification"
+          ],
+          "requires_fields": [
+            "phase",
+            "subtype",
+            "principals"
+          ],
+          "semantic_checks": [
+            "declared_phase_matches_canonical",
+            "declared_subtype_matches_canonical"
+          ],
+          "repair_hint": "Ensure your phase, subtype, and principal declarations use the exact canonical names from the taxonomy.",
+          "inference_rule_exists": false,
+          "fake_check_eligible": false
+        },
+        {
+          "name": "phase_boundary_discipline",
+          "applies_to": [
+            "observation.fact_gathering",
+            "analysis.root_cause",
+            "decision.fix_direction",
+            "design.solution_shape",
+            "execution.code_patch"
+          ],
+          "requires_fields": [
+            "phase",
+            "content"
+          ],
+          "semantic_checks": [
+            "output_stays_within_phase_scope"
+          ],
+          "repair_hint": "Stay within the scope of the current phase. Do not perform actions that belong to a different phase.",
+          "inference_rule_exists": false,
+          "fake_check_eligible": false
+        },
+        {
+          "name": "evidence_completeness",
+          "applies_to": [
+            "observation.fact_gathering"
+          ],
+          "requires_fields": [
+            "evidence_refs"
+          ],
+          "semantic_checks": [
+            "evidence_refs_non_empty",
+            "evidence_covers_claims"
+          ],
+          "repair_hint": "Include sufficient evidence_refs (file:line references) to support your observations.",
+          "inference_rule_exists": false,
+          "fake_check_eligible": false
+        }
+      ],
+      "policy": {
+        "id": "policy:observation.fact_gathering",
+        "phase": "OBSERVE",
+        "subtype": "observation.fact_gathering",
+        "required_fields": [
+          "evidence_refs"
+        ],
+        "forbidden_moves": [
+          "do not analyze or hypothesize (that is ANALYZE)",
+          "do not propose solutions",
+          "do not write code"
+        ],
+        "required_principals": [
+          "ontology_alignment",
+          "phase_boundary_discipline",
+          "evidence_completeness"
+        ],
+        "forbidden_principals": [
+          "action_grounding",
+          "minimal_change"
+        ],
+        "schema_ref": "observation.fact_gathering"
+      },
+      "schema": {
+        "type": "object",
+        "description": "Observation phase output: gathered facts and evidence references",
+        "properties": {
+          "phase": {
+            "type": "string",
+            "description": "Current phase name (UPPER_SNAKE)"
+          },
+          "subtype": {
+            "type": "string",
+            "description": "Current subtype (e.g. analysis.root_cause)"
+          },
+          "principals": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Declared principals for this phase output"
+          },
+          "evidence_refs": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "File:line evidence references"
+          },
+          "claims": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Structured claims made in this phase output"
+          },
+          "observations": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Key observations from the environment"
+          }
+        },
+        "required": [
+          "phase",
+          "subtype",
+          "principals",
+          "evidence_refs",
+          "observations"
+        ]
+      },
+      "prompt": "## Phase: OBSERVE\nGoal: Gather evidence from the environment: read files, traces, logs, tests.\nSubtype: observation.fact_gathering (fact_gathering)\n\n## Required Fields\n- evidence_refs\n\n## Forbidden Moves\n- do not analyze or hypothesize (that is ANALYZE)\n- do not propose solutions\n- do not write code\n\n## Required Principals\nYou MUST declare: ontology_alignment, phase_boundary_discipline, evidence_completeness\n\n### ontology_alignment\nEnsure your phase, subtype, and principal declarations use the exact canonical names from the taxonomy.\n\n### phase_boundary_discipline\nStay within the scope of the current phase. Do not perform actions that belong to a different phase.\n\n### evidence_completeness\nInclude sufficient evidence_refs (file:line references) to support your observations.\n\n## Forbidden Principals\nDo NOT declare: action_grounding, minimal_change\n\n## Success Criteria\n- relevant files identified\n- error messages captured\n- test output collected",
+      "repair_templates": {
+        "ontology_alignment": "[ontology_alignment] violation detected.\nRequirement: Ensure your phase, subtype, and principal declarations use the exact canonical names from the taxonomy.\nRequired fields: phase, subtype, principals\nChecks performed: declared_phase_matches_canonical, declared_subtype_matches_canonical",
+        "phase_boundary_discipline": "[phase_boundary_discipline] violation detected.\nRequirement: Stay within the scope of the current phase. Do not perform actions that belong to a different phase.\nRequired fields: phase, content\nChecks performed: output_stays_within_phase_scope",
+        "evidence_completeness": "[evidence_completeness] violation detected.\nRequirement: Include sufficient evidence_refs (file:line references) to support your observations.\nRequired fields: evidence_refs\nChecks performed: evidence_refs_non_empty, evidence_covers_claims"
+      },
+      "routing": {
+        "principal_routes": {
+          "ontology_alignment": {
+            "next_phase": "OBSERVE",
+            "strategy": "fix declarations to match canonical taxonomy"
+          },
+          "phase_boundary_discipline": {
+            "next_phase": "OBSERVE",
+            "strategy": "stay within the current phase scope"
+          },
+          "evidence_completeness": {
+            "next_phase": "OBSERVE",
+            "strategy": "gather more evidence"
+          }
+        },
+        "default_route": {
+          "next_phase": "OBSERVE",
+          "strategy": "redirect to OBSERVE for repair"
+        }
+      }
+    },
+    "analysis.root_cause": {
+      "phase": "ANALYZE",
+      "subtype": "analysis.root_cause",
+      "compiled_at": "2026-04-11T06:17:18.635Z",
+      "phase_spec": {
+        "name": "ANALYZE",
+        "goal": "Root-cause analysis: connect evidence to a causal hypothesis.",
+        "forbidden_moves": [
+          "do not write code",
+          "do not skip evidence",
+          "do not jump to a fix without causal reasoning"
+        ],
+        "allowed_next_phases": [
+          "DECIDE",
+          "ANALYZE",
+          "OBSERVE"
+        ],
+        "default_schema": "analysis.root_cause"
+      },
+      "cognition_spec": {
+        "type": "analysis.root_cause",
+        "phase": "ANALYZE",
+        "task_shape": "root_cause_analysis",
+        "success_criteria": [
+          "root cause identified with evidence",
+          "causal chain established",
+          "alternative hypotheses considered"
+        ],
+        "required_evidence_kinds": [
+          "file_reference",
+          "causal_chain"
+        ],
+        "schema_ref": "analysis.root_cause"
+      },
+      "principals": [
+        {
+          "name": "ontology_alignment",
+          "applies_to": [
+            "observation.fact_gathering",
+            "analysis.root_cause",
+            "decision.fix_direction",
+            "design.solution_shape",
+            "execution.code_patch",
+            "judge.verification"
+          ],
+          "requires_fields": [
+            "phase",
+            "subtype",
+            "principals"
+          ],
+          "semantic_checks": [
+            "declared_phase_matches_canonical",
+            "declared_subtype_matches_canonical"
+          ],
+          "repair_hint": "Ensure your phase, subtype, and principal declarations use the exact canonical names from the taxonomy.",
+          "inference_rule_exists": false,
+          "fake_check_eligible": false
+        },
+        {
+          "name": "phase_boundary_discipline",
+          "applies_to": [
+            "observation.fact_gathering",
+            "analysis.root_cause",
+            "decision.fix_direction",
+            "design.solution_shape",
+            "execution.code_patch"
+          ],
+          "requires_fields": [
+            "phase",
+            "content"
+          ],
+          "semantic_checks": [
+            "output_stays_within_phase_scope"
+          ],
+          "repair_hint": "Stay within the scope of the current phase. Do not perform actions that belong to a different phase.",
+          "inference_rule_exists": false,
+          "fake_check_eligible": false
+        },
+        {
+          "name": "causal_grounding",
+          "applies_to": [
+            "analysis.root_cause"
+          ],
+          "requires_fields": [
+            "evidence_refs",
+            "claims"
+          ],
+          "semantic_checks": [
+            "root_cause_connected_to_evidence",
+            "no_speculation_without_evidence"
+          ],
+          "repair_hint": "Connect your root cause analysis to specific observable evidence. Do not speculate without evidence_refs.",
+          "inference_rule_exists": true,
+          "fake_check_eligible": true
+        },
+        {
+          "name": "evidence_linkage",
+          "applies_to": [
+            "analysis.root_cause"
+          ],
+          "requires_fields": [
+            "evidence_refs",
+            "claims"
+          ],
+          "semantic_checks": [
+            "every_claim_has_evidence_ref"
+          ],
+          "repair_hint": "Every claim must have a traceable evidence_ref (file:line). Add evidence_refs for unsupported claims.",
+          "inference_rule_exists": true,
+          "fake_check_eligible": true
+        },
+        {
+          "name": "alternative_hypothesis_check",
+          "applies_to": [
+            "analysis.root_cause"
+          ],
+          "requires_fields": [
+            "claims"
+          ],
+          "semantic_checks": [
+            "alternative_hypotheses_considered"
+          ],
+          "repair_hint": "Consider at least one alternative hypothesis and explicitly explain why it was ruled out.",
+          "inference_rule_exists": false,
+          "fake_check_eligible": false
+        },
+        {
+          "name": "uncertainty_honesty",
+          "applies_to": [
+            "analysis.root_cause",
+            "decision.fix_direction",
+            "judge.verification"
+          ],
+          "requires_fields": [
+            "claims"
+          ],
+          "semantic_checks": [
+            "unknowns_named",
+            "confidence_calibrated"
+          ],
+          "repair_hint": "Name your unknowns and express calibrated confidence. Do not hide uncertainty.",
+          "inference_rule_exists": false,
+          "fake_check_eligible": false
+        }
+      ],
+      "policy": {
+        "id": "policy:analysis.root_cause",
+        "phase": "ANALYZE",
+        "subtype": "analysis.root_cause",
+        "required_fields": [
+          "evidence_refs"
+        ],
+        "forbidden_moves": [
+          "do not write code",
+          "do not skip evidence",
+          "do not jump to a fix without causal reasoning"
+        ],
+        "required_principals": [
+          "ontology_alignment",
+          "phase_boundary_discipline",
+          "causal_grounding",
+          "evidence_linkage"
+        ],
+        "forbidden_principals": [
+          "action_grounding",
+          "minimal_change"
+        ],
+        "schema_ref": "analysis.root_cause"
+      },
+      "schema": {
+        "type": "object",
+        "description": "Analysis phase output: root cause identification with causal evidence",
+        "properties": {
+          "phase": {
+            "type": "string",
+            "description": "Current phase name (UPPER_SNAKE)"
+          },
+          "subtype": {
+            "type": "string",
+            "description": "Current subtype (e.g. analysis.root_cause)"
+          },
+          "principals": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Declared principals for this phase output"
+          },
+          "evidence_refs": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "File:line evidence references"
+          },
+          "claims": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Structured claims made in this phase output"
+          },
+          "root_cause": {
+            "type": "string",
+            "description": "Identified root cause with causal explanation"
+          },
+          "alternative_hypotheses": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "hypothesis": {
+                  "type": "string"
+                },
+                "ruled_out_reason": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "hypothesis",
+                "ruled_out_reason"
+              ]
+            },
+            "description": "Alternative hypotheses considered and why they were ruled out"
+          }
+        },
+        "required": [
+          "phase",
+          "subtype",
+          "principals",
+          "evidence_refs",
+          "root_cause"
+        ]
+      },
+      "prompt": "## Phase: ANALYZE\nGoal: Root-cause analysis: connect evidence to a causal hypothesis.\nSubtype: analysis.root_cause (root_cause_analysis)\n\n## Required Fields\n- evidence_refs\n\n## Forbidden Moves\n- do not write code\n- do not skip evidence\n- do not jump to a fix without causal reasoning\n\n## Required Principals\nYou MUST declare: ontology_alignment, phase_boundary_discipline, causal_grounding, evidence_linkage\n\n### ontology_alignment\nEnsure your phase, subtype, and principal declarations use the exact canonical names from the taxonomy.\n\n### phase_boundary_discipline\nStay within the scope of the current phase. Do not perform actions that belong to a different phase.\n\n### causal_grounding\nConnect your root cause analysis to specific observable evidence. Do not speculate without evidence_refs.\n\n### evidence_linkage\nEvery claim must have a traceable evidence_ref (file:line). Add evidence_refs for unsupported claims.\n\n## Forbidden Principals\nDo NOT declare: action_grounding, minimal_change\n\n## Success Criteria\n- root cause identified with evidence\n- causal chain established\n- alternative hypotheses considered",
+      "repair_templates": {
+        "ontology_alignment": "[ontology_alignment] violation detected.\nRequirement: Ensure your phase, subtype, and principal declarations use the exact canonical names from the taxonomy.\nRequired fields: phase, subtype, principals\nChecks performed: declared_phase_matches_canonical, declared_subtype_matches_canonical",
+        "phase_boundary_discipline": "[phase_boundary_discipline] violation detected.\nRequirement: Stay within the scope of the current phase. Do not perform actions that belong to a different phase.\nRequired fields: phase, content\nChecks performed: output_stays_within_phase_scope",
+        "causal_grounding": "[causal_grounding] violation detected.\nRequirement: Connect your root cause analysis to specific observable evidence. Do not speculate without evidence_refs.\nRequired fields: evidence_refs, claims\nChecks performed: root_cause_connected_to_evidence, no_speculation_without_evidence",
+        "evidence_linkage": "[evidence_linkage] violation detected.\nRequirement: Every claim must have a traceable evidence_ref (file:line). Add evidence_refs for unsupported claims.\nRequired fields: evidence_refs, claims\nChecks performed: every_claim_has_evidence_ref",
+        "alternative_hypothesis_check": "[alternative_hypothesis_check] violation detected.\nRequirement: Consider at least one alternative hypothesis and explicitly explain why it was ruled out.\nRequired fields: claims\nChecks performed: alternative_hypotheses_considered",
+        "uncertainty_honesty": "[uncertainty_honesty] violation detected.\nRequirement: Name your unknowns and express calibrated confidence. Do not hide uncertainty.\nRequired fields: claims\nChecks performed: unknowns_named, confidence_calibrated"
+      },
+      "routing": {
+        "principal_routes": {
+          "ontology_alignment": {
+            "next_phase": "OBSERVE",
+            "strategy": "fix declarations to match canonical taxonomy"
+          },
+          "phase_boundary_discipline": {
+            "next_phase": "OBSERVE",
+            "strategy": "stay within the current phase scope"
+          },
+          "causal_grounding": {
+            "next_phase": "OBSERVE",
+            "strategy": "gather more evidence before re-analyzing"
+          },
+          "evidence_linkage": {
+            "next_phase": "OBSERVE",
+            "strategy": "collect file:line references for claims"
+          },
+          "alternative_hypothesis_check": {
+            "next_phase": "ANALYZE",
+            "strategy": "consider and rule out alternative hypotheses"
+          },
+          "uncertainty_honesty": {
+            "next_phase": "ANALYZE",
+            "strategy": "name unknowns and calibrate confidence"
+          }
+        },
+        "default_route": {
+          "next_phase": "OBSERVE",
+          "strategy": "redirect to OBSERVE for repair"
+        }
+      }
+    },
+    "decision.fix_direction": {
+      "phase": "DECIDE",
+      "subtype": "decision.fix_direction",
+      "compiled_at": "2026-04-11T06:17:18.635Z",
+      "phase_spec": {
+        "name": "DECIDE",
+        "goal": "Choose a fix direction among alternatives with explicit tradeoff reasoning.",
+        "forbidden_moves": [
+          "do not write code",
+          "do not skip option comparison",
+          "do not commit to a direction without explicit tradeoffs"
+        ],
+        "allowed_next_phases": [
+          "DESIGN",
+          "DECIDE",
+          "ANALYZE"
+        ],
+        "default_schema": "decision.fix_direction"
+      },
+      "cognition_spec": {
+        "type": "decision.fix_direction",
+        "phase": "DECIDE",
+        "task_shape": "fix_direction_selection",
+        "success_criteria": [
+          "multiple options compared",
+          "tradeoffs explicitly stated",
+          "constraints satisfied"
+        ],
+        "required_evidence_kinds": [
+          "option_comparison"
+        ],
+        "schema_ref": "decision.fix_direction"
+      },
+      "principals": [
+        {
+          "name": "ontology_alignment",
+          "applies_to": [
+            "observation.fact_gathering",
+            "analysis.root_cause",
+            "decision.fix_direction",
+            "design.solution_shape",
+            "execution.code_patch",
+            "judge.verification"
+          ],
+          "requires_fields": [
+            "phase",
+            "subtype",
+            "principals"
+          ],
+          "semantic_checks": [
+            "declared_phase_matches_canonical",
+            "declared_subtype_matches_canonical"
+          ],
+          "repair_hint": "Ensure your phase, subtype, and principal declarations use the exact canonical names from the taxonomy.",
+          "inference_rule_exists": false,
+          "fake_check_eligible": false
+        },
+        {
+          "name": "phase_boundary_discipline",
+          "applies_to": [
+            "observation.fact_gathering",
+            "analysis.root_cause",
+            "decision.fix_direction",
+            "design.solution_shape",
+            "execution.code_patch"
+          ],
+          "requires_fields": [
+            "phase",
+            "content"
+          ],
+          "semantic_checks": [
+            "output_stays_within_phase_scope"
+          ],
+          "repair_hint": "Stay within the scope of the current phase. Do not perform actions that belong to a different phase.",
+          "inference_rule_exists": false,
+          "fake_check_eligible": false
+        },
+        {
+          "name": "option_comparison",
+          "applies_to": [
+            "decision.fix_direction"
+          ],
+          "requires_fields": [
+            "claims"
+          ],
+          "semantic_checks": [
+            "multiple_options_compared",
+            "tradeoffs_explicit"
+          ],
+          "repair_hint": "Compare at least two fix directions with explicit tradeoffs before choosing one.",
+          "inference_rule_exists": false,
+          "fake_check_eligible": false
+        },
+        {
+          "name": "constraint_satisfaction",
+          "applies_to": [
+            "decision.fix_direction"
+          ],
+          "requires_fields": [
+            "claims"
+          ],
+          "semantic_checks": [
+            "constraints_checked",
+            "invariants_respected"
+          ],
+          "repair_hint": "Verify that your chosen direction satisfies all known constraints and invariants.",
+          "inference_rule_exists": false,
+          "fake_check_eligible": false
+        },
+        {
+          "name": "uncertainty_honesty",
+          "applies_to": [
+            "analysis.root_cause",
+            "decision.fix_direction",
+            "judge.verification"
+          ],
+          "requires_fields": [
+            "claims"
+          ],
+          "semantic_checks": [
+            "unknowns_named",
+            "confidence_calibrated"
+          ],
+          "repair_hint": "Name your unknowns and express calibrated confidence. Do not hide uncertainty.",
+          "inference_rule_exists": false,
+          "fake_check_eligible": false
+        }
+      ],
+      "policy": {
+        "id": "policy:decision.fix_direction",
+        "phase": "DECIDE",
+        "subtype": "decision.fix_direction",
+        "required_fields": [],
+        "forbidden_moves": [
+          "do not write code",
+          "do not skip option comparison",
+          "do not commit to a direction without explicit tradeoffs"
+        ],
+        "required_principals": [
+          "ontology_alignment",
+          "phase_boundary_discipline",
+          "option_comparison",
+          "constraint_satisfaction"
+        ],
+        "forbidden_principals": [],
+        "schema_ref": "decision.fix_direction"
+      },
+      "schema": {
+        "type": "object",
+        "description": "Decision phase output: chosen fix direction with tradeoff comparison",
+        "properties": {
+          "phase": {
+            "type": "string",
+            "description": "Current phase name (UPPER_SNAKE)"
+          },
+          "subtype": {
+            "type": "string",
+            "description": "Current subtype (e.g. analysis.root_cause)"
+          },
+          "principals": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Declared principals for this phase output"
+          },
+          "evidence_refs": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "File:line evidence references"
+          },
+          "claims": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Structured claims made in this phase output"
+          },
+          "options": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string"
+                },
+                "pros": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "cons": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              },
+              "required": [
+                "name",
+                "pros",
+                "cons"
+              ]
+            },
+            "description": "Fix direction options compared"
+          },
+          "chosen": {
+            "type": "string",
+            "description": "Name of the chosen option"
+          },
+          "rationale": {
+            "type": "string",
+            "description": "Why this option was chosen over alternatives"
+          }
+        },
+        "required": [
+          "phase",
+          "subtype",
+          "principals",
+          "options",
+          "chosen",
+          "rationale"
+        ]
+      },
+      "prompt": "## Phase: DECIDE\nGoal: Choose a fix direction among alternatives with explicit tradeoff reasoning.\nSubtype: decision.fix_direction (fix_direction_selection)\n\n## Forbidden Moves\n- do not write code\n- do not skip option comparison\n- do not commit to a direction without explicit tradeoffs\n\n## Required Principals\nYou MUST declare: ontology_alignment, phase_boundary_discipline, option_comparison, constraint_satisfaction\n\n### ontology_alignment\nEnsure your phase, subtype, and principal declarations use the exact canonical names from the taxonomy.\n\n### phase_boundary_discipline\nStay within the scope of the current phase. Do not perform actions that belong to a different phase.\n\n### option_comparison\nCompare at least two fix directions with explicit tradeoffs before choosing one.\n\n### constraint_satisfaction\nVerify that your chosen direction satisfies all known constraints and invariants.\n\n## Success Criteria\n- multiple options compared\n- tradeoffs explicitly stated\n- constraints satisfied",
+      "repair_templates": {
+        "ontology_alignment": "[ontology_alignment] violation detected.\nRequirement: Ensure your phase, subtype, and principal declarations use the exact canonical names from the taxonomy.\nRequired fields: phase, subtype, principals\nChecks performed: declared_phase_matches_canonical, declared_subtype_matches_canonical",
+        "phase_boundary_discipline": "[phase_boundary_discipline] violation detected.\nRequirement: Stay within the scope of the current phase. Do not perform actions that belong to a different phase.\nRequired fields: phase, content\nChecks performed: output_stays_within_phase_scope",
+        "option_comparison": "[option_comparison] violation detected.\nRequirement: Compare at least two fix directions with explicit tradeoffs before choosing one.\nRequired fields: claims\nChecks performed: multiple_options_compared, tradeoffs_explicit",
+        "constraint_satisfaction": "[constraint_satisfaction] violation detected.\nRequirement: Verify that your chosen direction satisfies all known constraints and invariants.\nRequired fields: claims\nChecks performed: constraints_checked, invariants_respected",
+        "uncertainty_honesty": "[uncertainty_honesty] violation detected.\nRequirement: Name your unknowns and express calibrated confidence. Do not hide uncertainty.\nRequired fields: claims\nChecks performed: unknowns_named, confidence_calibrated"
+      },
+      "routing": {
+        "principal_routes": {
+          "ontology_alignment": {
+            "next_phase": "OBSERVE",
+            "strategy": "fix declarations to match canonical taxonomy"
+          },
+          "phase_boundary_discipline": {
+            "next_phase": "OBSERVE",
+            "strategy": "stay within the current phase scope"
+          },
+          "option_comparison": {
+            "next_phase": "ANALYZE",
+            "strategy": "compare multiple options with explicit tradeoffs"
+          },
+          "constraint_satisfaction": {
+            "next_phase": "ANALYZE",
+            "strategy": "verify constraints are satisfied"
+          },
+          "uncertainty_honesty": {
+            "next_phase": "ANALYZE",
+            "strategy": "name unknowns and calibrate confidence"
+          }
+        },
+        "default_route": {
+          "next_phase": "ANALYZE",
+          "strategy": "redirect to ANALYZE for repair"
+        }
+      }
+    },
+    "design.solution_shape": {
+      "phase": "DESIGN",
+      "subtype": "design.solution_shape",
+      "compiled_at": "2026-04-11T06:17:18.635Z",
+      "phase_spec": {
+        "name": "DESIGN",
+        "goal": "Define the solution shape: scope, invariants, structure — before writing code.",
+        "forbidden_moves": [
+          "do not write production code (that is EXECUTE)",
+          "do not skip invariant checks"
+        ],
+        "allowed_next_phases": [
+          "EXECUTE",
+          "DESIGN",
+          "DECIDE"
+        ],
+        "default_schema": "design.solution_shape"
+      },
+      "cognition_spec": {
+        "type": "design.solution_shape",
+        "phase": "DESIGN",
+        "task_shape": "solution_design",
+        "success_criteria": [
+          "solution scope bounded",
+          "invariants preserved",
+          "files to modify identified"
+        ],
+        "required_evidence_kinds": [
+          "file_reference",
+          "scope_boundary"
+        ],
+        "schema_ref": "design.solution_shape"
+      },
+      "principals": [
+        {
+          "name": "ontology_alignment",
+          "applies_to": [
+            "observation.fact_gathering",
+            "analysis.root_cause",
+            "decision.fix_direction",
+            "design.solution_shape",
+            "execution.code_patch",
+            "judge.verification"
+          ],
+          "requires_fields": [
+            "phase",
+            "subtype",
+            "principals"
+          ],
+          "semantic_checks": [
+            "declared_phase_matches_canonical",
+            "declared_subtype_matches_canonical"
+          ],
+          "repair_hint": "Ensure your phase, subtype, and principal declarations use the exact canonical names from the taxonomy.",
+          "inference_rule_exists": false,
+          "fake_check_eligible": false
+        },
+        {
+          "name": "phase_boundary_discipline",
+          "applies_to": [
+            "observation.fact_gathering",
+            "analysis.root_cause",
+            "decision.fix_direction",
+            "design.solution_shape",
+            "execution.code_patch"
+          ],
+          "requires_fields": [
+            "phase",
+            "content"
+          ],
+          "semantic_checks": [
+            "output_stays_within_phase_scope"
+          ],
+          "repair_hint": "Stay within the scope of the current phase. Do not perform actions that belong to a different phase.",
+          "inference_rule_exists": false,
+          "fake_check_eligible": false
+        },
+        {
+          "name": "invariant_preservation",
+          "applies_to": [
+            "design.solution_shape",
+            "execution.code_patch"
+          ],
+          "requires_fields": [
+            "claims"
+          ],
+          "semantic_checks": [
+            "no_invariant_relaxation"
+          ],
+          "repair_hint": "Ensure your solution shape does not relax or violate any system invariants.",
+          "inference_rule_exists": false,
+          "fake_check_eligible": false
+        },
+        {
+          "name": "scope_minimality",
+          "applies_to": [
+            "design.solution_shape"
+          ],
+          "requires_fields": [
+            "claims"
+          ],
+          "semantic_checks": [
+            "scope_bounded_to_minimum"
+          ],
+          "repair_hint": "Bound your design scope to the minimum necessary surface area.",
+          "inference_rule_exists": false,
+          "fake_check_eligible": false
+        }
+      ],
+      "policy": {
+        "id": "policy:design.solution_shape",
+        "phase": "DESIGN",
+        "subtype": "design.solution_shape",
+        "required_fields": [],
+        "forbidden_moves": [
+          "do not write production code (that is EXECUTE)",
+          "do not skip invariant checks"
+        ],
+        "required_principals": [
+          "ontology_alignment",
+          "phase_boundary_discipline",
+          "invariant_preservation",
+          "scope_minimality"
+        ],
+        "forbidden_principals": [
+          "minimal_change"
+        ],
+        "schema_ref": "design.solution_shape"
+      },
+      "schema": {
+        "type": "object",
+        "description": "Design phase output: solution shape with scope and invariant checks",
+        "properties": {
+          "phase": {
+            "type": "string",
+            "description": "Current phase name (UPPER_SNAKE)"
+          },
+          "subtype": {
+            "type": "string",
+            "description": "Current subtype (e.g. analysis.root_cause)"
+          },
+          "principals": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Declared principals for this phase output"
+          },
+          "evidence_refs": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "File:line evidence references"
+          },
+          "claims": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Structured claims made in this phase output"
+          },
+          "files_to_modify": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Files that will be modified"
+          },
+          "scope_boundary": {
+            "type": "string",
+            "description": "What is in scope and what is explicitly out of scope"
+          },
+          "invariants": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "System invariants that must be preserved"
+          }
+        },
+        "required": [
+          "phase",
+          "subtype",
+          "principals",
+          "files_to_modify",
+          "scope_boundary"
+        ]
+      },
+      "prompt": "## Phase: DESIGN\nGoal: Define the solution shape: scope, invariants, structure — before writing code.\nSubtype: design.solution_shape (solution_design)\n\n## Forbidden Moves\n- do not write production code (that is EXECUTE)\n- do not skip invariant checks\n\n## Required Principals\nYou MUST declare: ontology_alignment, phase_boundary_discipline, invariant_preservation, scope_minimality\n\n### ontology_alignment\nEnsure your phase, subtype, and principal declarations use the exact canonical names from the taxonomy.\n\n### phase_boundary_discipline\nStay within the scope of the current phase. Do not perform actions that belong to a different phase.\n\n### invariant_preservation\nEnsure your solution shape does not relax or violate any system invariants.\n\n### scope_minimality\nBound your design scope to the minimum necessary surface area.\n\n## Forbidden Principals\nDo NOT declare: minimal_change\n\n## Success Criteria\n- solution scope bounded\n- invariants preserved\n- files to modify identified",
+      "repair_templates": {
+        "ontology_alignment": "[ontology_alignment] violation detected.\nRequirement: Ensure your phase, subtype, and principal declarations use the exact canonical names from the taxonomy.\nRequired fields: phase, subtype, principals\nChecks performed: declared_phase_matches_canonical, declared_subtype_matches_canonical",
+        "phase_boundary_discipline": "[phase_boundary_discipline] violation detected.\nRequirement: Stay within the scope of the current phase. Do not perform actions that belong to a different phase.\nRequired fields: phase, content\nChecks performed: output_stays_within_phase_scope",
+        "invariant_preservation": "[invariant_preservation] violation detected.\nRequirement: Ensure your solution shape does not relax or violate any system invariants.\nRequired fields: claims\nChecks performed: no_invariant_relaxation",
+        "scope_minimality": "[scope_minimality] violation detected.\nRequirement: Bound your design scope to the minimum necessary surface area.\nRequired fields: claims\nChecks performed: scope_bounded_to_minimum"
+      },
+      "routing": {
+        "principal_routes": {
+          "ontology_alignment": {
+            "next_phase": "OBSERVE",
+            "strategy": "fix declarations to match canonical taxonomy"
+          },
+          "phase_boundary_discipline": {
+            "next_phase": "OBSERVE",
+            "strategy": "stay within the current phase scope"
+          },
+          "invariant_preservation": {
+            "next_phase": "DECIDE",
+            "strategy": "re-evaluate design to preserve invariants"
+          },
+          "scope_minimality": {
+            "next_phase": "DECIDE",
+            "strategy": "reduce design scope to minimum necessary"
+          }
+        },
+        "default_route": {
+          "next_phase": "DECIDE",
+          "strategy": "redirect to DECIDE for repair"
+        }
+      }
+    },
+    "execution.code_patch": {
+      "phase": "EXECUTE",
+      "subtype": "execution.code_patch",
+      "compiled_at": "2026-04-11T06:17:18.635Z",
+      "phase_spec": {
+        "name": "EXECUTE",
+        "goal": "Produce the minimal code patch grounded in the admitted design.",
+        "forbidden_moves": [
+          "do not re-analyze the problem (that is ANALYZE)",
+          "do not expand scope beyond the admitted design"
+        ],
+        "allowed_next_phases": [
+          "JUDGE",
+          "EXECUTE",
+          "ANALYZE"
+        ],
+        "default_schema": "execution.code_patch"
+      },
+      "cognition_spec": {
+        "type": "execution.code_patch",
+        "phase": "EXECUTE",
+        "task_shape": "code_patch",
+        "success_criteria": [
+          "patch is minimal",
+          "patch addresses the root cause",
+          "no scope expansion beyond design"
+        ],
+        "required_evidence_kinds": [
+          "patch_diff"
+        ],
+        "schema_ref": "execution.code_patch"
+      },
+      "principals": [
+        {
+          "name": "ontology_alignment",
+          "applies_to": [
+            "observation.fact_gathering",
+            "analysis.root_cause",
+            "decision.fix_direction",
+            "design.solution_shape",
+            "execution.code_patch",
+            "judge.verification"
+          ],
+          "requires_fields": [
+            "phase",
+            "subtype",
+            "principals"
+          ],
+          "semantic_checks": [
+            "declared_phase_matches_canonical",
+            "declared_subtype_matches_canonical"
+          ],
+          "repair_hint": "Ensure your phase, subtype, and principal declarations use the exact canonical names from the taxonomy.",
+          "inference_rule_exists": false,
+          "fake_check_eligible": false
+        },
+        {
+          "name": "phase_boundary_discipline",
+          "applies_to": [
+            "observation.fact_gathering",
+            "analysis.root_cause",
+            "decision.fix_direction",
+            "design.solution_shape",
+            "execution.code_patch"
+          ],
+          "requires_fields": [
+            "phase",
+            "content"
+          ],
+          "semantic_checks": [
+            "output_stays_within_phase_scope"
+          ],
+          "repair_hint": "Stay within the scope of the current phase. Do not perform actions that belong to a different phase.",
+          "inference_rule_exists": false,
+          "fake_check_eligible": false
+        },
+        {
+          "name": "action_grounding",
+          "applies_to": [
+            "observation.fact_gathering",
+            "analysis.root_cause",
+            "execution.code_patch"
+          ],
+          "requires_fields": [
+            "claims"
+          ],
+          "semantic_checks": [
+            "code_change_grounded_in_design"
+          ],
+          "repair_hint": "Ground your code change in an admitted design or decision record. Do not write code without a prior design.",
+          "inference_rule_exists": false,
+          "fake_check_eligible": false
+        },
+        {
+          "name": "minimal_change",
+          "applies_to": [
+            "observation.fact_gathering",
+            "analysis.root_cause",
+            "design.solution_shape",
+            "execution.code_patch"
+          ],
+          "requires_fields": [],
+          "semantic_checks": [
+            "patch_is_smallest_necessary"
+          ],
+          "repair_hint": "Make the smallest code change that satisfies the fix direction. Remove any unnecessary modifications.",
+          "inference_rule_exists": true,
+          "fake_check_eligible": true
+        },
+        {
+          "name": "invariant_preservation",
+          "applies_to": [
+            "design.solution_shape",
+            "execution.code_patch"
+          ],
+          "requires_fields": [
+            "claims"
+          ],
+          "semantic_checks": [
+            "no_invariant_relaxation"
+          ],
+          "repair_hint": "Ensure your solution shape does not relax or violate any system invariants.",
+          "inference_rule_exists": false,
+          "fake_check_eligible": false
+        }
+      ],
+      "policy": {
+        "id": "policy:execution.code_patch",
+        "phase": "EXECUTE",
+        "subtype": "execution.code_patch",
+        "required_fields": [],
+        "forbidden_moves": [
+          "do not re-analyze the problem (that is ANALYZE)",
+          "do not expand scope beyond the admitted design"
+        ],
+        "required_principals": [
+          "ontology_alignment",
+          "phase_boundary_discipline",
+          "action_grounding",
+          "minimal_change"
+        ],
+        "forbidden_principals": [],
+        "schema_ref": "execution.code_patch"
+      },
+      "schema": {
+        "type": "object",
+        "description": "Execution phase output: minimal code patch grounded in design",
+        "properties": {
+          "phase": {
+            "type": "string",
+            "description": "Current phase name (UPPER_SNAKE)"
+          },
+          "subtype": {
+            "type": "string",
+            "description": "Current subtype (e.g. analysis.root_cause)"
+          },
+          "principals": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Declared principals for this phase output"
+          },
+          "evidence_refs": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "File:line evidence references"
+          },
+          "claims": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Structured claims made in this phase output"
+          },
+          "patch_description": {
+            "type": "string",
+            "description": "What the patch does and why"
+          },
+          "files_modified": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Files actually modified"
+          }
+        },
+        "required": [
+          "phase",
+          "subtype",
+          "principals",
+          "patch_description"
+        ]
+      },
+      "prompt": "## Phase: EXECUTE\nGoal: Produce the minimal code patch grounded in the admitted design.\nSubtype: execution.code_patch (code_patch)\n\n## Forbidden Moves\n- do not re-analyze the problem (that is ANALYZE)\n- do not expand scope beyond the admitted design\n\n## Required Principals\nYou MUST declare: ontology_alignment, phase_boundary_discipline, action_grounding, minimal_change\n\n### ontology_alignment\nEnsure your phase, subtype, and principal declarations use the exact canonical names from the taxonomy.\n\n### phase_boundary_discipline\nStay within the scope of the current phase. Do not perform actions that belong to a different phase.\n\n### action_grounding\nGround your code change in an admitted design or decision record. Do not write code without a prior design.\n\n### minimal_change\nMake the smallest code change that satisfies the fix direction. Remove any unnecessary modifications.\n\n## Success Criteria\n- patch is minimal\n- patch addresses the root cause\n- no scope expansion beyond design",
+      "repair_templates": {
+        "ontology_alignment": "[ontology_alignment] violation detected.\nRequirement: Ensure your phase, subtype, and principal declarations use the exact canonical names from the taxonomy.\nRequired fields: phase, subtype, principals\nChecks performed: declared_phase_matches_canonical, declared_subtype_matches_canonical",
+        "phase_boundary_discipline": "[phase_boundary_discipline] violation detected.\nRequirement: Stay within the scope of the current phase. Do not perform actions that belong to a different phase.\nRequired fields: phase, content\nChecks performed: output_stays_within_phase_scope",
+        "action_grounding": "[action_grounding] violation detected.\nRequirement: Ground your code change in an admitted design or decision record. Do not write code without a prior design.\nRequired fields: claims\nChecks performed: code_change_grounded_in_design",
+        "minimal_change": "[minimal_change] violation detected.\nRequirement: Make the smallest code change that satisfies the fix direction. Remove any unnecessary modifications.\nChecks performed: patch_is_smallest_necessary",
+        "invariant_preservation": "[invariant_preservation] violation detected.\nRequirement: Ensure your solution shape does not relax or violate any system invariants.\nRequired fields: claims\nChecks performed: no_invariant_relaxation"
+      },
+      "routing": {
+        "principal_routes": {
+          "ontology_alignment": {
+            "next_phase": "OBSERVE",
+            "strategy": "fix declarations to match canonical taxonomy"
+          },
+          "phase_boundary_discipline": {
+            "next_phase": "OBSERVE",
+            "strategy": "stay within the current phase scope"
+          },
+          "action_grounding": {
+            "next_phase": "DESIGN",
+            "strategy": "ground code change in an admitted design"
+          },
+          "minimal_change": {
+            "next_phase": "DESIGN",
+            "strategy": "reduce patch to smallest necessary change"
+          },
+          "invariant_preservation": {
+            "next_phase": "DECIDE",
+            "strategy": "re-evaluate design to preserve invariants"
+          }
+        },
+        "default_route": {
+          "next_phase": "ANALYZE",
+          "strategy": "redirect to ANALYZE for repair"
+        }
+      }
+    },
+    "judge.verification": {
+      "phase": "JUDGE",
+      "subtype": "judge.verification",
+      "compiled_at": "2026-04-11T06:17:18.635Z",
+      "phase_spec": {
+        "name": "JUDGE",
+        "goal": "Verify that the patch satisfies the original task constraints.",
+        "forbidden_moves": [
+          "do not write new code (that is EXECUTE)",
+          "do not skip verification against success criteria"
+        ],
+        "allowed_next_phases": [
+          "EXECUTE",
+          "ANALYZE"
+        ],
+        "default_schema": "judge.verification"
+      },
+      "cognition_spec": {
+        "type": "judge.verification",
+        "phase": "JUDGE",
+        "task_shape": "verification",
+        "success_criteria": [
+          "tests pass or specific failures explained",
+          "success criteria from task checked",
+          "residual risks named"
+        ],
+        "required_evidence_kinds": [
+          "test_output"
+        ],
+        "schema_ref": "judge.verification"
+      },
+      "principals": [
+        {
+          "name": "ontology_alignment",
+          "applies_to": [
+            "observation.fact_gathering",
+            "analysis.root_cause",
+            "decision.fix_direction",
+            "design.solution_shape",
+            "execution.code_patch",
+            "judge.verification"
+          ],
+          "requires_fields": [
+            "phase",
+            "subtype",
+            "principals"
+          ],
+          "semantic_checks": [
+            "declared_phase_matches_canonical",
+            "declared_subtype_matches_canonical"
+          ],
+          "repair_hint": "Ensure your phase, subtype, and principal declarations use the exact canonical names from the taxonomy.",
+          "inference_rule_exists": false,
+          "fake_check_eligible": false
+        },
+        {
+          "name": "result_verification",
+          "applies_to": [
+            "judge.verification"
+          ],
+          "requires_fields": [
+            "claims"
+          ],
+          "semantic_checks": [
+            "outcome_verified_against_criteria"
+          ],
+          "repair_hint": "Verify your patch outcome against the stated success criteria. Report test results.",
+          "inference_rule_exists": false,
+          "fake_check_eligible": false
+        },
+        {
+          "name": "uncertainty_honesty",
+          "applies_to": [
+            "analysis.root_cause",
+            "decision.fix_direction",
+            "judge.verification"
+          ],
+          "requires_fields": [
+            "claims"
+          ],
+          "semantic_checks": [
+            "unknowns_named",
+            "confidence_calibrated"
+          ],
+          "repair_hint": "Name your unknowns and express calibrated confidence. Do not hide uncertainty.",
+          "inference_rule_exists": false,
+          "fake_check_eligible": false
+        },
+        {
+          "name": "residual_risk_detection",
+          "applies_to": [
+            "judge.verification"
+          ],
+          "requires_fields": [
+            "claims"
+          ],
+          "semantic_checks": [
+            "remaining_risks_named"
+          ],
+          "repair_hint": "Name any known remaining risks, even if they are not addressed in this patch.",
+          "inference_rule_exists": false,
+          "fake_check_eligible": false
+        }
+      ],
+      "policy": {
+        "id": "policy:judge.verification",
+        "phase": "JUDGE",
+        "subtype": "judge.verification",
+        "required_fields": [],
+        "forbidden_moves": [
+          "do not write new code (that is EXECUTE)",
+          "do not skip verification against success criteria"
+        ],
+        "required_principals": [
+          "ontology_alignment",
+          "result_verification",
+          "uncertainty_honesty"
+        ],
+        "forbidden_principals": [],
+        "schema_ref": "judge.verification"
+      },
+      "schema": {
+        "type": "object",
+        "description": "Judge phase output: verification of patch against success criteria",
+        "properties": {
+          "phase": {
+            "type": "string",
+            "description": "Current phase name (UPPER_SNAKE)"
+          },
+          "subtype": {
+            "type": "string",
+            "description": "Current subtype (e.g. analysis.root_cause)"
+          },
+          "principals": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Declared principals for this phase output"
+          },
+          "evidence_refs": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "File:line evidence references"
+          },
+          "claims": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Structured claims made in this phase output"
+          },
+          "test_results": {
+            "type": "object",
+            "properties": {
+              "passed": {
+                "type": "boolean"
+              },
+              "details": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "passed"
+            ],
+            "description": "Test execution results"
+          },
+          "success_criteria_met": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "criterion": {
+                  "type": "string"
+                },
+                "met": {
+                  "type": "boolean"
+                },
+                "evidence": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "criterion",
+                "met"
+              ]
+            },
+            "description": "Each success criterion and whether it was met"
+          },
+          "residual_risks": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Known remaining risks, even if not addressed"
+          }
+        },
+        "required": [
+          "phase",
+          "subtype",
+          "principals",
+          "test_results",
+          "success_criteria_met"
+        ]
+      },
+      "prompt": "## Phase: JUDGE\nGoal: Verify that the patch satisfies the original task constraints.\nSubtype: judge.verification (verification)\n\n## Forbidden Moves\n- do not write new code (that is EXECUTE)\n- do not skip verification against success criteria\n\n## Required Principals\nYou MUST declare: ontology_alignment, result_verification, uncertainty_honesty\n\n### ontology_alignment\nEnsure your phase, subtype, and principal declarations use the exact canonical names from the taxonomy.\n\n### result_verification\nVerify your patch outcome against the stated success criteria. Report test results.\n\n### uncertainty_honesty\nName your unknowns and express calibrated confidence. Do not hide uncertainty.\n\n## Success Criteria\n- tests pass or specific failures explained\n- success criteria from task checked\n- residual risks named",
+      "repair_templates": {
+        "ontology_alignment": "[ontology_alignment] violation detected.\nRequirement: Ensure your phase, subtype, and principal declarations use the exact canonical names from the taxonomy.\nRequired fields: phase, subtype, principals\nChecks performed: declared_phase_matches_canonical, declared_subtype_matches_canonical",
+        "result_verification": "[result_verification] violation detected.\nRequirement: Verify your patch outcome against the stated success criteria. Report test results.\nRequired fields: claims\nChecks performed: outcome_verified_against_criteria",
+        "uncertainty_honesty": "[uncertainty_honesty] violation detected.\nRequirement: Name your unknowns and express calibrated confidence. Do not hide uncertainty.\nRequired fields: claims\nChecks performed: unknowns_named, confidence_calibrated",
+        "residual_risk_detection": "[residual_risk_detection] violation detected.\nRequirement: Name any known remaining risks, even if they are not addressed in this patch.\nRequired fields: claims\nChecks performed: remaining_risks_named"
+      },
+      "routing": {
+        "principal_routes": {
+          "ontology_alignment": {
+            "next_phase": "OBSERVE",
+            "strategy": "fix declarations to match canonical taxonomy"
+          },
+          "result_verification": {
+            "next_phase": "EXECUTE",
+            "strategy": "verify outcome against success criteria"
+          },
+          "uncertainty_honesty": {
+            "next_phase": "ANALYZE",
+            "strategy": "name unknowns and calibrate confidence"
+          },
+          "residual_risk_detection": {
+            "next_phase": "JUDGE",
+            "strategy": "name remaining risks"
+          }
+        },
+        "default_route": {
+          "next_phase": "EXECUTE",
+          "strategy": "redirect to EXECUTE for repair"
+        }
+      }
+    }
+  }
+}
