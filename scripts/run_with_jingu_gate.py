@@ -859,8 +859,8 @@ def _step_cp_update_and_verdict(
                     _pr_source = "extracted"
                     # p221: log accumulated text stats for observability
                     _acc_len = len(_accumulated) if _accumulated else 0
-                    _has_refs = bool(_pr.get("evidence_refs"))
-                    _has_rc = bool((_pr.get("root_cause") or "").strip())
+                    _has_refs = bool(getattr(_pr, "evidence_refs", None))
+                    _has_rc = bool((getattr(_pr, "root_cause", "") or "").strip())
                     print(
                         f"    [phase_record] extraction_method=regex"
                         f" accumulated_chars={_acc_len}"
