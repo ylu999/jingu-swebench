@@ -250,22 +250,6 @@ def _verify_prerequisites(cognition_result: str | None = None, judge_result=None
         # Conservative fallback: allow controlled_verify to run on unexpected errors
         return True, ""
 
-# P18: per-instance monitor registry — concurrent-safe dispatch.
-# Maps instance_id → (StepMonitorState, cp_state_holder, mode).
-# _monitored_step and _verifying_run look up state by self.instance_id,
-# so parallel workers each see their own state regardless of class-level patch order.
-_INSTANCE_MONITOR_REGISTRY: dict[str, tuple] = {}
-_INSTANCE_MONITOR_REGISTRY_LOCK = threading.Lock()
-
-
-def _register_monitor(instance_id: str, state, cp_state_holder, mode: str) -> None:
-    with _INSTANCE_MONITOR_REGISTRY_LOCK:
-        _INSTANCE_MONITOR_REGISTRY[instance_id] = (state, cp_state_holder, mode)
-
-
-def _unregister_monitor(instance_id: str) -> None:
-    with _INSTANCE_MONITOR_REGISTRY_LOCK:
-        _INSTANCE_MONITOR_REGISTRY.pop(instance_id, None)
 
 
 # ╔══════════════════════════════════════════════════════════════════════════════╗
@@ -298,7 +282,7 @@ def _unregister_monitor(instance_id: str) -> None:
 # ║    • governance truth        (phase taxonomy, subtype, evidence)            ║
 # ║                                                                              ║
 # ║  Owns:                                                                       ║
-# ║    _install_step_monitor, _monitored_step                                   ║
+# ║    JinguAgent, JinguProgressTrackingAgent (jingu_agent.py)                  ║
 # ║    debounce, patch_first_write detection, pee gating,                       ║
 # ║    inner-verify scheduling, stagnation counter, VerdictStop enforcement     ║
 # ║                                                                              ║
@@ -318,113 +302,6 @@ from step_sections import (  # noqa: F401, E402 — re-export for backward compa
 )
 
 
-def _install_step_monitor(
-    instance_id: str,
-    attempt: int,
-    instance: dict,
-    cp_state_holder: list | None = None,
-    mode: str = "baseline",
-) -> StepMonitorState:
-    """
-    Replace step logger with a step monitor that:
-    1. Logs each step (existing behavior)
-    2. Detects patch writes via _msg_has_signal()
-    3. Runs controlled_verify in background when patch changes (debounced)
-
-    Returns StepMonitorState — caller must set .container_id once container starts.
-    The state's verify_history is the structured inner-loop signal source.
-
-    Debounce rules:
-    - Only verify if patch content changed since last verify
-    - Only verify if >= VERIFY_DEBOUNCE_S seconds since last verify started
-    - At most one verify in flight at a time
-    """
-    import threading
-
-    VERIFY_DEBOUNCE_S = 5.0   # minimum seconds between verify runs
-
-    from minisweagent.run.benchmarks.swebench import ProgressTrackingAgent
-    _orig_step = ProgressTrackingAgent.step
-    state = StepMonitorState(instance_id, attempt, instance)
-
-    # p226-05: per-attempt extraction metrics counters
-    state._extraction_structured = 0
-    state._extraction_regex_fallback = 0
-    state._extraction_no_schema = 0
-
-    # P18: register state in global registry keyed by instance_id.
-    # _monitored_step dispatches via self.instance_id, not closure — concurrent-safe.
-    _register_monitor(instance_id, state, cp_state_holder, mode)
-
-    def _monitored_step(self):
-        result = _orig_step(self)
-
-        # P18: dispatch via instance_id — each parallel worker finds its own state.
-        _iid = getattr(self, "instance_id", instance_id)
-        with _INSTANCE_MONITOR_REGISTRY_LOCK:
-            _entry = _INSTANCE_MONITOR_REGISTRY.get(_iid)
-        if _entry is None:
-            return result  # registry cleared (run finished) — skip monitoring
-        _state, _cp_holder, _mode = _entry
-
-        # Thin orchestrator: delegates to the four section functions above.
-        # Each section is independently testable and has explicit parameter contracts.
-        # 改动9b: wire monitor state onto agent instance so _step_observe can access
-        # _injected_signals for cognition violation keyed idempotency.
-        self._jingu_monitor_state = _state
-        _latest_assistant_text, _snippet, _env_error = _step_observe(
-            self, step_n=self.n_calls, mode=_mode
-        )
-        # p221: accumulate assistant text per phase for PhaseRecord extraction.
-        # Agent outputs short thinking texts across many steps; accumulating them
-        # gives extract_record_for_phase enough material at VerdictAdvance time.
-        _acc_phase = str((_cp_holder[0] if _cp_holder else _state.cp_state).phase).upper()
-        if _latest_assistant_text:
-            _state._phase_accumulated_text[_acc_phase] = (
-                _state._phase_accumulated_text.get(_acc_phase, "") + "\n" + _latest_assistant_text
-            )
-        _patch_non_empty = _step_verify_if_needed(
-            self, state=_state, verify_debounce_s=VERIFY_DEBOUNCE_S
-        )
-        try:
-            _step_cp_update_and_verdict(
-                self,
-                state=_state,
-                cp_state_holder=_cp_holder,
-                env_error_detected=_env_error,
-                step_patch_non_empty=_patch_non_empty,
-                latest_assistant_text=_latest_assistant_text,
-            )
-        except StopExecution:
-            # VerdictStop issued — skip phase injection and propagate up to run_agent.
-            # This is the correct termination path: immediate interrupt, no delayed enforcement.
-            raise
-
-        _step_inject_phase(self, cp_state_holder=_cp_holder, state=_state)
-
-        # p207-P2: per-step structure validation — check if agent output has
-        # the current phase's required fields, inject soft correction hint if missing.
-        _step_check_structure(
-            self,
-            cp_state_holder=_cp_holder,
-            state=_state,
-            latest_assistant_text=_latest_assistant_text,
-        )
-
-        # p25 Materialization Gate Layer 1 — extracted to step_sections.py
-        _check_materialization_gate(
-            self,
-            cp_state_holder=_cp_holder,
-            state=_state,
-            patch_non_empty=_patch_non_empty,
-        )
-
-        return result
-
-    # Return (state, ScopedPatch) — caller uses ScopedPatch as a context manager.
-    # ScopedPatch.__exit__ restores ProgressTrackingAgent.step unconditionally,
-    # which eliminates the P9 class of bug (monitor chain stacking across attempts).
-    return state, ScopedPatch(ProgressTrackingAgent, "step", _monitored_step)
 
 
 def _extract_current_patch_from_messages(messages: list[dict]) -> str:
@@ -882,7 +759,6 @@ def run_agent(
     cp_state_holder: list | None = None,
 ) -> tuple[str | None, str | None, dict | None, object | None]:
     """Run mini-SWE-agent on one instance. Returns (submission patch or None, exit_status, jingu_body or None, monitor or None)."""
-    from minisweagent.run.benchmarks.swebench import process_instance
     from minisweagent.config import get_config_from_spec
     from minisweagent.utils.serialize import recursive_merge
 
@@ -1023,12 +899,30 @@ def run_agent(
     preds_path = attempt_dir / "preds.json"
     progress = RunBatchProgressManager(num_instances=1)
 
-    # Install step monitor: logs steps + triggers inner-loop verify on patch writes
-    # B2-CP: cp_state_holder (from run_with_jingu) passed through so step signals
-    # update the cross-attempt cp_state directly.
-    # _install_step_monitor now returns (state, ScopedPatch) — the ScopedPatch is used
-    # as a context manager below to guarantee ProgressTrackingAgent.step is restored.
-    _monitor, _step_patch = _install_step_monitor(instance_id, attempt, instance, cp_state_holder=cp_state_holder, mode=mode)
+    # p225-06: instantiate JinguAgent + JinguProgressTrackingAgent (replaces _install_step_monitor).
+    # Instance isolation is now provided by OOP — no global registry needed (P18 eliminated).
+    # Reuse _gov_prompt loaded above (already called onboard()); fall back to None if not loaded.
+    from jingu_agent import JinguAgent, JinguProgressTrackingAgent
+
+    _governance = locals().get("_gov_prompt")
+    jingu_agent_inst = JinguAgent(
+        instance=instance,
+        output_dir=attempt_dir,
+        governance=_governance,
+        mode=mode,
+    )
+    _monitor = StepMonitorState(
+        instance_id=instance_id,
+        attempt=attempt,
+        instance=instance,
+    )
+    # p226-05: per-attempt extraction metrics counters
+    _monitor._extraction_structured = 0
+    _monitor._extraction_regex_fallback = 0
+    _monitor._extraction_no_schema = 0
+
+    jingu_agent_inst._state = _monitor
+    jingu_agent_inst._cp_state_holder = cp_state_holder if cp_state_holder is not None else []
 
     # Hook DefaultAgent.run() to:
     # 1. Inject container_id into _monitor as soon as container is started
@@ -1037,12 +931,9 @@ def run_agent(
     _orig_run = _DA.run   # captured here; ScopedPatch restores it on __exit__
 
     def _verifying_run(self_agent, *args, **kwargs):
-        # P18: look up this agent's monitor from registry — avoids using closed-over
-        # _monitor which may belong to a different parallel worker.
-        _iid = getattr(self_agent, "instance_id", instance_id)
-        with _INSTANCE_MONITOR_REGISTRY_LOCK:
-            _vr_entry = _INSTANCE_MONITOR_REGISTRY.get(_iid)
-        _vr_monitor = _vr_entry[0] if _vr_entry is not None else _monitor
+        # p225-06: instance isolation provided by JinguAgent — use closed-over _monitor directly.
+        # Each run_agent() call creates its own _monitor; no global registry needed.
+        _vr_monitor = _monitor
 
         # Inject container_id so step monitor can start verifying mid-run
         cid = getattr(getattr(self_agent, 'env', None), 'container_id', None)
@@ -1160,12 +1051,16 @@ def run_agent(
         return result
 
     t_llm = Timer("LLM agent loop (Bedrock)", parent=t_agent)
-    # Both patches are scoped: ScopedPatch.__exit__ restores unconditionally on any exit path.
-    # _step_patch covers ProgressTrackingAgent.step (P9 fix — no monitor chain stacking).
-    # _run_patch covers DefaultAgent.run (equivalent to the old _DA.run = _orig_run restore).
-    with _step_patch, ScopedPatch(_DA, "run", _verifying_run):
+    # p225-06: _step_patch removed — JinguProgressTrackingAgent handles step governance natively.
+    # _run_patch (DefaultAgent.run) is still needed for _verifying_run (container_id + final verify).
+    from jingu_agent import jingu_process_instance
+    with ScopedPatch(_DA, "run", _verifying_run):
         try:
-            process_instance(instance, attempt_dir, config, progress)
+            jingu_process_instance(
+                instance, attempt_dir, config, progress,
+                agent_class=JinguProgressTrackingAgent,
+                agent_kwargs={"jingu_agent": jingu_agent_inst},
+            )
         except StopExecution as e:
             # VerdictStop: clean early exit — not an error.
             # _monitor.early_stop_verdict is already set; caller (run_with_jingu) will
@@ -1178,9 +1073,6 @@ def run_agent(
         except Exception as e:
             print(f"    [agent] ERROR: {e}")
             traceback.print_exc()
-    # P18: remove from registry immediately after run — prevents cross-case state
-    # bleed on retry. _monitor object itself is still referenced below for post-processing.
-    _unregister_monitor(instance_id)
     t_llm.stop()
 
     # Parse traj for usage + submission
@@ -1530,8 +1422,7 @@ def run_with_jingu(instance_id: str, output_dir: Path, max_attempts: int = 3,
             previous_failure=last_failure, parent_timer=t_inst,
             mode=mode, cp_state_holder=cp_state_holder)
 
-        # p186: check early_stop_verdict set by _monitored_step during the attempt.
-        # run_agent now returns _attempt_monitor directly — no global registry needed.
+        # p186: check early_stop_verdict set by JinguAgent step hooks during the attempt.
         # VerdictStop(no_signal) replaces the steps_since_last_signal >= threshold path.
         # VerdictStop(task_success) fires when task_success signal received.
         # Both cases break the attempt loop immediately — no gate, no retry needed.
