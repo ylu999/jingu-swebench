@@ -69,6 +69,7 @@ COPY scripts/run_with_jingu_gate.py \
      scripts/phase_record_pack.py \
      scripts/failure_classifier.py \
      scripts/repair_prompts.py \
+     scripts/analysis_gate.py \
      /app/scripts/
 # B1-CP: reasoning control plane Python module
 COPY scripts/control/ /app/scripts/control/
