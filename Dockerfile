@@ -95,6 +95,7 @@ COPY scripts/run_with_jingu_gate.py \
      scripts/phase_schemas.py \
      scripts/cognition_prompts.py \
      scripts/extraction_schemas.py \
+     scripts/jingu_onboard.py \
      /app/scripts/
 # B1-CP: reasoning control plane Python module
 COPY scripts/control/ /app/scripts/control/

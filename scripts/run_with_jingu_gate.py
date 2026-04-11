@@ -840,8 +840,9 @@ def _step_cp_update_and_verdict(
 
                 # Try structured extraction via JinguModel
                 try:
-                    from extraction_schemas import get_extraction_schema
-                    _extraction_schema = get_extraction_schema(_eval_phase)
+                    from jingu_onboard import onboard as _onboard_fn
+                    _gov = _onboard_fn()
+                    _extraction_schema = _gov.get_constrained_schema(_eval_phase)
                     if _extraction_schema is not None and hasattr(agent_self, "model"):
                         _model = agent_self.model
                         if hasattr(_model, "structured_extract"):
@@ -1220,12 +1221,13 @@ def _step_cp_update_and_verdict(
                 _pg_violation = _admission.reasons[0] if _admission.reasons else "admission_violation"
                 _pg_feedback = _get_pg_feedback(_pg_violation)
                 try:
-                    from subtype_contracts import (
-                        get_repair_target as _get_repair_target,
-                        build_phase_principal_guidance as _build_pg_guidance,
-                    )
-                    _repair_phase = _get_repair_target(str(_cp_s.phase))
-                    _pg_guidance = _build_pg_guidance(str(_cp_s.phase))
+                    from jingu_onboard import onboard as _onb_repair
+                    _gov_repair = _onb_repair()
+                    # Use governance routing for repair target
+                    _route_obj = _gov_repair.get_route(str(_cp_s.phase), _pg_violation)
+                    _repair_phase = _route_obj.next_phase if _route_obj else ""
+                    _repair_hint = _gov_repair.get_repair_hint(str(_cp_s.phase), _pg_violation)
+                    _pg_guidance = _repair_hint if _repair_hint else ""
                 except Exception:
                     _repair_phase = ""
                     _pg_guidance = ""
@@ -1381,8 +1383,10 @@ def _step_cp_update_and_verdict(
             # This is independent of check_principal_inference — purely observability.
             try:
                 from principal_inference import run_inference as _run_inf
-                from subtype_contracts import _PHASE_TO_SUBTYPE as _pts
-                _inf_subtype = _pts.get(_eval_phase, "")
+                from jingu_onboard import onboard as _onb_inf
+                _gov_inf = _onb_inf()
+                _inf_cfg = _gov_inf.get_phase_config(_eval_phase)
+                _inf_subtype = _inf_cfg.subtype if _inf_cfg else ""
                 _inf_result = _run_inf(_pr, _inf_subtype)
                 _inf_telem_parts = []
                 for _pname, _pdetail in _inf_result.details.items():
@@ -1428,12 +1432,11 @@ def _step_cp_update_and_verdict(
                 # Only fake_checkable principals (stage 4, has inference rule) reach here.
                 # Treat as RETRYABLE — same loop-break logic as evaluate_admission RETRYABLE.
                 try:
-                    from subtype_contracts import (
-                        get_repair_target as _get_repair_target,
-                        build_phase_principal_guidance as _build_pg_guidance,
-                    )
-                    _inf_repair = _get_repair_target(_eval_phase)
-                    _inf_guidance = _build_pg_guidance(_eval_phase)
+                    from jingu_onboard import onboard as _onb_inf_repair
+                    _gov_inf_repair = _onb_inf_repair()
+                    _inf_route = _gov_inf_repair.get_route(_eval_phase, "fake_principal")
+                    _inf_repair = _inf_route.next_phase if _inf_route else _eval_phase
+                    _inf_guidance = _gov_inf_repair.get_repair_hint(_eval_phase, "fake_principal")
                 except Exception:
                     _inf_repair = ""
                     _inf_guidance = ""
@@ -1498,8 +1501,10 @@ def _step_cp_update_and_verdict(
             if _pr is None:
                 raise RuntimeError("phase_record unavailable, skipping telemetry")
             from principal_inference import run_inference, diff_principals
-            from subtype_contracts import _PHASE_TO_SUBTYPE as _pi_phase_map
-            _pi_subtype = _pi_phase_map.get(_eval_phase, "")
+            from jingu_onboard import onboard as _onb_telem
+            _gov_telem = _onb_telem()
+            _pi_cfg = _gov_telem.get_phase_config(_eval_phase)
+            _pi_subtype = _pi_cfg.subtype if _pi_cfg else ""
             _inf_rich = run_inference(_pr, _pi_subtype)
             diff_principals(
                 getattr(_pr, "principals", []) or [],
@@ -3620,56 +3625,85 @@ def run_agent(
             "read the existing code more carefully — the solution is always a code change, not an environment change."
         )
 
-    # B4: phase-structured reasoning protocol — injects 4-phase structure into
-    # agent reasoning loop (Phase 1 activation: prompt-only injection).
-    # Type contracts table is generated dynamically from SUBTYPE_CONTRACTS (single source of truth).
-    # Key change vs prior version: FIX_TYPE is derived from ANALYSIS findings,
-    # not pre-suggested. Removed "almost always execution" bias.
+    # B4: phase-structured reasoning protocol — p224: loaded from bundle via jingu_onboard.
+    # All phase prompts, principal requirements, type contracts, forbidden moves
+    # are derived from bundle.json (compiled by jingu-cognition TS). Zero hardcoded strings.
     try:
-        from subtype_contracts import SUBTYPE_CONTRACTS as _SC, get_required_principals as _grp, get_forbidden_principals as _gfp
+        from jingu_onboard import onboard as _onboard_prompt
+        _gov_prompt = _onboard_prompt()
+        # Assemble full reasoning protocol from per-phase prompts
+        _phase_prompt_parts = []
+        for _pp_phase in _gov_prompt.list_phases():
+            _pp_text = _gov_prompt.get_phase_prompt(_pp_phase)
+            if _pp_text:
+                _phase_prompt_parts.append(_pp_text)
+        # Build type contracts block from gate configs
         _type_contracts_lines = []
-        for _subtype, _contract in _SC.items():
-            _short = _subtype.split(".")[-1]  # e.g. "root_cause" from "analysis.root_cause"
-            _req = ", ".join(_grp(_contract["phase"]))
-            _forb = ", ".join(_gfp(_contract["phase"]))
-            _forb_str = f"  forbidden=[{_forb}]" if _forb else ""
-            _type_contracts_lines.append(f"  {_short:<20} required=[{_req}]{_forb_str}")
+        for _pp_phase in _gov_prompt.list_phases():
+            _pp_gate = _gov_prompt.get_gate(_pp_phase)
+            if _pp_gate:
+                _pp_req = ", ".join(_pp_gate.required_principals)
+                _pp_forb = ", ".join(_pp_gate.forbidden_principals)
+                _pp_forb_str = f"  forbidden=[{_pp_forb}]" if _pp_forb else ""
+                _type_contracts_lines.append(
+                    f"  {_pp_gate.subtype.split('.')[-1]:<20} required=[{_pp_req}]{_pp_forb_str}"
+                )
         _type_contracts_block = "Type contracts:\n" + "\n".join(_type_contracts_lines)
-        # Per-step PRINCIPALS from contracts
-        _analysis_req = ", ".join(_grp("ANALYZE"))
-        _decision_req = ", ".join(_grp("DECIDE"))
-        _execute_req  = ", ".join(_grp("EXECUTE"))
-    except Exception:
+        # Per-step principal requirements
+        def _get_req(p):
+            _g = _gov_prompt.get_gate(p)
+            return ", ".join(_g.required_principals) if _g else ""
+        _analysis_req = _get_req("ANALYZE")
+        _decision_req = _get_req("DECIDE")
+        _execute_req  = _get_req("EXECUTE")
+    except Exception as _onb_exc:
+        print(f"    [jingu_onboard] prompt load error (fallback): {_onb_exc}", flush=True)
+        _phase_prompt_parts = []
         _type_contracts_block = "Type contracts: (see principal_gate for v2.0 contracts)"
         _analysis_req = "ontology_alignment, phase_boundary_discipline, causal_grounding, evidence_linkage"
         _decision_req = "ontology_alignment, phase_boundary_discipline, option_comparison, constraint_satisfaction"
         _execute_req  = "ontology_alignment, phase_boundary_discipline, action_grounding, minimal_change"
-    extra_parts.append(
-        "REASONING PROTOCOL (output these markers as you work — they are parsed by the governance system):\n\n"
-        "## STEP 1 — before writing any code, output all three:\n"
-        "  PHASE: analysis\n"
-        f"  PRINCIPALS: {_analysis_req}\n"
-        "  EVIDENCE: <file:line or test name that shows the bug>\n"
-        "  ROOT_CAUSE: <the specific line or logic that causes the failure>\n\n"
-        "## STEP 2 — once root cause is clear, output:\n"
-        "  PHASE: decision\n"
-        f"  PRINCIPALS: {_decision_req}\n"
-        "  CLAIMS: <chosen fix type — execution | diagnosis | design | planning>\n"
-        "  SCOPE: <which files/functions will be changed>\n\n"
-        "## STEP 3 — BEFORE writing any code, output these lines first:\n"
-        "  PHASE: execution\n"
-        f"  PRINCIPALS: {_execute_req}\n"
-        "  EVIDENCE: <which analysis step or file:line justified this change>\n"
-        "  Then write the patch.\n\n"
-        "## STEP 4 — before calling submit, output these two lines exactly:\n"
-        "  FIX_TYPE: <one of: understanding | observation | analysis | diagnosis | decision | design | planning | execution | validation>\n"
-        "  PRINCIPALS: <space-separated list — must satisfy the contract for your chosen type>\n\n"
-        f"{_type_contracts_block}\n\n"
-        "Rules:\n"
-        "  - Output PHASE: markers exactly as shown — the governance system parses them\n"
-        "  - FIX_TYPE must match CLAIMS from STEP 2\n"
-        "  - PRINCIPALS must include ALL required for your type, none of the forbidden"
-    )
+
+    # If bundle provides compiled phase prompts, use them directly
+    if _phase_prompt_parts:
+        _combined_prompt = "\n\n".join(_phase_prompt_parts)
+        extra_parts.append(
+            f"REASONING PROTOCOL (governance system enforces these — follow exactly):\n\n"
+            f"{_combined_prompt}\n\n"
+            f"{_type_contracts_block}\n\n"
+            f"Rules:\n"
+            f"  - Output PHASE: markers exactly as shown — the governance system parses them\n"
+            f"  - FIX_TYPE must match CLAIMS from your decision step\n"
+            f"  - PRINCIPALS must include ALL required for your type, none of the forbidden"
+        )
+    else:
+        # Fallback: hardcoded protocol (pre-bundle)
+        extra_parts.append(
+            "REASONING PROTOCOL (output these markers as you work — they are parsed by the governance system):\n\n"
+            "## STEP 1 — before writing any code, output all three:\n"
+            "  PHASE: analysis\n"
+            f"  PRINCIPALS: {_analysis_req}\n"
+            "  EVIDENCE: <file:line or test name that shows the bug>\n"
+            "  ROOT_CAUSE: <the specific line or logic that causes the failure>\n\n"
+            "## STEP 2 — once root cause is clear, output:\n"
+            "  PHASE: decision\n"
+            f"  PRINCIPALS: {_decision_req}\n"
+            "  CLAIMS: <chosen fix type — execution | diagnosis | design | planning>\n"
+            "  SCOPE: <which files/functions will be changed>\n\n"
+            "## STEP 3 — BEFORE writing any code, output these lines first:\n"
+            "  PHASE: execution\n"
+            f"  PRINCIPALS: {_execute_req}\n"
+            "  EVIDENCE: <which analysis step or file:line justified this change>\n"
+            "  Then write the patch.\n\n"
+            "## STEP 4 — before calling submit, output these two lines exactly:\n"
+            "  FIX_TYPE: <one of: understanding | observation | analysis | diagnosis | decision | design | planning | execution | validation>\n"
+            "  PRINCIPALS: <space-separated list — must satisfy the contract for your chosen type>\n\n"
+            f"{_type_contracts_block}\n\n"
+            "Rules:\n"
+            "  - Output PHASE: markers exactly as shown — the governance system parses them\n"
+            "  - FIX_TYPE must match CLAIMS from STEP 2\n"
+            "  - PRINCIPALS must include ALL required for your type, none of the forbidden"
+        )
 
     fail_to_pass = instance.get("FAIL_TO_PASS", [])
     if fail_to_pass:
@@ -4004,11 +4038,13 @@ def run_agent(
             # p195: principal inference telemetry — rich result with signals/explanation
             try:
                 from principal_inference import run_inference, diff_principals
-                from subtype_contracts import _PHASE_TO_SUBTYPE
+                from jingu_onboard import onboard as _onb_endtelem
+                _gov_endtelem = _onb_endtelem()
                 _pi_telemetry = []
                 for _telem_pr in _monitor.phase_records:
                     _telem_phase = str(getattr(_telem_pr, "phase", ""))
-                    _telem_subtype = _PHASE_TO_SUBTYPE.get(_telem_phase.upper(), "")
+                    _telem_cfg = _gov_endtelem.get_phase_config(_telem_phase)
+                    _telem_subtype = _telem_cfg.subtype if _telem_cfg else ""
                     _telem_rich = run_inference(_telem_pr, _telem_subtype)
                     _telem_diff = diff_principals(
                         getattr(_telem_pr, "principals", []) or [],
