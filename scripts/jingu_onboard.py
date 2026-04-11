@@ -42,15 +42,11 @@ Usage:
 
 from __future__ import annotations
 
-import json
 import logging
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
-
-_DEFAULT_BUNDLE_PATH = str(Path(__file__).parent.parent / "bundle.json")
 
 
 # ── Data classes ──────────────────────────────────────────────────────────────
@@ -300,19 +296,6 @@ def _validate_adapted_schema(schema: dict[str, Any], phase: str, _depth: int = 0
     return errors
 
 
-# ── Phase resolution ──────────────────────────────────────────────────────
-
-_PHASE_TO_SUBTYPE: dict[str, str] = {
-    "UNDERSTAND": "understanding.context_building",
-    "OBSERVE":    "observation.fact_gathering",
-    "ANALYZE":    "analysis.root_cause",
-    "DECIDE":     "decision.fix_direction",
-    "DESIGN":     "design.solution_shape",
-    "EXECUTE":    "execution.code_patch",
-    "JUDGE":      "judge.verification",
-}
-
-
 # ── Bundle parser ─────────────────────────────────────────────────────────
 
 def _parse_contract(phase: str, subtype: str, contract: dict[str, Any]) -> PhaseConfig:
@@ -425,79 +408,16 @@ def _build_governance_from_compiled(
 
 # ── The single entry point ────────────────────────────────────────────────
 
-_cached_governance: JinguGovernance | None = None
-
-
 def onboard(bundle_path: str | None = None, *, force_reload: bool = False) -> JinguGovernance:
-    """Load bundle.json and produce the complete governance runtime.
-
-    This is the SINGLE ENTRY POINT. One call loads all 13 items:
-      1-2.   phase prompts + schemas
-      3-4.   policy prompts + schemas (embedded in phase prompt/schema)
-      5-6.   cognition prompts + schemas (embedded in phase prompt/schema)
-      7-8.   principal prompts + schemas (embedded in phase prompt/schema)
-      9-12.  phase/policy/cognition/principal gates (PhaseGate dataclass)
-      13.    repair hints + routing (repair_templates + routing dicts)
+    """Backward-compatible entry point. Delegates to bundle_compiler.compile_bundle().
 
     Returns:
-        JinguGovernance instance (cached on first call).
+        JinguGovernance instance (cached by compile_bundle on first call).
 
     Raises:
         FileNotFoundError: If bundle.json does not exist.
-        ValueError: If bundle version is incompatible.
+        CompilationError: If bundle fails validation (replaces old ValueError).
     """
-    global _cached_governance
-    if _cached_governance is not None and not force_reload:
-        return _cached_governance
-
-    path = bundle_path or _DEFAULT_BUNDLE_PATH
-    with open(path, "r", encoding="utf-8") as f:
-        bundle = json.load(f)
-
-    # Version check
-    version = bundle.get("version", "")
-    if not version or not version.startswith("1."):
-        raise ValueError(f"Unsupported bundle version: {version}")
-
-    # Parse all contracts
-    contracts_raw = bundle.get("contracts", {})
-    phases: dict[str, PhaseConfig] = {}
-
-    for subtype_key, contract in contracts_raw.items():
-        phase = contract.get("phase", "").upper()
-        if not phase:
-            logger.warning("Contract %s has no phase, skipping", subtype_key)
-            continue
-        phases[phase] = _parse_contract(phase, subtype_key, contract)
-
-    metadata = {
-        "version": version,
-        "compiler_version": bundle.get("compiler_version", ""),
-        "generated_at": bundle.get("generated_at", ""),
-        "contract_count": len(phases),
-        "phases_onboarded": list(phases.keys()),
-    }
-
-    gov = JinguGovernance(phases, metadata)
-
-    # Startup schema validation — log per-phase constrained decoding readiness
-    all_phase_names = ["UNDERSTAND", "OBSERVE", "ANALYZE", "DECIDE", "DESIGN", "EXECUTE", "JUDGE"]
-    for p in all_phase_names:
-        raw = gov.get_extraction_schema(p)
-        if raw is None:
-            logger.info("[onboard] schema_validation phase=%s: no schema (expected)", p)
-            continue
-        constrained = gov.get_constrained_schema(p)
-        if constrained is not None:
-            logger.info("[onboard] schema_validation phase=%s: OK", p)
-        else:
-            logger.warning("[onboard] schema_validation phase=%s: FAILED (regex fallback)", p)
-
-    _cached_governance = gov
-
-    logger.info(
-        "jingu onboarded: %d phases from bundle v%s",
-        len(phases), version,
-    )
-
-    return gov
+    from bundle_compiler import compile_bundle
+    bundle = compile_bundle(bundle_path, force_reload=force_reload)
+    return bundle.governance

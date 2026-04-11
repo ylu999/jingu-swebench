@@ -20,7 +20,15 @@ import json
 import logging
 from typing import Any, Optional
 
-from cognition_loader import CognitionLoader, COGNITION_EXECUTION_ENABLED
+# Phase 3: cognition_loader deleted. COGNITION_EXECUTION_ENABLED is always False.
+# CognitionLoader stub preserves the interface for any remaining import references.
+COGNITION_EXECUTION_ENABLED: bool = False
+
+
+class CognitionLoader:  # type: ignore[no-redef]
+    """Stub — cognition_loader deleted in Phase 3. Flag is always False."""
+    def __init__(self, *args: object, **kwargs: object) -> None:
+        raise RuntimeError("CognitionLoader is not available (COGNITION_EXECUTION_ENABLED=False)")
 
 logger = logging.getLogger(__name__)
 

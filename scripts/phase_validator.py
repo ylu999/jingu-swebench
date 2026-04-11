@@ -20,7 +20,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from cognition_loader import CognitionLoader
+# Phase 3: cognition_loader deleted. CognitionLoader stub for type annotations only.
+from cognition_prompts import CognitionLoader
 from phase_record import PhaseRecord
 from gate_rejection import (
     GateRejection,

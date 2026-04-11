@@ -457,15 +457,22 @@ def _step_cp_update_and_verdict(
         _cognition_rejected = False
         if _pr is not None:
             try:
-                from cognition_loader import COGNITION_EXECUTION_ENABLED as _COG_ENABLED
+                from cognition_prompts import COGNITION_EXECUTION_ENABLED as _COG_ENABLED
                 if _COG_ENABLED:
-                    from cognition_loader import CognitionLoader as _CogLoader
+                    from cognition_prompts import CognitionLoader as _CogLoader
                     from phase_validator import (
                         validate_phase_record as _validate_pr,
                         build_validation_feedback as _build_cog_feedback,
                     )
-                    from jingu_loader import JinguLoader as _JL
-                    _cog_bundle = _JL()._bundle
+                    import json as _json_cog
+                    import os as _os_cog
+                    from pathlib import Path as _Path_cog
+                    _bundle_path_cog = _os_cog.environ.get(
+                        "JINGU_BUNDLE_PATH",
+                        str(_Path_cog(__file__).parent.parent / "bundle.json"),
+                    )
+                    with open(_bundle_path_cog) as _f_cog:
+                        _cog_bundle = _json_cog.load(_f_cog)
                     _cog_loader = _CogLoader(_cog_bundle)
                     _cog_errors = _validate_pr(_pr, _cog_loader)
                     if _cog_errors:

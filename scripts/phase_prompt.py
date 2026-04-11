@@ -12,40 +12,18 @@ ANALYZE/EXECUTE/JUDGE guidance is derived from subtype_contracts.py (p193)
 so prompt vocabulary stays in sync with principal_gate.py enforcement.
 """
 
-# ── Principal Guidance Source Selection ──────────────────────────────────────
-# Feature flag: USE_BUNDLE_LOADER switches between:
-#   - New path: JinguLoader reads compiled bundle (p219)
-#   - Legacy path: subtype_contracts.py (will be deprecated)
-
-try:
-    from jingu_loader import USE_BUNDLE_LOADER
-except ImportError:
-    USE_BUNDLE_LOADER = False
-
-
-def _load_principal_guidance_from_bundle(phase: str) -> str:
-    """Load principal guidance from the compiled bundle via policy_onboarding."""
-    try:
-        from policy_onboarding import get_prompt_slice
-        return get_prompt_slice(phase) or ""
-    except Exception:
-        return ""
-
-
-def _load_principal_guidance_legacy(phase: str) -> str:
-    """Load principal guidance from subtype_contracts.py (legacy path)."""
-    try:
-        from subtype_contracts import build_phase_principal_guidance
-        return build_phase_principal_guidance(phase) or ""
-    except Exception:
-        return ""
-
+# ── Principal Guidance Source ─────────────────────────────────────────────────
+# Phase 3: compile_bundle() is the only runtime path. Load principal guidance
+# directly from jingu_onboard (which delegates to compile_bundle).
 
 def _get_principal_guidance(phase: str) -> str:
-    """Get principal guidance for a phase, using feature-flagged source."""
-    if USE_BUNDLE_LOADER:
-        return _load_principal_guidance_from_bundle(phase)
-    return _load_principal_guidance_legacy(phase)
+    """Get principal guidance for a phase from the compiled bundle."""
+    try:
+        from jingu_onboard import onboard
+        gov = onboard()
+        return gov.get_phase_prompt(phase) or ""
+    except Exception:
+        return ""
 
 
 # Load principal guidance for each phase.
