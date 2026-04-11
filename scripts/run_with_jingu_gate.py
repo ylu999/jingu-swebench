@@ -347,6 +347,11 @@ def _install_step_monitor(
     _orig_step = ProgressTrackingAgent.step
     state = StepMonitorState(instance_id, attempt, instance)
 
+    # p226-05: per-attempt extraction metrics counters
+    state._extraction_structured = 0
+    state._extraction_regex_fallback = 0
+    state._extraction_no_schema = 0
+
     # P18: register state in global registry keyed by instance_id.
     # _monitored_step dispatches via self.instance_id, not closure — concurrent-safe.
     _register_monitor(instance_id, state, cp_state_holder, mode)
@@ -1311,6 +1316,24 @@ def run_agent(
             jingu_body["verify_history"] = _monitor.verify_history
             # p190: per-phase records — one entry per VerdictAdvance during this attempt
             jingu_body["phase_records"] = [r.as_dict() for r in _monitor.phase_records]
+            # p226-05: structured extraction metrics — track structured vs regex fallback rates
+            _em_structured = getattr(_monitor, "_extraction_structured", 0)
+            _em_regex = getattr(_monitor, "_extraction_regex_fallback", 0)
+            _em_no_schema = getattr(_monitor, "_extraction_no_schema", 0)
+            _em_total = _em_structured + _em_regex + _em_no_schema
+            jingu_body["extraction_metrics"] = {
+                "structured": _em_structured,
+                "regex_fallback": _em_regex,
+                "no_schema": _em_no_schema,
+                "total": _em_total,
+            }
+            print(
+                f"    [extraction_metrics] attempt={attempt}"
+                f" structured={_em_structured}/{_em_total}"
+                f" regex_fallback={_em_regex}/{_em_total}"
+                f" no_schema={_em_no_schema}/{_em_total}",
+                flush=True,
+            )
             # p207-P9: log selective bypass summary at attempt end
             if _monitor._bypassed_principals:
                 _bp_sorted = sorted(_monitor._bypassed_principals)

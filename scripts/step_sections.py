@@ -390,6 +390,9 @@ def _step_cp_update_and_verdict(
                     )
                     state.phase_records.append(_pr)
                     _pr_source = "structured"
+                    # p226-05: count structured extraction success
+                    if hasattr(state, "_extraction_structured"):
+                        state._extraction_structured += 1
                     _declared_phase = (_structured_parsed.get("phase") or "").upper()
                     _foreign = bool(_declared_phase and _declared_phase != _eval_phase)
                     _acc_len = len(_accumulated) if _accumulated else 0
@@ -406,6 +409,11 @@ def _step_cp_update_and_verdict(
                     )
                     state.phase_records.append(_pr)
                     _pr_source = "extracted"
+                    # p226-05: distinguish no_schema (UNDERSTAND) from real regex fallback
+                    if hasattr(state, "_extraction_no_schema") and _extraction_schema is None:
+                        state._extraction_no_schema += 1
+                    elif hasattr(state, "_extraction_regex_fallback"):
+                        state._extraction_regex_fallback += 1
                     _acc_len = len(_accumulated) if _accumulated else 0
                     _has_refs = bool(getattr(_pr, "evidence_refs", None))
                     _has_rc = bool((getattr(_pr, "root_cause", "") or "").strip())
