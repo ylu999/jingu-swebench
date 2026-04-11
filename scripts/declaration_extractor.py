@@ -185,6 +185,154 @@ def extract_phase_record_from_structured(
     )
 
 
+def _build_content_preview(parsed: dict, phase: str) -> str:
+    """Build a human-readable content preview from structured parsed output.
+
+    Each phase has different key fields worth surfacing.  Truncated to 500 chars.
+
+    Args:
+        parsed: Parsed JSON dict from structured LLM output.
+        phase:  Canonical phase name (uppercase, e.g. 'ANALYZE').
+
+    Returns:
+        Content preview string (max 500 chars).
+    """
+    parts: list[str] = []
+    phase = phase.upper()
+
+    if phase == "ANALYZE":
+        if parsed.get("root_cause"):
+            parts.append(f"ROOT_CAUSE: {parsed['root_cause']}")
+        for h in (parsed.get("alternatives_considered") or parsed.get("alternative_hypotheses") or []):
+            if isinstance(h, dict):
+                hyp = h.get("hypothesis", "")
+                rej = h.get("why_rejected", "")
+                parts.append(f"HYPOTHESIS: {hyp} — RULED_OUT: {rej}")
+            elif isinstance(h, str):
+                parts.append(f"HYPOTHESIS: {h}")
+
+    elif phase == "EXECUTE":
+        if parsed.get("plan") or parsed.get("patch_description"):
+            parts.append(f"PATCH: {parsed.get('patch_description') or parsed.get('plan', '')}")
+        if parsed.get("change_scope"):
+            parts.append(f"FILES: {', '.join(parsed['change_scope'])}")
+
+    elif phase == "JUDGE":
+        if parsed.get("verification_result"):
+            passed = parsed["verification_result"]
+            conf = parsed.get("confidence", "")
+            parts.append(f"TESTS_PASSED: {passed}")
+            if conf:
+                parts.append(f"DETAILS: confidence={conf}")
+        for crit in (parsed.get("criteria") or parsed.get("remaining_risks") or []):
+            if isinstance(crit, dict):
+                parts.append(f"CRITERION: {crit.get('name', '')} MET: {crit.get('met', '')}")
+            elif isinstance(crit, str):
+                parts.append(f"CRITERION: {crit}")
+
+    elif phase == "DECIDE":
+        if parsed.get("chosen") or parsed.get("content"):
+            parts.append(f"CHOSEN: {parsed.get('chosen', parsed.get('content', ''))}")
+        if parsed.get("rationale"):
+            parts.append(f"RATIONALE: {parsed['rationale']}")
+
+    elif phase == "DESIGN":
+        if parsed.get("scope") or parsed.get("content"):
+            parts.append(f"SCOPE: {parsed.get('scope', parsed.get('content', ''))}")
+        if parsed.get("files") or parsed.get("change_scope"):
+            files = parsed.get("files") or parsed.get("change_scope") or []
+            if isinstance(files, list):
+                parts.append(f"FILES: {', '.join(str(f) for f in files)}")
+
+    elif phase == "OBSERVE":
+        observations = parsed.get("observations") or parsed.get("content", "")
+        if isinstance(observations, list):
+            for obs in observations[:3]:
+                parts.append(f"OBS: {obs}")
+        elif isinstance(observations, str) and observations:
+            parts.append(f"OBS: {observations}")
+
+    # Fallback: use 'content' field if no phase-specific parts were assembled
+    if not parts and parsed.get("content"):
+        parts.append(str(parsed["content"]))
+
+    return "\n".join(parts)[:500]
+
+
+# Valid subtype values for validation (derived from SUBTYPE_CONTRACTS keys)
+_VALID_SUBTYPES: set[str] = {
+    "observation.fact_gathering",
+    "analysis.root_cause",
+    "decision.fix_direction",
+    "design.solution_shape",
+    "execution.code_patch",
+    "judge.verification",
+}
+
+
+def build_phase_record_from_structured(
+    parsed: dict,
+    phase: str,
+    from_steps: list[int] | None = None,
+):
+    """Build a PhaseRecord from structured (bundle-schema-enforced) JSON output.
+
+    Replaces extract_phase_record_from_structured() for bundle schema compatibility.
+    Bundle schemas output evidence_refs as [string], not [{file, line, observation}].
+    ANALYZE bundle uses 'evidence' as [string] (from cognition_contracts).
+
+    Args:
+        parsed: Parsed JSON dict from structured LLM output (bundle schema shape).
+        phase: Phase name (e.g. 'ANALYZE', 'EXECUTE', 'JUDGE').
+        from_steps: Step indices this record derives from (for gate provenance).
+
+    Returns:
+        PhaseRecord with fields populated from parsed JSON.
+    """
+    from phase_record import PhaseRecord
+
+    phase_upper = _PHASE_NORM.get(phase.upper(), phase.upper())
+
+    # Subtype: prefer parsed value, validate against known subtypes, fallback to map
+    raw_subtype = (parsed.get("subtype") or "").strip()
+    if raw_subtype and raw_subtype in _VALID_SUBTYPES:
+        subtype = raw_subtype
+    else:
+        subtype = _PHASE_SUBTYPE_MAP.get(phase_upper, "unknown")
+
+    principals = [p.strip().lower() for p in (parsed.get("principals") or []) if p.strip()]
+
+    # Bundle schema: evidence_refs is [string], ANALYZE uses 'evidence' as [string]
+    evidence_refs: list[str] = []
+    raw_refs = parsed.get("evidence_refs") or parsed.get("evidence") or []
+    for ref in raw_refs:
+        if isinstance(ref, str) and ref.strip():
+            evidence_refs.append(ref.strip())
+        elif isinstance(ref, dict):
+            # Legacy fallback: old {file, line, observation} shape
+            f = ref.get("file", "")
+            line = ref.get("line")
+            if f:
+                evidence_refs.append(f"{f}:{line}" if line else f)
+
+    claims = [c for c in (parsed.get("claims") or []) if isinstance(c, str) and c.strip()]
+
+    content = _build_content_preview(parsed, phase_upper)
+
+    return PhaseRecord(
+        phase=phase_upper,
+        subtype=subtype,
+        principals=principals,
+        claims=claims,
+        evidence_refs=evidence_refs,
+        from_steps=from_steps if from_steps is not None else [],
+        content=content,
+        root_cause=parsed.get("root_cause", ""),
+        causal_chain=parsed.get("causal_chain", ""),
+        plan=parsed.get("plan", ""),
+    )
+
+
 if __name__ == "__main__":
     # Smoke test
     sample = """
