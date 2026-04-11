@@ -631,11 +631,8 @@ def _step_verify_if_needed(
                 ["docker", "exec", "-w", "/testbed", cid, "git", "diff", _base_commit],
                 capture_output=True, text=True, timeout=30,  # Bug F fix (p20): 10s too short under 30-worker load
             )
-            current_patch = (
-                _git_diff_result.stdout.strip()
-                if _git_diff_result.returncode == 0
-                else ""
-            )
+            _raw_diff = _git_diff_result.stdout if _git_diff_result.returncode == 0 else ""
+            current_patch = (_raw_diff.strip() + "\n") if _raw_diff.strip() else ""
             if not current_patch:
                 step_patch_non_empty = False
                 break
@@ -2325,6 +2322,10 @@ def run_controlled_verify(
             "stdout": "", "stderr": "",
             "error": "no patch to apply",
         }
+
+    # git apply requires patch to end with newline; .strip() upstream may remove it
+    if not patch_text.endswith("\n"):
+        patch_text = patch_text + "\n"
 
     try:
         # Step 1: write patch to a temp file inside container
