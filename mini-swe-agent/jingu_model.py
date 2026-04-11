@@ -42,6 +42,7 @@ class JinguModel(LitellmModel):
         phase: str,
         schema: dict[str, Any],
         *,
+        phase_hint: str = "",
         max_tokens: int = 2048,
     ) -> dict[str, Any] | None:
         """Extract structured phase data from accumulated agent text.
@@ -53,6 +54,7 @@ class JinguModel(LitellmModel):
             accumulated_text: All assistant text from the current phase.
             phase: Phase name (e.g. "ANALYZE", "EXECUTE").
             schema: JSON Schema the response must conform to.
+            phase_hint: Optional success criteria from cognition spec, prepended to prompt.
             max_tokens: Max tokens for extraction response.
 
         Returns:
@@ -64,8 +66,17 @@ class JinguModel(LitellmModel):
 
         # Build extraction prompt — ask LLM to summarize its own reasoning
         # into the structured format. This is a separate call from the agent loop.
+        # p226-03: prepend phase_hint (from cognition success_criteria) when available
+        _hint_block = ""
+        if phase_hint:
+            _hint_block = (
+                f"Success criteria for the {phase} phase:\n"
+                f"{phase_hint}\n\n"
+                f"Focus your extraction on evidence that addresses these criteria.\n\n"
+            )
         extraction_prompt = (
             f"You are summarizing your own reasoning from the {phase} phase into structured JSON.\n\n"
+            f"{_hint_block}"
             f"Below is everything you wrote during the {phase} phase. "
             f"Extract the key information into the required JSON schema fields.\n\n"
             f"--- BEGIN {phase} PHASE OUTPUT ---\n"

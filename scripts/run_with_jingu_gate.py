@@ -646,6 +646,14 @@ def _step_cp_update_and_verdict(
                     from jingu_onboard import onboard as _onboard_fn
                     _gov = _onboard_fn()
                     _extraction_schema = _gov.get_constrained_schema(_eval_phase)
+                    # p226-03: derive phase_hint from cognition success_criteria
+                    _phase_hint = ""
+                    try:
+                        _cog = _gov.get_cognition(_eval_phase)
+                        if _cog and _cog.success_criteria:
+                            _phase_hint = "; ".join(_cog.success_criteria)
+                    except Exception:
+                        pass  # non-critical — hint is optional
                     if _extraction_schema is not None and hasattr(agent_self, "model"):
                         _model = agent_self.model
                         if hasattr(_model, "structured_extract"):
@@ -653,6 +661,7 @@ def _step_cp_update_and_verdict(
                                 accumulated_text=_extract_text,
                                 phase=_eval_phase,
                                 schema=_extraction_schema,
+                                phase_hint=_phase_hint,
                             )
                 except Exception as _se_exc:
                     print(
@@ -674,6 +683,7 @@ def _step_cp_update_and_verdict(
                     _acc_len = len(_accumulated) if _accumulated else 0
                     print(
                         f"    [phase_record] extraction_method=structured"
+                        f" extraction_schema_source=bundle"
                         f" accumulated_chars={_acc_len}"
                         f" fields={list(_structured_parsed.keys())}",
                         flush=True,
@@ -690,6 +700,7 @@ def _step_cp_update_and_verdict(
                     _has_rc = bool((getattr(_pr, "root_cause", "") or "").strip())
                     print(
                         f"    [phase_record] extraction_method=regex_fallback"
+                        f" extraction_schema_source=regex_fallback"
                         f" accumulated_chars={_acc_len}"
                         f" has_root_cause={_has_rc}"
                         f" has_evidence_refs={_has_refs}",
