@@ -39,7 +39,11 @@ from patch_reviewer import review_patch_bedrock, ReviewResult
 from retry_controller import build_retry_plan, classify_outcome, RetryPlan
 # p208: failure classification engine (system-level routing, separate from outcome engine)
 from failure_classifier import classify_failure, get_routing as get_failure_routing
-from repair_prompts import build_repair_prompt
+from repair_prompts import build_repair_prompt, build_sdg_repair_prompt
+from gate_rejection import SDG_ENABLED as _SDG_ENABLED, build_repair_from_rejection as _build_sdg_repair
+# p216: data-driven failure routing engine
+from failure_routing import route_failure as route_failure_p216, get_routing_entry, is_data_driven_routing_enabled
+from strategy_prompts import get_strategy_prompt
 from governance_runtime import (
     install_governance_pack,
     run_governance_packs,
@@ -222,6 +226,8 @@ def print_activation_proof(identity: dict) -> None:
     print(f"[init] principal_gate_enabled=True")
     # p194: system-inferred principal diff — activation proof (RT4)
     print(f"[init] principal_inference_enabled=True")
+    # p217: self-describing gate rejection — activation proof (RT4)
+    print(f"[init] sdg_enabled={_SDG_ENABLED}")
 
 # ── Verify prerequisite gate (p192) ────────────────────────────────────────────
 
@@ -890,7 +896,10 @@ def _step_cp_update_and_verdict(
         if _eval_phase == "ANALYZE" and _pr is not None:
             try:
                 from analysis_gate import evaluate_analysis as _eval_analysis
-                _analysis_verdict = _eval_analysis(_pr)
+                _analysis_verdict = _eval_analysis(
+                    _pr,
+                    structured_output=(_pr_source == "structured"),
+                )
                 _ag_reject_count = state.analysis_gate_rejects
                 print(
                     f"    [analysis_gate] passed={_analysis_verdict.passed}"
@@ -916,27 +925,43 @@ def _step_cp_update_and_verdict(
                             state.cp_state, phase="ANALYZE", no_progress_steps=0
                         )
                         _cp_s = state.cp_state
-                    # Inject field-level contract feedback (p214)
-                    _ag_scores = _analysis_verdict.scores
-                    _ag_pass = 0.5  # must match analysis_gate._THRESHOLD
-                    _ag_field_status = (
-                        f"- ROOT_CAUSE: {'OK' if _ag_scores.get('code_grounding', 0) >= _ag_pass else 'MISSING'}"
-                        f" (score={_ag_scores.get('code_grounding', 0):.1f})\n"
-                        f"- CAUSAL_CHAIN: {'OK' if _ag_scores.get('causal_chain', 0) >= _ag_pass else 'MISSING'}"
-                        f" (score={_ag_scores.get('causal_chain', 0):.1f})\n"
-                        f"- ALTERNATIVES: {'OK' if _ag_scores.get('alternative_hypothesis', 0) >= _ag_pass else 'MISSING'}"
-                        f" (score={_ag_scores.get('alternative_hypothesis', 0):.1f})"
-                    )
-                    agent_self.messages.append({
-                        "role": "user",
-                        "content": (
-                            f"[analysis_gate REJECT]\n"
-                            f"ANALYZE gate result:\n"
-                            f"{_ag_field_status}\n\n"
-                            f"Fix only the MISSING fields. Do not rewrite fields already OK.\n"
-                            f"Stay in ANALYZE phase."
-                        ),
-                    })
+                    # p217: SDG structured repair or p214 field-level fallback
+                    _sdg_repair_used = False
+                    if _SDG_ENABLED and getattr(_analysis_verdict, "rejection", None):
+                        try:
+                            _sdg_content = _build_sdg_repair(_analysis_verdict.rejection)
+                            _sdg_content += "\n\nFix only the failing fields. Do not rewrite fields already OK.\nStay in ANALYZE phase."
+                            agent_self.messages.append({
+                                "role": "user",
+                                "content": _sdg_content,
+                            })
+                            _sdg_repair_used = True
+                            print(f"    [analysis_gate] sdg_repair_used=true failures={len(_analysis_verdict.rejection.failures)}", flush=True)
+                        except Exception as _sdg_exc:
+                            print(f"    [analysis_gate] sdg_repair error (fallback to p214): {_sdg_exc}", flush=True)
+
+                    if not _sdg_repair_used:
+                        # Fallback: p214 field-level contract feedback
+                        _ag_scores = _analysis_verdict.scores
+                        _ag_pass = 0.5  # must match analysis_gate._THRESHOLD
+                        _ag_field_status = (
+                            f"- ROOT_CAUSE: {'OK' if _ag_scores.get('code_grounding', 0) >= _ag_pass else 'MISSING'}"
+                            f" (score={_ag_scores.get('code_grounding', 0):.1f})\n"
+                            f"- CAUSAL_CHAIN: {'OK' if _ag_scores.get('causal_chain', 0) >= _ag_pass else 'MISSING'}"
+                            f" (score={_ag_scores.get('causal_chain', 0):.1f})\n"
+                            f"- ALTERNATIVES: {'OK' if _ag_scores.get('alternative_hypothesis', 0) >= _ag_pass else 'MISSING'}"
+                            f" (score={_ag_scores.get('alternative_hypothesis', 0):.1f})"
+                        )
+                        agent_self.messages.append({
+                            "role": "user",
+                            "content": (
+                                f"[analysis_gate REJECT]\n"
+                                f"ANALYZE gate result:\n"
+                                f"{_ag_field_status}\n\n"
+                                f"Fix only the MISSING fields. Do not rewrite fields already OK.\n"
+                                f"Stay in ANALYZE phase."
+                            ),
+                        })
                     # Invalidate cached phase record so next step re-extracts
                     state.phase_records = [
                         r for r in state.phase_records
@@ -972,6 +997,7 @@ def _step_cp_update_and_verdict(
                 _pr, _eval_phase,
                 observe_tool_signal=_obs_tool_sig,
                 last_analyze_root_cause=state.last_analyze_root_cause if _eval_phase == "EXECUTE" else "",
+                structured_output=(_pr_source == "structured"),
             )
             # 改动10: if agent declared a foreign phase, prepend the reason so gate output
             # reflects the actual problem (phase boundary violation) rather than a misleading
@@ -1015,9 +1041,37 @@ def _step_cp_update_and_verdict(
                     _pg_guidance = ""
                 _repair_suffix = f" Repair phase: {_repair_phase}." if _repair_phase else ""
                 _guidance_suffix = f" {_pg_guidance}" if _pg_guidance else ""
-                state.pending_redirect_hint = (
-                    f"[{_admission.status}:{_pg_violation}] {_pg_feedback}{_repair_suffix}{_guidance_suffix}"
-                )
+                # p217: Use SDG structured repair hint when available
+                if _SDG_ENABLED and getattr(_admission, "rejection", None):
+                    try:
+                        _sdg_hint = _build_sdg_repair(_admission.rejection)
+                        state.pending_redirect_hint = _sdg_hint
+                        print(f"    [principal_gate] sdg_repair_used=true failures={len(_admission.rejection.failures)}", flush=True)
+                    except Exception as _sdg_exc:
+                        print(f"    [principal_gate] sdg_repair error (fallback): {_sdg_exc}", flush=True)
+                        state.pending_redirect_hint = (
+                            f"[{_admission.status}:{_pg_violation}] {_pg_feedback}{_repair_suffix}{_guidance_suffix}"
+                        )
+                else:
+                    state.pending_redirect_hint = (
+                        f"[{_admission.status}:{_pg_violation}] {_pg_feedback}{_repair_suffix}{_guidance_suffix}"
+                    )
+                # p216: augment redirect hint with data-driven routing strategy
+                if is_data_driven_routing_enabled():
+                    try:
+                        _p216_phase = _eval_phase
+                        # Extract principal name from violation code
+                        _p216_principal = _pg_violation.split(":")[-1] if ":" in _pg_violation else _pg_violation
+                        _p216_next, _p216_strategy = route_failure_p216(_p216_phase, _p216_principal)
+                        _p216_prompt = get_strategy_prompt(_p216_strategy)
+                        state.pending_redirect_hint = _p216_prompt + "\n\n" + state.pending_redirect_hint
+                        print(
+                            f"    [p216-routing] phase={_p216_phase} principal={_p216_principal}"
+                            f" -> next={_p216_next} strategy={_p216_strategy}",
+                            flush=True,
+                        )
+                    except Exception as _p216_exc:
+                        print(f"    [p216-routing] error (non-fatal): {_p216_exc}", flush=True)
                 # ── cognition-aware control: admission result → cp_state → verdict ──
                 if cp_state_holder is not None:
                     cp_state_holder[0] = _set_pv(cp_state_holder[0], _pg_violation)

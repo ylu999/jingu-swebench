@@ -252,18 +252,30 @@ _RULE_TO_FIELD: dict[str, tuple[str, str]] = {
 _THRESHOLD = 0.5  # Soft gate: reject only clearly inadequate analyses
 
 
-def evaluate_analysis(pr: PhaseRecord) -> AnalysisVerdict:
+def evaluate_analysis(pr: PhaseRecord, *, structured_output: bool = False) -> AnalysisVerdict:
     """
     Evaluate analysis phase quality. Returns verdict with pass/fail + reasons.
 
     Threshold is 0.5 (soft gate). We reject clearly wrong analyses,
     not borderline ones.
+
+    Args:
+        pr: PhaseRecord to evaluate.
+        structured_output: When True (p221), schema guarantees structural
+            correctness (required fields present, types correct, min lengths met).
+            Gate skips structural presence checks and only performs semantic checks:
+            - code_grounding: still checks whether root_cause references code
+            - alternative_hypothesis: downgraded to quality signal (schema enforces presence)
+            - causal_chain: still checks for causal chain quality
+            When False: all checks (structural + semantic) as before.
     """
     failed = []
     reasons = []
     scores = {}
 
-    # Rule 1: Code grounding
+    # Rule 1: Code grounding (semantic check — kept in both modes)
+    # When structured_output=True, root_cause and evidence are guaranteed present
+    # by schema, but we still check whether they contain actual code references.
     score1 = _check_code_grounding(pr)
     scores["code_grounding"] = score1
     if score1 < _THRESHOLD:
@@ -277,13 +289,21 @@ def evaluate_analysis(pr: PhaseRecord) -> AnalysisVerdict:
     score2 = _check_alternative_hypothesis(pr)
     scores["alternative_hypothesis"] = score2
     if score2 < _THRESHOLD:
-        failed.append("alternative_hypothesis")
-        reasons.append(
-            "Analysis contains a single hypothesis without alternatives. "
-            "Consider at least 2 hypotheses and explain why non-chosen ones were rejected."
-        )
+        if structured_output:
+            # In structured mode, the schema already enforces alternative_hypotheses
+            # presence (minItems: 1). A low score means the content is vague but
+            # structurally present. Downgrade to quality signal — don't block.
+            scores["alternative_hypothesis_note"] = (
+                "structured_output: schema enforces presence, score is quality signal only"
+            )
+        else:
+            failed.append("alternative_hypothesis")
+            reasons.append(
+                "Analysis contains a single hypothesis without alternatives. "
+                "Consider at least 2 hypotheses and explain why non-chosen ones were rejected."
+            )
 
-    # Rule 3: Causal chain
+    # Rule 3: Causal chain (semantic check — kept in both modes)
     score3 = _check_causal_chain(pr)
     scores["causal_chain"] = score3
     if score3 < _THRESHOLD:

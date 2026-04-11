@@ -1,4 +1,5 @@
 """Phase-specific repair prompts for the failure attribution system.
+p217 addition: build_sdg_repair_prompt() for structured gate rejection feedback.
 
 Each prompt targets a specific failure type and instructs the agent
 to focus on the corresponding repair phase.
@@ -122,3 +123,32 @@ def build_repair_prompt(failure_type: str, cv_result: dict, routing: dict) -> st
     # NBR safety: must never return empty
     assert result.strip(), "build_repair_prompt produced empty output"
     return result
+
+
+# ── p217: SDG repair prompt from GateRejection ──────────────────────────────
+
+def build_sdg_repair_prompt(rejection) -> str:
+    """Build a repair prompt from a GateRejection object.
+
+    Combines structured gate feedback (contract + field failures + extracted)
+    into a format suitable for agent retry injection.
+
+    Args:
+        rejection: GateRejection from gate_rejection.py
+
+    Returns:
+        Non-empty repair prompt string. Falls back to basic format if
+        build_repair_from_rejection import fails.
+    """
+    try:
+        from gate_rejection import build_repair_from_rejection
+        return build_repair_from_rejection(rejection)
+    except Exception:
+        # Fallback: basic formatting if SDG types unavailable
+        parts = [f"[GATE REJECT: {getattr(rejection, 'gate_name', 'unknown')}]"]
+        failures = getattr(rejection, "failures", [])
+        for f in failures:
+            field = getattr(f, "field", "?")
+            hint = getattr(f, "hint", "fix this field")
+            parts.append(f"- {field}: {hint}")
+        return "\n".join(parts) if parts else "Gate rejected. Fix the missing fields."

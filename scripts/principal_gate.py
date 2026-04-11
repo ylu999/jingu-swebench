@@ -368,14 +368,14 @@ def _build_admission_rejection(
     )
 
 
-def evaluate_admission(phase_record, phase: str, next_phase: str = "", observe_tool_signal: bool = False, last_analyze_root_cause: str = "") -> AdmissionResult:
+def evaluate_admission(phase_record, phase: str, next_phase: str = "", observe_tool_signal: bool = False, last_analyze_root_cause: str = "", structured_output: bool = False) -> AdmissionResult:
     """
     Full admission check for a PhaseRecord at phase boundary.
 
     Checks (in order):
       1. required principals  — missing → RETRYABLE
       2. forbidden principals — declared → REJECTED (fake principal / phase boundary violation)
-      3. required fields      — missing → RETRYABLE
+      3. required fields      — missing → RETRYABLE (skipped when structured_output=True)
       4. allowed_next         — forbidden transition → REJECTED (only if next_phase provided)
 
     Returns AdmissionResult(ADMITTED / RETRYABLE / REJECTED, reasons).
@@ -385,6 +385,9 @@ def evaluate_admission(phase_record, phase: str, next_phase: str = "", observe_t
         phase_record: PhaseRecord or object with .principals / field attributes
         phase:        current phase name (e.g. "ANALYZE")
         next_phase:   proposed next phase (e.g. "EXECUTE"); "" = skip transition check
+        structured_output: When True (p221), skip structural field presence checks
+            (steps 3, 3a, 3b) — JSON schema already enforces them.
+            Principal checks (steps 1, 2) and transition checks (step 4) still apply.
     """
     try:
         retryable: list[str] = []
@@ -407,54 +410,58 @@ def evaluate_admission(phase_record, phase: str, next_phase: str = "", observe_t
             if fp in declared:
                 rejected.append(f"forbidden_principal:{fp}")
 
-        # 3. required fields (RETRYABLE)
-        try:
-            from subtype_contracts import get_required_fields as _get_rf
-            req_fields = _get_rf(phase)
-        except Exception:
-            req_fields = []
-        for field_name in req_fields:
-            val = getattr(phase_record, field_name, None)
-            if not val:  # None, [], "", 0 all count as missing
-                retryable.append(f"missing_required_field:{field_name}")
+        # Steps 3, 3a, 3b: structural field presence checks.
+        # When structured_output=True (p221), JSON schema already enforces field presence
+        # and min_length — skip these structural checks, keep only semantic checks.
+        if not structured_output:
+            # 3. required fields (RETRYABLE)
+            try:
+                from subtype_contracts import get_required_fields as _get_rf
+                req_fields = _get_rf(phase)
+            except Exception:
+                req_fields = []
+            for field_name in req_fields:
+                val = getattr(phase_record, field_name, None)
+                if not val:  # None, [], "", 0 all count as missing
+                    retryable.append(f"missing_required_field:{field_name}")
 
-        # 3a. structured fields check (RETRYABLE) — ANALYZE requires root_cause (p23)
-        # EXECUTE requires plan grounded in root_cause (causal binding)
-        if phase.upper() == "ANALYZE":
-            _rc = getattr(phase_record, "root_cause", None) or ""
-            if not _rc:
-                retryable.append("missing_root_cause")
+            # 3a. structured fields check (RETRYABLE) — ANALYZE requires root_cause (p23)
+            # EXECUTE requires plan grounded in root_cause (causal binding)
+            if phase.upper() == "ANALYZE":
+                _rc = getattr(phase_record, "root_cause", None) or ""
+                if not _rc:
+                    retryable.append("missing_root_cause")
 
-        if phase.upper() == "EXECUTE":
-            _plan = getattr(phase_record, "plan", None) or ""
-            if not _plan:
-                retryable.append("missing_plan")
-            elif last_analyze_root_cause:
-                # Causal binding: PLAN must reference (contain a substring of) the root cause.
-                # Use first 60 chars of root_cause as anchor — avoids false negatives from
-                # minor paraphrase while still catching completely ungrounded plans.
-                _rc_anchor = last_analyze_root_cause[:60].strip().lower()
-                if _rc_anchor and _rc_anchor not in _plan.lower():
-                    retryable.append("plan_not_grounded_in_root_cause")
+            if phase.upper() == "EXECUTE":
+                _plan = getattr(phase_record, "plan", None) or ""
+                if not _plan:
+                    retryable.append("missing_plan")
+                elif last_analyze_root_cause:
+                    # Causal binding: PLAN must reference (contain a substring of) the root cause.
+                    # Use first 60 chars of root_cause as anchor — avoids false negatives from
+                    # minor paraphrase while still catching completely ungrounded plans.
+                    _rc_anchor = last_analyze_root_cause[:60].strip().lower()
+                    if _rc_anchor and _rc_anchor not in _plan.lower():
+                        retryable.append("plan_not_grounded_in_root_cause")
 
-        # 3b. has_evidence_basis check (RETRYABLE) — for phases that require evidence basis
-        # but NOT specifically file.py:line regex matches (e.g. ANALYZE, OBSERVE).
-        # Y-lite: has_evidence_basis = evidence_refs OR from_steps OR observe_tool_signal.
-        # observe_tool_signal=True when agent used any observation-class tool (Read/Grep/Search/Bash)
-        # in this step — tools ARE the evidence basis for OBSERVE, even without explicit EVIDENCE text.
-        # This separates representational artifact (regex-extracted file refs) from cognition
-        # requirement (evidence grounding via any observation mechanism).
-        try:
-            from subtype_contracts import SUBTYPE_CONTRACTS as _SC, _PHASE_TO_SUBTYPE as _PTS
-            _subtype = _PTS.get(phase.upper(), "")
-            _contract = _SC.get(_subtype, {})
-            if _contract.get("has_evidence_basis_required"):
-                _evidence_refs = getattr(phase_record, "evidence_refs", None) or []
-                _from_steps = getattr(phase_record, "from_steps", None) or []
-                if not _evidence_refs and not _from_steps and not observe_tool_signal:
-                    retryable.append("missing_evidence_basis")
-        except Exception:
-            pass
+            # 3b. has_evidence_basis check (RETRYABLE) — for phases that require evidence basis
+            # but NOT specifically file.py:line regex matches (e.g. ANALYZE, OBSERVE).
+            # Y-lite: has_evidence_basis = evidence_refs OR from_steps OR observe_tool_signal.
+            # observe_tool_signal=True when agent used any observation-class tool (Read/Grep/Search/Bash)
+            # in this step — tools ARE the evidence basis for OBSERVE, even without explicit EVIDENCE text.
+            # This separates representational artifact (regex-extracted file refs) from cognition
+            # requirement (evidence grounding via any observation mechanism).
+            try:
+                from subtype_contracts import SUBTYPE_CONTRACTS as _SC, _PHASE_TO_SUBTYPE as _PTS
+                _subtype = _PTS.get(phase.upper(), "")
+                _contract = _SC.get(_subtype, {})
+                if _contract.get("has_evidence_basis_required"):
+                    _evidence_refs = getattr(phase_record, "evidence_refs", None) or []
+                    _from_steps = getattr(phase_record, "from_steps", None) or []
+                    if not _evidence_refs and not _from_steps and not observe_tool_signal:
+                        retryable.append("missing_evidence_basis")
+            except Exception:
+                pass
 
         # 4. allowed_next transition check (REJECTED — boundary error)
         if next_phase:
