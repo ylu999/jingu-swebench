@@ -364,6 +364,11 @@ class StepMonitorState:
         self._observe_tool_signal: bool = False
         # p23: causal binding — last ANALYZE root_cause, passed to EXECUTE gate.
         self.last_analyze_root_cause: str = ""
+        # p221: per-phase accumulated assistant text for phase record extraction.
+        # Agent outputs short thinking texts across many steps. Accumulate them so
+        # extract_phase_record has enough material at VerdictAdvance time.
+        # Reset on phase change (key = phase name, value = accumulated text).
+        self._phase_accumulated_text: dict[str, str] = {}
         # p25 Materialization Gate Layer 1 (in-loop liveness):
         # When ADVANCE_TO_EXECUTE fires, agent MUST write a patch within K=2 steps.
         # _execute_entry_step: n_calls when EXECUTE phase was entered (-1 = not yet entered)
@@ -841,11 +846,28 @@ def _step_cp_update_and_verdict(
                         flush=True,
                     )
                 else:
+                    # p221: use accumulated text from all steps in this phase,
+                    # not just the latest single assistant message. This gives
+                    # the regex extractor much more material to find code refs,
+                    # root cause analysis, causal chains, etc.
+                    _accumulated = state._phase_accumulated_text.get(_eval_phase, "")
+                    _extract_text = _accumulated if _accumulated.strip() else latest_assistant_text
                     _pr, _declared_phase, _foreign = _extract_for_phase(
-                        latest_assistant_text, str(_old_phase)
+                        _extract_text, str(_old_phase)
                     )
                     state.phase_records.append(_pr)
                     _pr_source = "extracted"
+                    # p221: log accumulated text stats for observability
+                    _acc_len = len(_accumulated) if _accumulated else 0
+                    _has_refs = bool(_pr.get("evidence_refs"))
+                    _has_rc = bool((_pr.get("root_cause") or "").strip())
+                    print(
+                        f"    [phase_record] extraction_method=regex"
+                        f" accumulated_chars={_acc_len}"
+                        f" has_root_cause={_has_rc}"
+                        f" has_evidence_refs={_has_refs}",
+                        flush=True,
+                    )
                     if STRUCTURED_OUTPUT_ENABLED:
                         print(
                             f"    [phase_record] extraction_method=regex"
@@ -1669,6 +1691,14 @@ def _install_step_monitor(
         _latest_assistant_text, _snippet, _env_error = _step_observe(
             self, step_n=self.n_calls, mode=_mode
         )
+        # p221: accumulate assistant text per phase for PhaseRecord extraction.
+        # Agent outputs short thinking texts across many steps; accumulating them
+        # gives extract_record_for_phase enough material at VerdictAdvance time.
+        _acc_phase = str((_cp_holder[0] if _cp_holder else _state.cp_state).phase).upper()
+        if _latest_assistant_text:
+            _state._phase_accumulated_text[_acc_phase] = (
+                _state._phase_accumulated_text.get(_acc_phase, "") + "\n" + _latest_assistant_text
+            )
         _patch_non_empty = _step_verify_if_needed(
             self, state=_state, verify_debounce_s=VERIFY_DEBOUNCE_S
         )
