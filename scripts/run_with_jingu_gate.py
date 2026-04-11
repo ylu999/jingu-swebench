@@ -4532,6 +4532,20 @@ def run_with_jingu(instance_id: str, output_dir: Path, max_attempts: int = 3,
                             last_failure = _repair + "\n\n" + last_failure
                             print(f"    [repair-route] attempt={attempt} failure_type={_jb_ft} "
                                   f"next_phase={_jb_routing['next_phase']}", flush=True)
+                        # p216: augment with data-driven routing strategy at attempt level
+                        if is_data_driven_routing_enabled():
+                            try:
+                                _p216_phase = (jingu_body or {}).get("last_phase", "ANALYZE").upper()
+                                _p216_principal = (jingu_body or {}).get("top_failed_principal", "")
+                                if _p216_principal:
+                                    _p216_next, _p216_strategy = route_failure_p216(_p216_phase, _p216_principal)
+                                    _p216_prompt = get_strategy_prompt(_p216_strategy)
+                                    last_failure = _p216_prompt + "\n\n" + last_failure
+                                    print(f"    [p216-routing] attempt={attempt} phase={_p216_phase} "
+                                          f"principal={_p216_principal} -> next={_p216_next} "
+                                          f"strategy={_p216_strategy}", flush=True)
+                            except Exception as _p216_exc:
+                                print(f"    [p216-routing] error (non-fatal): {_p216_exc}", flush=True)
                     else:
                         last_failure = exec_feedback[:400]
                         # p209: augment non-retry-controller path too
@@ -4543,6 +4557,20 @@ def run_with_jingu(instance_id: str, output_dir: Path, max_attempts: int = 3,
                             last_failure = _repair + "\n\n" + last_failure
                             print(f"    [repair-route] attempt={attempt} failure_type={_jb_ft} "
                                   f"next_phase={_jb_routing['next_phase']}", flush=True)
+                        # p216: augment with data-driven routing strategy at attempt level
+                        if is_data_driven_routing_enabled():
+                            try:
+                                _p216_phase = (jingu_body or {}).get("last_phase", "ANALYZE").upper()
+                                _p216_principal = (jingu_body or {}).get("top_failed_principal", "")
+                                if _p216_principal:
+                                    _p216_next, _p216_strategy = route_failure_p216(_p216_phase, _p216_principal)
+                                    _p216_prompt = get_strategy_prompt(_p216_strategy)
+                                    last_failure = _p216_prompt + "\n\n" + last_failure
+                                    print(f"    [p216-routing] attempt={attempt} phase={_p216_phase} "
+                                          f"principal={_p216_principal} -> next={_p216_next} "
+                                          f"strategy={_p216_strategy}", flush=True)
+                            except Exception as _p216_exc:
+                                print(f"    [p216-routing] error (non-fatal): {_p216_exc}", flush=True)
                 else:
                     last_failure = ""
                 agent_exit = None
