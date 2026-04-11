@@ -87,7 +87,6 @@ COPY scripts/run_with_jingu_gate.py \
      scripts/compute_routing_stats.py \
      scripts/suggest_routing.py \
      scripts/strategy_prompts.py \
-     scripts/jingu_loader.py \
      scripts/policy_onboarding.py \
      scripts/check_onboarding.py \
      scripts/cognition_loader.py \
@@ -100,6 +99,9 @@ COPY scripts/run_with_jingu_gate.py \
 COPY scripts/control/ /app/scripts/control/
 # p222: cognition contracts (single source of truth for phase/subtype definitions)
 COPY scripts/cognition_contracts/ /app/scripts/cognition_contracts/
+
+# p227-04: jingu_loader Python package (from jingu-bundle-loader, copied by ops.py build)
+COPY python/jingu_loader/ /app/python/jingu_loader/
 
 # Bundle JSON (compiled contract from jingu-cognition)
 COPY bundle.json /app/bundle.json

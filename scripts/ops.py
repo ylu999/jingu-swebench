@@ -105,6 +105,17 @@ fi
 
 cd jingu-swebench
 
+# Clone/update jingu-bundle-loader and copy Python package into build context
+cd /root
+if [ -d jingu-bundle-loader ]; then
+  cd jingu-bundle-loader && git pull -q && cd ..
+else
+  git clone https://github.com/ylu999/jingu-bundle-loader.git -q
+fi
+mkdir -p /root/jingu-swebench/python
+cp -r /root/jingu-bundle-loader/python/jingu_loader /root/jingu-swebench/python/
+cd /root/jingu-swebench
+
 if [ ! -d jingu-trust-gate/node_modules ]; then
   docker run --rm -v $(pwd)/jingu-trust-gate:/work -w /work node:18-alpine npm install --silent 2>/dev/null
 fi

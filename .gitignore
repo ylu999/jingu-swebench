@@ -9,3 +9,5 @@ __pycache__/
 *.pyc
 logs/
 results/
+# p227-04: jingu_loader package copied from jingu-bundle-loader during Docker build
+python/
