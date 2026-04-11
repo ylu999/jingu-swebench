@@ -13,7 +13,7 @@ import pytest
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
 
-from jingu_loader import JinguLoader, USE_BUNDLE_LOADER, PolicyLifecycle, _resolve_subtype
+from jingu_loader import JinguLoader, USE_BUNDLE_LOADER, PolicyLifecycle, _resolve_subtype, RUNTIME_CAPABILITIES
 
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
@@ -22,6 +22,7 @@ def _make_bundle(overrides: dict | None = None) -> dict:
     """Create a minimal valid bundle dict for testing."""
     bundle = {
         "version": "1.0.0",
+        "compiler_version": "0.1.0",
         "generated_at": "2026-04-10T00:00:00.000Z",
         "generator_commit": "abc1234",
         "capabilities": ["prompt_only", "schema_enforced", "repair_view", "routing_view"],
@@ -340,3 +341,79 @@ class TestRealBundle:
             contract = real_loader.get_active_contract("ANALYZE", subtype) if "analysis" in subtype else None
             if contract:
                 assert len(contract.get("prompt", "")) > 0
+
+
+# ── Test: Capability Negotiation (w4-02) ─────────────────────────────────────
+
+class TestCapabilityNegotiation:
+    """Tests for get_negotiated_contract() and RUNTIME_CAPABILITIES."""
+
+    def test_runtime_capabilities_defined(self):
+        """RUNTIME_CAPABILITIES is a dict with expected keys."""
+        assert isinstance(RUNTIME_CAPABILITIES, dict)
+        assert "schema_enforced" in RUNTIME_CAPABILITIES
+        assert "repair_view" in RUNTIME_CAPABILITIES
+        assert "routing_view" in RUNTIME_CAPABILITIES
+
+    def test_default_capabilities_values(self):
+        """Default runtime capabilities match expected jingu-swebench state."""
+        assert RUNTIME_CAPABILITIES["schema_enforced"] is False
+        assert RUNTIME_CAPABILITIES["repair_view"] is True
+        assert RUNTIME_CAPABILITIES["routing_view"] is False
+
+    def test_negotiate_all_true(self, loader):
+        """All capabilities true: all fields present."""
+        caps = {"schema_enforced": True, "repair_view": True, "routing_view": True}
+        negotiated = loader.get_negotiated_contract("ANALYZE", runtime_caps=caps)
+
+        assert "prompt" in negotiated
+        assert len(negotiated["prompt"]) > 0
+        assert "schema" in negotiated
+        assert "repair_templates" in negotiated
+        assert "routing" in negotiated
+
+    def test_negotiate_schema_false(self, loader):
+        """schema_enforced=False: no schema field."""
+        caps = {"schema_enforced": False, "repair_view": True, "routing_view": True}
+        negotiated = loader.get_negotiated_contract("ANALYZE", runtime_caps=caps)
+
+        assert "prompt" in negotiated
+        assert "schema" not in negotiated
+        assert "repair_templates" in negotiated
+        assert "routing" in negotiated
+
+    def test_negotiate_all_false(self, loader):
+        """All false: only prompt field."""
+        caps = {"schema_enforced": False, "repair_view": False, "routing_view": False}
+        negotiated = loader.get_negotiated_contract("ANALYZE", runtime_caps=caps)
+
+        assert "prompt" in negotiated
+        assert len(negotiated["prompt"]) > 0
+        assert "schema" not in negotiated
+        assert "repair_templates" not in negotiated
+        assert "routing" not in negotiated
+
+    def test_negotiate_uses_default_capabilities(self, loader):
+        """Without explicit caps, uses RUNTIME_CAPABILITIES."""
+        negotiated = loader.get_negotiated_contract("ANALYZE")
+
+        # With default caps: schema_enforced=False, repair_view=True, routing_view=False
+        assert "prompt" in negotiated
+        assert "schema" not in negotiated
+        assert "repair_templates" in negotiated
+        assert "routing" not in negotiated
+
+    def test_negotiate_no_crash_on_empty_contract_fields(self, loader):
+        """Negotiation does not crash when contract has empty fields."""
+        caps = {"schema_enforced": True, "repair_view": True, "routing_view": True}
+        negotiated = loader.get_negotiated_contract("EXECUTE", runtime_caps=caps)
+
+        assert "prompt" in negotiated
+        # EXECUTE has empty repair_templates, so it should not appear
+        assert "repair_templates" not in negotiated
+
+    def test_metadata_includes_compiler_version(self, loader):
+        """Metadata includes compiler_version field."""
+        meta = loader.get_metadata()
+        assert "compiler_version" in meta
+        assert meta["compiler_version"] == "0.1.0"

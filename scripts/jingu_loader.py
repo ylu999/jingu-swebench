@@ -59,6 +59,17 @@ def _resolve_subtype(phase: str, subtype: str = "") -> str:
     return resolved
 
 
+# ── Runtime Capabilities (p220 — capability negotiation) ─────────────────────
+
+# What this Python runtime (jingu-swebench) currently supports.
+# Used by get_negotiated_contract() to strip unsupported fields.
+RUNTIME_CAPABILITIES: dict[str, bool] = {
+    "schema_enforced": False,    # Not yet using structured output
+    "repair_view": True,         # Can use repair templates (SDG p217)
+    "routing_view": False,       # Not yet using failure routing matrix
+}
+
+
 # ── Policy Lifecycle States ───────────────────────────────────────────────────
 
 class PolicyLifecycle:
@@ -219,10 +230,57 @@ class JinguLoader:
             "routing": contract.get("routing", {}),
         }
 
+    def get_negotiated_contract(
+        self,
+        phase: str,
+        subtype: str = "",
+        runtime_caps: dict[str, bool] | None = None,
+    ) -> dict[str, Any]:
+        """Return contract negotiated for runtime capabilities.
+
+        Strips fields the runtime does not support:
+        - schema: omitted if schema_enforced=False
+        - repair_templates: omitted if repair_view=False
+        - routing: omitted if routing_view=False
+        - prompt: always included
+
+        Args:
+            phase: Phase name (e.g. "ANALYZE").
+            subtype: Optional subtype override.
+            runtime_caps: Override runtime capabilities. Defaults to RUNTIME_CAPABILITIES.
+
+        Returns:
+            Dict with only the fields the runtime supports.
+        """
+        caps = runtime_caps or RUNTIME_CAPABILITIES
+        contract = self.get_active_contract(phase, subtype)
+
+        negotiated: dict[str, Any] = {
+            "prompt": contract.get("prompt", ""),
+        }
+
+        if caps.get("schema_enforced", False):
+            schema = contract.get("schema")
+            if schema:
+                negotiated["schema"] = schema
+
+        if caps.get("repair_view", False):
+            repair = contract.get("repair_templates")
+            if repair:
+                negotiated["repair_templates"] = repair
+
+        if caps.get("routing_view", False):
+            routing = contract.get("routing")
+            if routing:
+                negotiated["routing"] = routing
+
+        return negotiated
+
     def get_metadata(self) -> dict[str, Any]:
         """Return bundle metadata (version, capabilities, etc.)."""
         return {
             "version": self._bundle.get("version", ""),
+            "compiler_version": self._bundle.get("compiler_version", ""),
             "generated_at": self._bundle.get("generated_at", ""),
             "generator_commit": self._bundle.get("generator_commit", ""),
             "capabilities": self._bundle.get("capabilities", []),
