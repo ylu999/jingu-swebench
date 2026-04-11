@@ -39,6 +39,41 @@ from step_monitor_state import StopExecution
 from declaration_extractor import build_phase_record_from_structured
 
 
+# ── p230: decision provenance emission helper ────────────────────────────────
+
+def _emit_decision(
+    state: "StepMonitorState",
+    *,
+    decision_type: str,
+    step_n: int,
+    verdict: str,
+    reason: str = "",
+    rule_violated: str | None = None,
+    signals: dict | None = None,
+    phase_from: str | None = None,
+    phase_to: str | None = None,
+) -> None:
+    """Emit a DecisionEvent to the attempt's decisions.jsonl. Never raises."""
+    logger = getattr(state, "_decision_logger", None)
+    if not logger:
+        return
+    try:
+        from decision_logger import DecisionEvent
+        logger.log(DecisionEvent(
+            decision_type=decision_type,
+            step_n=step_n,
+            timestamp_ms=time.time() * 1000,
+            verdict=verdict,
+            rule_violated=rule_violated,
+            signals_evaluated=signals,
+            reason_text=reason,
+            phase_from=phase_from,
+            phase_to=phase_to,
+        ))
+    except Exception:
+        pass  # logging must not crash the run
+
+
 # ── Per-step structure validation (p207-P2) ──────────────────────────────────
 # Required structured fields per phase, derived from phase_prompt.py templates.
 PHASE_REQUIRED_FIELDS: dict[str, list[str]] = {
@@ -273,6 +308,10 @@ def _step_cp_update_and_verdict(
 
     if isinstance(_step_verdict, VerdictStop):
         state.early_stop_verdict = _step_verdict
+        _emit_decision(
+            state, decision_type="gate_verdict", step_n=_cp_s.step_index,
+            verdict="stop", reason=getattr(_step_verdict, "reason", ""),
+        )
         print(
             f"    [cp] VerdictStop enforcement: raising StopExecution({_step_verdict.reason})"
             f" — immediate interrupt, no phase injection",
@@ -281,6 +320,11 @@ def _step_cp_update_and_verdict(
         raise StopExecution(_step_verdict.reason)
 
     elif isinstance(_step_verdict, VerdictRedirect):
+        _emit_decision(
+            state, decision_type="gate_verdict", step_n=_cp_s.step_index,
+            verdict="redirect", reason=getattr(_step_verdict, "reason", ""),
+            phase_to=getattr(_step_verdict, "to", None),
+        )
         _EXECUTE_REDIRECT_LIMIT = 3
         if _step_verdict.reason == "execute_no_progress":
             _exec_key = ("EXECUTE", "execute_no_progress")
@@ -294,6 +338,11 @@ def _step_cp_update_and_verdict(
                 flush=True,
             )
             if _exec_redirect_count > _EXECUTE_REDIRECT_LIMIT:
+                _emit_decision(
+                    state, decision_type="gate_verdict", step_n=_cp_s.step_index,
+                    verdict="stop", reason="execute_no_progress_loop_exceeded",
+                    signals={"redirect_count": _exec_redirect_count, "limit": _EXECUTE_REDIRECT_LIMIT},
+                )
                 print(
                     f"    [cp] execute_no_progress loop exceeded limit={_EXECUTE_REDIRECT_LIMIT}"
                     f" → VerdictStop(no_signal) [attempt-terminal, will retry]",
@@ -317,6 +366,11 @@ def _step_cp_update_and_verdict(
         state.pending_redirect_hint = ""
 
     elif isinstance(_step_verdict, VerdictAdvance):
+        _emit_decision(
+            state, decision_type="gate_verdict", step_n=_cp_s.step_index,
+            verdict="advance", reason=getattr(_step_verdict, "reason", ""),
+            phase_to=getattr(_step_verdict, "to", None),
+        )
         _old_phase = _cp_s.phase
         if _step_verdict.to is not None:
             import dataclasses as _dc_adv
@@ -336,6 +390,10 @@ def _step_cp_update_and_verdict(
             f"    [cp] phase_advance from={_old_phase} to={_step_verdict.to}"
             f" agent_declared={_adv_declared}",
             flush=True,
+        )
+        _emit_decision(
+            state, decision_type="phase_advance", step_n=_cp_s.step_index,
+            verdict="advance", phase_from=str(_old_phase), phase_to=str(_step_verdict.to),
         )
 
         _eval_phase = str(_old_phase).upper()
@@ -497,6 +555,10 @@ def _step_cp_update_and_verdict(
                                 no_progress_steps=0,
                             )
                         _step_verdict = VerdictContinue(reason="cognition_validation_failed")
+                        _emit_decision(
+                            state, decision_type="gate_verdict", step_n=_cp_s.step_index,
+                            verdict="continue", reason="cognition_validation_failed",
+                        )
                         # Inject feedback for next step
                         agent_self.messages.append({
                             "role": "user",
@@ -783,6 +845,11 @@ def _step_cp_update_and_verdict(
 
                 if _admission.status == "REJECTED":
                     state.early_stop_verdict = VerdictStop(reason="no_signal")
+                    _emit_decision(
+                        state, decision_type="gate_verdict", step_n=_cp_s.step_index,
+                        verdict="stop", reason="no_signal",
+                        rule_violated=_admission.reasons[0] if _admission.reasons else None,
+                    )
                     print(
                         f"    [principal_gate] REJECTED → VerdictStop"
                         f" reasons={_admission.reasons}",
@@ -1232,6 +1299,12 @@ def _check_materialization_gate(
         _MAT_GATE_K = 2
         _steps_since_entry = _mat_step - state._execute_entry_step
         if _steps_since_entry >= _MAT_GATE_K and not state._execute_write_seen:
+            _emit_decision(
+                state, decision_type="materialization_gate", step_n=_mat_step,
+                verdict="force",
+                reason=f"no_patch_after_{_steps_since_entry}_steps_in_EXECUTE",
+                signals={"steps_since_entry": _steps_since_entry, "K": _MAT_GATE_K},
+            )
             print(
                 f"    [mat-gate] FORCE: {_steps_since_entry} steps in EXECUTE, no patch written",
                 flush=True,

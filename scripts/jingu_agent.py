@@ -297,6 +297,7 @@ class JinguAgent:
         self._state: Any | None = None  # StepMonitorState, populated in run()
         self._step_emitter: Any | None = None  # StepEventEmitter, per-attempt
         self._step_start_ts: float = 0.0  # ms timestamp set in on_step_start
+        self._decision_logger: Any | None = None  # DecisionLogger, per-attempt (p230)
 
     # -- step-level hooks (called by JinguProgressTrackingAgent.step) --------
 
@@ -690,6 +691,14 @@ class JinguAgent:
                 pass
             self._step_emitter = None
 
+        # p230: close decision provenance logger
+        if self._decision_logger is not None:
+            try:
+                self._decision_logger.close()
+            except Exception:
+                pass
+            self._decision_logger = None
+
         _monitor = self._state
         if _monitor is None:
             return
@@ -869,6 +878,16 @@ class JinguAgent:
             print(f"    [step-emitter] WARNING: init failed: {_emit_exc}", flush=True)
             self._step_emitter = None
 
+        # p230: create decision provenance logger for this attempt
+        try:
+            from decision_logger import DecisionLogger
+            self._decision_logger = DecisionLogger(
+                self._output_dir / instance_id, attempt
+            )
+        except Exception as _dl_exc:
+            print(f"    [decision-logger] WARNING: init failed: {_dl_exc}", flush=True)
+            self._decision_logger = None
+
         print(f"    [agent] running {instance_id} attempt={attempt}...")
 
         preds_path = attempt_dir / "preds.json"
@@ -886,6 +905,8 @@ class JinguAgent:
         _monitor._extraction_no_schema = 0
 
         self._state = _monitor
+        # p230: pass decision logger to state for step_sections access
+        _monitor._decision_logger = self._decision_logger
         # cp_state_holder already set by caller (run_agent wrapper or run_with_jingu)
 
         t_llm = Timer("LLM agent loop (Bedrock)", parent=t_agent)
@@ -915,6 +936,13 @@ class JinguAgent:
                 except Exception:
                     pass
                 self._step_emitter = None
+            # p230: ensure decision logger is closed
+            if self._decision_logger is not None:
+                try:
+                    self._decision_logger.close()
+                except Exception:
+                    pass
+                self._decision_logger = None
         t_llm.stop()
 
         # Parse traj for usage + submission
@@ -1754,6 +1782,19 @@ class JinguAgent:
                                   f" task_success:{_cp_state_now.task_success}")
                             print(f"    [control-plane] instance={_iid_short} attempt={attempt} verdict={cp_verdict}")
                             if isinstance(cp_verdict, VerdictStop):
+                                # p230: log early_stop from control-plane verdict
+                                try:
+                                    if self._decision_logger is not None:
+                                        from decision_logger import DecisionEvent
+                                        self._decision_logger.log(DecisionEvent(
+                                            decision_type="early_stop",
+                                            step_n=-1,
+                                            timestamp_ms=time.time() * 1000,
+                                            verdict="stop",
+                                            reason_text=f"cp_verdict_stop:{cp_verdict.reason}",
+                                        ))
+                                except Exception:
+                                    pass
                                 print(f"    [control-plane] instance={_iid_short} STOPPING — reason={cp_verdict.reason}")
                                 _tr_cpv = (jingu_body or {}).get("test_results", {})
                                 _pr_cpv = build_phase_result(
@@ -1790,6 +1831,20 @@ class JinguAgent:
                                 )
 
                             if retry_plan.control_action in ("STOP_FAIL", "STOP_NO_SIGNAL"):
+                                # p230: log early_stop from retry controller
+                                try:
+                                    if self._decision_logger is not None:
+                                        from decision_logger import DecisionEvent
+                                        self._decision_logger.log(DecisionEvent(
+                                            decision_type="early_stop",
+                                            step_n=-1,
+                                            timestamp_ms=time.time() * 1000,
+                                            verdict="stop",
+                                            reason_text=f"retry_ctrl:{retry_plan.control_action}",
+                                            signals_evaluated={"root_causes": retry_plan.root_causes[:5]},
+                                        ))
+                                except Exception:
+                                    pass
                                 print(f"    [retry-ctrl] STOPPING — action={retry_plan.control_action}")
                                 _tr_sf = (jingu_body or {}).get("test_results", {})
                                 _pr_sf = build_phase_result(
@@ -1814,6 +1869,19 @@ class JinguAgent:
                                 )
                                 break
                             if _strategy_failure_class_v2 == "verified_pass":
+                                # p230: log early_stop from verified_pass
+                                try:
+                                    if self._decision_logger is not None:
+                                        from decision_logger import DecisionEvent
+                                        self._decision_logger.log(DecisionEvent(
+                                            decision_type="early_stop",
+                                            step_n=-1,
+                                            timestamp_ms=time.time() * 1000,
+                                            verdict="stop",
+                                            reason_text="verified_pass",
+                                        ))
+                                except Exception:
+                                    pass
                                 print(f"    [retry-ctrl] STOPPING — verified_pass (controlled_verify tests_failed=0)")
                                 _tr_vp = (jingu_body or {}).get("test_results", {})
                                 _pr_vp = build_phase_result(
@@ -1837,6 +1905,25 @@ class JinguAgent:
                                     flush=True,
                                 )
                                 break
+
+                            # p230: log retry decision
+                            try:
+                                if self._decision_logger is not None:
+                                    from decision_logger import DecisionEvent
+                                    self._decision_logger.log(DecisionEvent(
+                                        decision_type="retry_decision",
+                                        step_n=-1,
+                                        timestamp_ms=time.time() * 1000,
+                                        verdict=retry_plan.control_action,
+                                        reason_text=retry_plan.next_attempt_prompt[:200],
+                                        signals_evaluated={
+                                            "root_causes": retry_plan.root_causes[:5],
+                                            "tests_delta": _tests_delta,
+                                            "progress_code": _progress_code,
+                                        },
+                                    ))
+                            except Exception:
+                                pass
 
                             _prev_raw_patch = patch
                             last_failure = retry_plan.next_attempt_prompt[:600]
