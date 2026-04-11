@@ -30,7 +30,7 @@ from gate_rejection import GateRejection, FieldFailure
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
 def _make_good_pr() -> PhaseRecord:
-    """A well-formed analysis PhaseRecord that should pass all 3 rules."""
+    """A well-formed analysis PhaseRecord that should pass all 4 rules."""
     return PhaseRecord(
         phase="ANALYZE",
         subtype="analysis.root_cause",
@@ -53,11 +53,16 @@ def _make_good_pr() -> PhaseRecord:
             "-> clean() calls to_python() -> to_python() calls "
             "datetime.strptime() without timezone handling -> raises ValueError.\n"
             "However, hypothesis 2 doesn't explain the traceback correctly, "
-            "so it was eliminated."
+            "so it was eliminated.\n"
+            "The structural boundary character ':' has a delimiter role in the "
+            "parsing logic — the format must not contain ':' in the date portion "
+            "because it would break the parser's structural assumptions."
         ),
         root_cause=(
             "DateTimeField.to_python() in django/db/models/fields/__init__.py:1234 "
-            "does not handle timezone-naive datetime objects correctly."
+            "does not handle timezone-naive datetime objects correctly. "
+            "The delimiter ':' must not appear in the date portion because it has "
+            "structural meaning as a time separator."
         ),
         causal_chain=(
             "test_invalid_date -> DateTimeField.clean() -> to_python() "
@@ -181,14 +186,15 @@ class TestEvaluateAnalysis:
         assert verdict.scores["causal_chain"] < 0.5
 
     def test_empty_pr_fails_all(self):
-        """Completely empty PhaseRecord should fail all 3 rules."""
+        """Completely empty PhaseRecord should fail all 4 rules."""
         pr = _make_empty_pr()
         verdict = evaluate_analysis(pr)
         assert verdict.passed is False
-        assert len(verdict.failed_rules) == 3
+        assert len(verdict.failed_rules) == 4
         assert "code_grounding" in verdict.failed_rules
         assert "alternative_hypothesis" in verdict.failed_rules
         assert "causal_chain" in verdict.failed_rules
+        assert "invariant_capture" in verdict.failed_rules
 
     def test_verdict_has_correct_type(self):
         """evaluate_analysis returns an AnalysisVerdict."""
@@ -421,12 +427,13 @@ class TestThresholds:
         assert "code_grounding" not in verdict.failed_rules
 
     def test_all_scores_returned(self):
-        """All 3 scores are present in the verdict."""
+        """All 4 scores are present in the verdict."""
         pr = _make_empty_pr()
         verdict = evaluate_analysis(pr)
         assert "code_grounding" in verdict.scores
         assert "alternative_hypothesis" in verdict.scores
         assert "causal_chain" in verdict.scores
+        assert "invariant_capture" in verdict.scores
 
 
 # -- Tests: SDG GateRejection on failure (p217) --
@@ -458,7 +465,7 @@ class TestAnalysisGateRejection:
         """Rejection contains FieldFailure entries for each failed rule."""
         pr = _make_empty_pr()
         verdict = evaluate_analysis(pr)
-        assert len(verdict.rejection.failures) == 3  # all 3 rules fail
+        assert len(verdict.rejection.failures) == 4  # all 4 rules fail
         fields_failed = [f.field for f in verdict.rejection.failures]
         assert "root_cause" in fields_failed
         assert "causal_chain" in fields_failed
@@ -534,19 +541,21 @@ class TestStructuredOutputMode:
         verdict = evaluate_analysis(pr, structured_output=True)
         assert "causal_chain" in verdict.failed_rules
 
-    def test_empty_pr_fails_two_not_three_in_structured_mode(self):
-        """Empty PR fails code_grounding + causal_chain but NOT alternative_hypothesis."""
+    def test_empty_pr_fails_three_not_four_in_structured_mode(self):
+        """Empty PR fails code_grounding + causal_chain + invariant_capture but NOT alternative_hypothesis."""
         pr = _make_empty_pr()
         verdict = evaluate_analysis(pr, structured_output=True)
         assert verdict.passed is False
         assert "code_grounding" in verdict.failed_rules
         assert "causal_chain" in verdict.failed_rules
+        assert "invariant_capture" in verdict.failed_rules
         assert "alternative_hypothesis" not in verdict.failed_rules
-        assert len(verdict.failed_rules) == 2
+        assert len(verdict.failed_rules) == 3
 
     def test_structured_mode_false_is_default(self):
-        """Default behavior (structured_output=False) keeps all 3 rules enforced."""
+        """Default behavior (structured_output=False) keeps all 4 rules enforced."""
         pr = _make_empty_pr()
         verdict = evaluate_analysis(pr, structured_output=False)
-        assert len(verdict.failed_rules) == 3
+        assert len(verdict.failed_rules) == 4
         assert "alternative_hypothesis" in verdict.failed_rules
+        assert "invariant_capture" in verdict.failed_rules

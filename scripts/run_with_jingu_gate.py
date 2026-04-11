@@ -1708,6 +1708,98 @@ def _install_step_monitor(
                 _state._execute_entry_step = _mat_step
                 _state._execute_write_seen = False
                 print(f"    [mat-gate] EXECUTE entered at step={_mat_step}", flush=True)
+
+                # Retroactive analysis gate: if agent entered EXECUTE without
+                # passing through a VerdictAdvance(from=ANALYZE) — e.g. stagnation
+                # cascade or direct CONTINUE→EXECUTE — the analysis_gate never fired.
+                # Check the most recent ANALYZE phase record now.
+                _retro_ag_max = 2  # same as _AG_MAX_REJECTS
+                _retro_ag_count = _state.analysis_gate_rejects
+                _last_analyze_pr = next(
+                    (r for r in reversed(_state.phase_records)
+                     if getattr(r, 'phase', '').upper() == 'ANALYZE'),
+                    None,
+                )
+                if _last_analyze_pr is not None:
+                    try:
+                        from analysis_gate import evaluate_analysis as _retro_eval
+                        _retro_verdict = _retro_eval(_last_analyze_pr)
+                        print(
+                            f"    [mat-gate] retroactive_analysis_gate"
+                            f" passed={_retro_verdict.passed}"
+                            f" failed_rules={_retro_verdict.failed_rules}"
+                            f" scores={_retro_verdict.scores}"
+                            f" rejects_so_far={_retro_ag_count}",
+                            flush=True,
+                        )
+                        if not _retro_verdict.passed and _retro_ag_count < _retro_ag_max:
+                            # Redirect back to ANALYZE — analysis quality insufficient
+                            import dataclasses as _dc_retro
+                            _cp_ref = _cp_holder[0] if _cp_holder else _state.cp_state
+                            _cp_ref_new = _dc_retro.replace(
+                                _cp_ref, phase="ANALYZE", no_progress_steps=0
+                            )
+                            if _cp_holder:
+                                _cp_holder[0] = _cp_ref_new
+                            else:
+                                _state.cp_state = _cp_ref_new
+                            _state._execute_entry_step = -1  # reset — not in EXECUTE anymore
+                            _state.analysis_gate_rejects += 1
+
+                            # Inject feedback — prefer SDG if available
+                            _retro_feedback_injected = False
+                            if _SDG_ENABLED and getattr(_retro_verdict, "rejection", None):
+                                try:
+                                    _retro_sdg = _build_sdg_repair(_retro_verdict.rejection)
+                                    _retro_sdg += (
+                                        "\n\nFix only the failing fields. Do not rewrite fields already OK."
+                                        "\nStay in ANALYZE phase."
+                                    )
+                                    self.messages.append({"role": "user", "content": _retro_sdg})
+                                    _retro_feedback_injected = True
+                                    print(
+                                        f"    [mat-gate] retroactive_analysis_gate"
+                                        f" sdg_repair_used=true"
+                                        f" failures={len(_retro_verdict.rejection.failures)}",
+                                        flush=True,
+                                    )
+                                except Exception as _retro_sdg_exc:
+                                    print(
+                                        f"    [mat-gate] retroactive_analysis_gate"
+                                        f" sdg_repair error: {_retro_sdg_exc}",
+                                        flush=True,
+                                    )
+
+                            if not _retro_feedback_injected:
+                                _retro_reasons = "; ".join(_retro_verdict.reasons)
+                                self.messages.append({
+                                    "role": "user",
+                                    "content": (
+                                        f"[analysis_gate REJECT — retroactive check at EXECUTE entry]\n"
+                                        f"Your ANALYZE phase output did not pass quality checks:\n"
+                                        f"{_retro_reasons}\n\n"
+                                        f"Return to ANALYZE and address the failing checks before proceeding to EXECUTE."
+                                    ),
+                                })
+
+                            print(
+                                f"    [mat-gate] retroactive_analysis_gate REJECT"
+                                f" ({_state.analysis_gate_rejects}/{_retro_ag_max})"
+                                f" — redirecting to ANALYZE",
+                                flush=True,
+                            )
+                        elif not _retro_verdict.passed:
+                            print(
+                                f"    [mat-gate] retroactive_analysis_gate FORCE_PASS"
+                                f" — max_rejects={_retro_ag_max} reached",
+                                flush=True,
+                            )
+                    except Exception as _retro_exc:
+                        print(
+                            f"    [mat-gate] retroactive_analysis_gate error (non-fatal):"
+                            f" {_retro_exc}",
+                            flush=True,
+                        )
             if _patch_non_empty:
                 _state._execute_write_seen = True
             _MAT_GATE_K = 2
