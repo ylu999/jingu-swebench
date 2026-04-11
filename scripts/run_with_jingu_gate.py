@@ -889,11 +889,82 @@ def _step_cp_update_and_verdict(
         except Exception as _pr_exc:
             print(f"    [phase_record] error (non-fatal): {_pr_exc}", flush=True)
 
+        # p222: Cognition validation — validate PhaseRecord against bundle contracts
+        _cognition_rejected = False
+        if _pr is not None:
+            try:
+                from cognition_loader import COGNITION_EXECUTION_ENABLED as _COG_ENABLED
+                if _COG_ENABLED:
+                    from cognition_loader import CognitionLoader as _CogLoader
+                    from phase_validator import (
+                        validate_phase_record as _validate_pr,
+                        build_validation_feedback as _build_cog_feedback,
+                    )
+                    from jingu_loader import JinguLoader as _JL
+                    _cog_bundle = _JL()._bundle
+                    _cog_loader = _CogLoader(_cog_bundle)
+                    _cog_errors = _validate_pr(_pr, _cog_loader)
+                    if _cog_errors:
+                        _cog_codes = [e.code for e in _cog_errors]
+                        print(
+                            f"    [cognition_validator] REJECT errors={_cog_codes}",
+                            flush=True,
+                        )
+                        _cog_feedback = _build_cog_feedback(_cog_errors, _pr, _cog_loader)
+                        _cognition_rejected = True
+                        # Redirect back to current phase with feedback
+                        import dataclasses as _dc_cog
+                        if cp_state_holder is not None:
+                            cp_state_holder[0] = _dc_cog.replace(
+                                cp_state_holder[0],
+                                phase=_old_phase,
+                                no_progress_steps=0,
+                            )
+                        else:
+                            state.cp_state = _dc_cog.replace(
+                                state.cp_state,
+                                phase=_old_phase,
+                                no_progress_steps=0,
+                            )
+                        _step_verdict = VerdictContinue(reason="cognition_validation_failed")
+                        # Inject feedback for next step
+                        _injections.append({
+                            "role": "user",
+                            "content": (
+                                f"[Cognition Validation Failed]\n\n"
+                                f"{_cog_feedback}\n\n"
+                                f"Fix the issues above and resubmit for phase {_old_phase}."
+                            ),
+                        })
+                        # Invalidate cached phase record
+                        state.phase_records = [
+                            r for r in state.phase_records
+                            if r.phase.upper() != _eval_phase
+                        ]
+                    else:
+                        # Check phase transition
+                        if _old_phase and str(_step_verdict) != "VerdictContinue":
+                            _from_p = str(_old_phase).upper()
+                            _to_p = str(getattr(_step_verdict, 'to', '')).upper()
+                            if _to_p and not _cog_loader.is_transition_allowed(_from_p, _to_p):
+                                print(
+                                    f"    [cognition_validator] transition_warning"
+                                    f" from={_from_p} to={_to_p} allowed=false",
+                                    flush=True,
+                                )
+                        print(
+                            f"    [cognition_validator] PASS phase={_pr.phase}"
+                            f" subtype={_pr.subtype}",
+                            flush=True,
+                        )
+            except Exception as _cog_exc:
+                print(f"    [cognition_validator] error (non-fatal): {_cog_exc}", flush=True)
+
         # p211: Analysis gate — enforce quality before EXECUTE advance
         _analysis_gate_rejected = False
         _analysis_gate_force_passed = False
         _AG_MAX_REJECTS = 2  # escape hatch: after N rejects, let agent proceed
-        if _eval_phase == "ANALYZE" and _pr is not None:
+        if _eval_phase == "ANALYZE" and _pr is not None and not _cognition_rejected:
             try:
                 from analysis_gate import evaluate_analysis as _eval_analysis
                 _analysis_verdict = _eval_analysis(
@@ -973,6 +1044,8 @@ def _step_cp_update_and_verdict(
                 print(f"    [analysis_gate] error (non-fatal): {_ag_exc}", flush=True)
 
         try:
+            if _cognition_rejected:
+                raise RuntimeError("cognition_validator rejected, skipping principal gate")
             if _analysis_gate_rejected:
                 raise RuntimeError("analysis_gate rejected, skipping principal gate")
             if _analysis_gate_force_passed:
