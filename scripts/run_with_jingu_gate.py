@@ -912,9 +912,10 @@ def run_agent(
     progress = RunBatchProgressManager(num_instances=1)
 
     # p225-06: instantiate JinguAgent + JinguProgressTrackingAgent (replaces _install_step_monitor).
+    # p225-08: JinguDefaultAgent replaces the second ScopedPatch(_DA, "run", _verifying_run).
     # Instance isolation is now provided by OOP — no global registry needed (P18 eliminated).
     # Reuse _gov_prompt loaded above (already called onboard()); fall back to None if not loaded.
-    from jingu_agent import JinguAgent, JinguProgressTrackingAgent
+    from jingu_agent import JinguAgent, JinguProgressTrackingAgent, JinguDefaultAgent
 
     _governance = locals().get("_gov_prompt")
     jingu_agent_inst = JinguAgent(
@@ -936,155 +937,29 @@ def run_agent(
     jingu_agent_inst._state = _monitor
     jingu_agent_inst._cp_state_holder = cp_state_holder if cp_state_holder is not None else []
 
-    # Hook DefaultAgent.run() to:
-    # 1. Inject container_id into _monitor as soon as container is started
-    # 2. Run a final controlled_verify BEFORE env cleanup (end-of-attempt signal)
-    from minisweagent.agents.default import DefaultAgent as _DA
-    _orig_run = _DA.run   # captured here; ScopedPatch restores it on __exit__
-
-    def _verifying_run(self_agent, *args, **kwargs):
-        # p225-06: instance isolation provided by JinguAgent — use closed-over _monitor directly.
-        # Each run_agent() call creates its own _monitor; no global registry needed.
-        _vr_monitor = _monitor
-
-        # Inject container_id so step monitor can start verifying mid-run
-        cid = getattr(getattr(self_agent, 'env', None), 'container_id', None)
-        if cid and not _vr_monitor.container_id:
-            _vr_monitor.container_id = cid
-            print(f"    [inner-verify] container ready: {cid[:12]}...", flush=True)
-
-        result = _orig_run(self_agent, *args, **kwargs)
-
-        # Final controlled_verify at end-of-attempt (before container destroyed)
-        # Uses the actual submission patch — most accurate final signal
-        cid = getattr(getattr(self_agent, 'env', None), 'container_id', None)
-        if not cid:
-            return result
-        submitted = result.get("submission", "") if isinstance(result, dict) else ""
-        if not submitted:
-            return result
-        print(f"    [controlled-verify] final verify on container {cid[:12]}...", flush=True)
-
-        # p187: cognition gate — check declaration quality before controlled_verify
-        # Fires when cp_state.phase == "JUDGE" (EXECUTE->JUDGE advance by verdict routing).
-        # Pass  → continue to controlled_verify as normal.
-        # Fail  → inject feedback as pending_redirect_hint, skip controlled_verify.
-        _cg_result_str: str | None = None
-        if cp_state_holder is not None and cp_state_holder[0].phase == "JUDGE":
-            _cg_decl = {}
-            try:
-                _cg_msgs = getattr(self_agent, "messages", [])
-                # p221: try structured output first
-                _cg_structured = _try_parse_structured_output(_cg_msgs)
-                if _cg_structured is not None:
-                    _cg_decl = extract_from_structured(_cg_structured)
-                else:
-                    _cg_last = extract_last_agent_message(_cg_msgs)
-                    _cg_decl = extract_declaration(_cg_last) if _cg_last else {}
-            except Exception:
-                pass
-            _cg_signals = extract_patch_signals(submitted) if submitted else []
-            from cognition_check import check_cognition_at_judge as _cg_judge
-            _cg_pass, _cg_feedback = _cg_judge(_cg_decl, _cg_signals)
-            _cg_result_str = "pass" if _cg_pass else "fail"
-            print(f"    [cognition_gate] phase=JUDGE result={_cg_result_str}", flush=True)
-            if not _cg_pass:
-                # Inject feedback as redirect hint — agent receives it on next attempt
-                _vr_monitor.pending_redirect_hint = f"[COGNITION_FAIL] {_cg_feedback}"
-                print(
-                    f"    [cognition_gate] skipping controlled_verify — feedback injected",
-                    flush=True,
-                )
-
-        # p191: in-loop judge — patch format + semantic weakening checks
-        # Runs after cognition gate, before controlled_verify.
-        # Hard checks (block): patch_non_empty, patch_format, no_semantic_weakening.
-        # Soft check (warn only): changed_file_relevant.
-        # Exception-safe: judge failure never crashes main flow.
-        _judge_result = None
-        try:
-            from in_loop_judge import run_in_loop_judge as _run_ilj
-            _judge_result = _run_ilj(submitted)
-            print(
-                f"    [in_loop_judge] "
-                f"patch_non_empty={'pass' if _judge_result.patch_non_empty else 'fail'} "
-                f"patch_format={'pass' if _judge_result.patch_format else 'fail'} "
-                f"semantic_weakening={'pass' if _judge_result.no_semantic_weakening else 'fail'} "
-                f"changed_file_relevant={'pass' if _judge_result.changed_file_relevant else 'fail'}",
-                flush=True,
-            )
-            if not _judge_result.all_pass:
-                # Hard check failures — set redirect hints (controlled_verify gated below)
-                if not _judge_result.patch_non_empty:
-                    _vr_monitor.early_stop_verdict = VerdictStop(reason="empty_patch")
-                elif not _judge_result.patch_format:
-                    _vr_monitor.pending_redirect_hint = "[REDIRECT:EXECUTE] patch_format_error"
-                elif not _judge_result.no_semantic_weakening:
-                    _vr_monitor.pending_redirect_hint = "[REDIRECT:ANALYZE] semantic_weakening_detected"
-                elif not _judge_result.changed_file_relevant:
-                    # p204: changed_file_relevant promoted to hard check
-                    # Agent modified only test files (not source) — redirect back to EXECUTE
-                    _vr_monitor.pending_redirect_hint = "[REDIRECT:EXECUTE] wrong_file_changed"
-                print(
-                    f"    [in_loop_judge] skipping controlled_verify (hard check failed)",
-                    flush=True,
-                )
-        except Exception as _ilj_exc:
-            print(f"    [in_loop_judge] error (non-fatal): {_ilj_exc}", flush=True)
-
-        # p192: unified prerequisite gate — aggregates cognition + judge results
-        _prereq_pass, _prereq_reason = _verify_prerequisites(
-            cognition_result=_cg_result_str,
-            judge_result=_judge_result,
-        )
-        print(
-            f"    [verify_gate] prerequisite={'pass' if _prereq_pass else f'fail({_prereq_reason})'} "
-            f"controlled_verify={'run' if _prereq_pass else 'skipped'}",
-            flush=True,
-        )
-
-        if not _prereq_pass:
-            _vr_monitor._verify_skipped = True
-            _vr_monitor._verify_skip_reason = _prereq_reason
-            return result
-
-        t_cv0 = time.monotonic()
-        cv_result = run_controlled_verify(submitted, instance, cid, timeout_s=60)
-        cv_result["elapsed_ms"] = round((time.monotonic() - t_cv0) * 1000, 1)
-        # Store as last verify_history entry (step=-1 means end-of-attempt)
-        _vr_monitor.record_verify(-1, cv_result)
-        # v2 two-column log: final-verify (oracle/eval) vs inner-verify (agent-visible)
-        _er = cv_result.get("eval_resolved")
-        if _er is not None:
-            print(f"    [outcome-eval] eval_resolved={_er}"
-                  f"  f2p={cv_result.get('f2p_passed')}/{(cv_result.get('f2p_passed',0) or 0)+(cv_result.get('f2p_failed',0) or 0)}"
-                  f"  p2p={cv_result.get('p2p_passed')}/{(cv_result.get('p2p_passed',0) or 0)+(cv_result.get('p2p_failed',0) or 0)}",
-                  flush=True)
-        return result
-
     t_llm = Timer("LLM agent loop (Bedrock)", parent=t_agent)
     # p225-06: _step_patch removed — JinguProgressTrackingAgent handles step governance natively.
-    # _run_patch (DefaultAgent.run) is still needed for _verifying_run (container_id + final verify).
+    # p225-08: _verifying_run and second ScopedPatch removed — JinguDefaultAgent.run() calls
+    # on_attempt_end() after super().run() returns, before the container goes out of scope.
     from jingu_agent import jingu_process_instance
-    with ScopedPatch(_DA, "run", _verifying_run):
-        try:
-            jingu_process_instance(
-                instance, attempt_dir, config, progress,
-                agent_class=JinguProgressTrackingAgent,
-                agent_kwargs={"jingu_agent": jingu_agent_inst},
-            )
-        except StopExecution as e:
-            # VerdictStop: clean early exit — not an error.
-            # _monitor.early_stop_verdict is already set; caller (run_with_jingu) will
-            # log and break the attempt loop.
-            print(
-                f"  [cp] early_stop instance={instance_id} attempt={attempt}"
-                f" reason={e.reason} — StopExecution caught, exiting agent loop",
-                flush=True,
-            )
-        except Exception as e:
-            print(f"    [agent] ERROR: {e}")
-            traceback.print_exc()
+    try:
+        jingu_process_instance(
+            instance, attempt_dir, config, progress,
+            agent_class=JinguDefaultAgent,
+            agent_kwargs={"jingu_agent": jingu_agent_inst},
+        )
+    except StopExecution as e:
+        # VerdictStop: clean early exit — not an error.
+        # _monitor.early_stop_verdict is already set; caller (run_with_jingu) will
+        # log and break the attempt loop.
+        print(
+            f"  [cp] early_stop instance={instance_id} attempt={attempt}"
+            f" reason={e.reason} — StopExecution caught, exiting agent loop",
+            flush=True,
+        )
+    except Exception as e:
+        print(f"    [agent] ERROR: {e}")
+        traceback.print_exc()
     t_llm.stop()
 
     # Parse traj for usage + submission

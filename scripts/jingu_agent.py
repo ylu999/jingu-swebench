@@ -21,10 +21,20 @@ Integration path:
   ProgressTrackingAgent.step via ScopedPatch. jingu_process_instance() provides a
   cleaner alternative: pass the agent class directly, no monkey-patching needed for
   agent instantiation.
+
+p225-08:
+  JinguDefaultAgent overrides run() to call on_attempt_end() immediately after
+  super().run() returns — while the container is still alive. This eliminates the
+  second ScopedPatch on DefaultAgent.run from run_with_jingu_gate.py.
+
+  Container lifecycle: DefaultAgent.run() does NOT close the env. The env (Docker
+  container) goes out of scope after jingu_process_instance()'s try block returns.
+  Therefore on_attempt_end() called from JinguDefaultAgent.run() runs before env cleanup.
 """
 
 import json
 import logging
+import time
 import traceback
 from dataclasses import dataclass
 from pathlib import Path
@@ -313,14 +323,149 @@ class JinguAgent:
         """Called once when container_id is first observed in on_step_start().
 
         Sets self._state.container_id so in-loop controlled_verify can begin.
-        Equivalent to: _verifying_run's container_id injection at _orig_run() start.
+        Equivalent to: container_id injection that was in _verifying_run (pre-p225-08).
         """
         assert self._state is not None
         self._state.container_id = container_id
 
     def on_attempt_end(self, agent_self: Any, submission: str | None) -> None:
-        """Called after each attempt completes. Must be overridden."""
-        raise NotImplementedError
+        """Called after each attempt completes (before container is destroyed).
+
+        Runs the end-of-attempt governance checks (previously in the _verifying_run
+        closure in run_with_jingu_gate.py, removed in p225-08):
+          1. Cognition gate (p187) — fires when cp_state.phase == "JUDGE"
+          2. In-loop judge (p191) — patch format + semantic weakening checks
+          3. Unified prerequisite gate (p192) — aggregates cognition + judge
+          4. End-of-attempt controlled_verify (step=-1) — oracle eval signal
+
+        Container-lifecycle invariant: this method is called from JinguDefaultAgent.run()
+        immediately after super().run() returns. The env (Docker container) is still
+        alive at this point — it goes out of scope only after jingu_process_instance()'s
+        try block exits.
+        """
+        from controlled_verify import run_controlled_verify
+        from control.reasoning_state import VerdictStop
+
+        _monitor = self._state
+        if _monitor is None:
+            return
+
+        cid = getattr(getattr(agent_self, "env", None), "container_id", None)
+        if not cid:
+            return
+        submitted = submission or ""
+        if not submitted:
+            return
+
+        print(f"    [controlled-verify] final verify on container {cid[:12]}...", flush=True)
+
+        cp_state_holder = self._cp_state_holder if self._cp_state_holder else None
+
+        # p187: cognition gate — check declaration quality before controlled_verify.
+        # Fires when cp_state.phase == "JUDGE" (EXECUTE->JUDGE advance by verdict routing).
+        # Pass  → continue to controlled_verify as normal.
+        # Fail  → inject feedback as pending_redirect_hint, skip controlled_verify.
+        _cg_result_str: str | None = None
+        if cp_state_holder is not None and cp_state_holder[0].phase == "JUDGE":
+            _cg_decl: dict = {}
+            try:
+                from declaration_extractor import (
+                    extract_declaration,
+                    extract_last_agent_message,
+                    extract_from_structured,
+                )
+                from patch_signals import extract_patch_signals
+                _cg_msgs = getattr(agent_self, "messages", [])
+                # p221: try structured output first
+                from run_with_jingu_gate import _try_parse_structured_output
+                _cg_structured = _try_parse_structured_output(_cg_msgs)
+                if _cg_structured is not None:
+                    _cg_decl = extract_from_structured(_cg_structured)
+                else:
+                    _cg_last = extract_last_agent_message(_cg_msgs)
+                    _cg_decl = extract_declaration(_cg_last) if _cg_last else {}
+            except Exception:
+                pass
+            _cg_signals = extract_patch_signals(submitted) if submitted else []
+            from cognition_check import check_cognition_at_judge as _cg_judge
+            _cg_pass, _cg_feedback = _cg_judge(_cg_decl, _cg_signals)
+            _cg_result_str = "pass" if _cg_pass else "fail"
+            print(f"    [cognition_gate] phase=JUDGE result={_cg_result_str}", flush=True)
+            if not _cg_pass:
+                # Inject feedback as redirect hint — agent receives it on next attempt
+                _monitor.pending_redirect_hint = f"[COGNITION_FAIL] {_cg_feedback}"
+                print(
+                    f"    [cognition_gate] skipping controlled_verify — feedback injected",
+                    flush=True,
+                )
+
+        # p191: in-loop judge — patch format + semantic weakening checks.
+        # Runs after cognition gate, before controlled_verify.
+        # Hard checks (block): patch_non_empty, patch_format, no_semantic_weakening.
+        # Soft check (warn only): changed_file_relevant.
+        # Exception-safe: judge failure never crashes main flow.
+        _judge_result = None
+        try:
+            from in_loop_judge import run_in_loop_judge as _run_ilj
+            _judge_result = _run_ilj(submitted)
+            print(
+                f"    [in_loop_judge] "
+                f"patch_non_empty={'pass' if _judge_result.patch_non_empty else 'fail'} "
+                f"patch_format={'pass' if _judge_result.patch_format else 'fail'} "
+                f"semantic_weakening={'pass' if _judge_result.no_semantic_weakening else 'fail'} "
+                f"changed_file_relevant={'pass' if _judge_result.changed_file_relevant else 'fail'}",
+                flush=True,
+            )
+            if not _judge_result.all_pass:
+                # Hard check failures — set redirect hints (controlled_verify gated below)
+                if not _judge_result.patch_non_empty:
+                    _monitor.early_stop_verdict = VerdictStop(reason="empty_patch")
+                elif not _judge_result.patch_format:
+                    _monitor.pending_redirect_hint = "[REDIRECT:EXECUTE] patch_format_error"
+                elif not _judge_result.no_semantic_weakening:
+                    _monitor.pending_redirect_hint = "[REDIRECT:ANALYZE] semantic_weakening_detected"
+                elif not _judge_result.changed_file_relevant:
+                    # p204: changed_file_relevant promoted to hard check
+                    # Agent modified only test files (not source) — redirect back to EXECUTE
+                    _monitor.pending_redirect_hint = "[REDIRECT:EXECUTE] wrong_file_changed"
+                print(
+                    f"    [in_loop_judge] skipping controlled_verify (hard check failed)",
+                    flush=True,
+                )
+        except Exception as _ilj_exc:
+            print(f"    [in_loop_judge] error (non-fatal): {_ilj_exc}", flush=True)
+
+        # p192: unified prerequisite gate — aggregates cognition + judge results
+        from run_with_jingu_gate import _verify_prerequisites
+        _prereq_pass, _prereq_reason = _verify_prerequisites(
+            cognition_result=_cg_result_str,
+            judge_result=_judge_result,
+        )
+        print(
+            f"    [verify_gate] prerequisite={'pass' if _prereq_pass else f'fail({_prereq_reason})'} "
+            f"controlled_verify={'run' if _prereq_pass else 'skipped'}",
+            flush=True,
+        )
+
+        if not _prereq_pass:
+            _monitor._verify_skipped = True
+            _monitor._verify_skip_reason = _prereq_reason
+            return
+
+        t_cv0 = time.monotonic()
+        cv_result = run_controlled_verify(submitted, self._instance, cid, timeout_s=60)
+        cv_result["elapsed_ms"] = round((time.monotonic() - t_cv0) * 1000, 1)
+        # Store as last verify_history entry (step=-1 means end-of-attempt)
+        _monitor.record_verify(-1, cv_result)
+        # v2 two-column log: final-verify (oracle/eval) vs inner-verify (agent-visible)
+        _er = cv_result.get("eval_resolved")
+        if _er is not None:
+            print(
+                f"    [outcome-eval] eval_resolved={_er}"
+                f"  f2p={cv_result.get('f2p_passed')}/{(cv_result.get('f2p_passed', 0) or 0) + (cv_result.get('f2p_failed', 0) or 0)}"
+                f"  p2p={cv_result.get('p2p_passed')}/{(cv_result.get('p2p_passed', 0) or 0) + (cv_result.get('p2p_failed', 0) or 0)}",
+                flush=True,
+            )
 
     # -- top-level lifecycle ------------------------------------------------
 
@@ -331,6 +476,57 @@ class JinguAgent:
     def run(self) -> Any:
         """Execute the full multi-attempt loop. Must be overridden."""
         raise NotImplementedError
+
+
+# ---------------------------------------------------------------------------
+# JinguDefaultAgent — DefaultAgent subclass that calls on_attempt_end()
+# ---------------------------------------------------------------------------
+
+class JinguDefaultAgent(ProgressTrackingAgent):
+    """ProgressTrackingAgent subclass with full Jingu governance lifecycle.
+
+    Combines:
+    - Per-step governance: delegates step() to jingu_agent.on_step_start / on_step_end
+      (same as JinguProgressTrackingAgent)
+    - End-of-attempt governance: overrides run() to call jingu_agent.on_attempt_end()
+      after super().run() returns — while the Docker container is still alive.
+
+    Extends ProgressTrackingAgent (not raw DefaultAgent) so that jingu_process_instance()
+    can pass progress_manager= and instance_id= without extra plumbing.
+
+    This class replaces the combination of:
+    - JinguProgressTrackingAgent (step-level governance)
+    - ScopedPatch on DefaultAgent.run (end-of-attempt governance, pre-p225-08)
+    from run_with_jingu_gate.py.
+
+    Container lifecycle invariant: on_attempt_end() runs before env goes out of scope
+    in jingu_process_instance(). DefaultAgent.run() does not close the Docker env —
+    env is GC'd after jingu_process_instance()'s try block exits.
+    """
+
+    def __init__(self, *args: Any, jingu_agent: "JinguAgent", **kwargs: Any):
+        super().__init__(*args, **kwargs)
+        self.jingu_agent = jingu_agent
+
+    def step(self) -> dict:
+        from step_monitor_state import StopExecution
+
+        self.jingu_agent.on_step_start(self, self.n_calls)
+        result = super().step()
+        decision = self.jingu_agent.on_step_end(self, self.n_calls)
+
+        if decision.action == "stop":
+            raise StopExecution(decision.reason)
+        if decision.action == "redirect":
+            self.messages.append({"role": "user", "content": decision.message})
+
+        return result
+
+    def run(self, *args: Any, **kwargs: Any) -> dict:
+        result = super().run(*args, **kwargs)
+        submission = result.get("submission", "") if isinstance(result, dict) else ""
+        self.jingu_agent.on_attempt_end(self, submission)
+        return result
 
 
 # ---------------------------------------------------------------------------
