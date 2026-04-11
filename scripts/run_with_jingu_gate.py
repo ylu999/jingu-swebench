@@ -813,6 +813,7 @@ def _step_cp_update_and_verdict(
 
         # p211: Analysis gate — enforce quality before EXECUTE advance
         _analysis_gate_rejected = False
+        _analysis_gate_force_passed = False
         _AG_MAX_REJECTS = 2  # escape hatch: after N rejects, let agent proceed
         if _eval_phase == "ANALYZE" and _pr is not None:
             try:
@@ -828,6 +829,7 @@ def _step_cp_update_and_verdict(
                 )
                 if not _analysis_verdict.passed and _ag_reject_count >= _AG_MAX_REJECTS:
                     print(f"    [analysis_gate] FORCE_PASS — max_rejects={_AG_MAX_REJECTS} reached, allowing advance", flush=True)
+                    _analysis_gate_force_passed = True
                 elif not _analysis_verdict.passed:
                     _analysis_gate_rejected = True
                     # Reset phase back to ANALYZE — do not advance to EXECUTE
@@ -876,6 +878,8 @@ def _step_cp_update_and_verdict(
         try:
             if _analysis_gate_rejected:
                 raise RuntimeError("analysis_gate rejected, skipping principal gate")
+            if _analysis_gate_force_passed:
+                raise RuntimeError("analysis_gate FORCE_PASS, skipping principal gate to allow advance")
             if _pr is None:
                 raise RuntimeError("phase_record unavailable, skipping principal gate")
             from principal_gate import (
@@ -1053,6 +1057,8 @@ def _step_cp_update_and_verdict(
         try:
             if _analysis_gate_rejected:
                 raise RuntimeError("analysis_gate rejected, skipping inference check")
+            if _analysis_gate_force_passed:
+                raise RuntimeError("analysis_gate FORCE_PASS, skipping inference check")
             if _pr is None:
                 raise RuntimeError("phase_record unavailable, skipping inference check")
             # Inference telemetry: run inference directly to log per-principal signals.
@@ -1171,6 +1177,8 @@ def _step_cp_update_and_verdict(
         try:
             if _analysis_gate_rejected:
                 raise RuntimeError("analysis_gate rejected, skipping telemetry")
+            if _analysis_gate_force_passed:
+                raise RuntimeError("analysis_gate FORCE_PASS, skipping telemetry")
             if _pr is None:
                 raise RuntimeError("phase_record unavailable, skipping telemetry")
             from principal_inference import run_inference, diff_principals
