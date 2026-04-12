@@ -1,212 +1,161 @@
 # jingu-swebench
 
-Measures jingu's improvement over baseline on SWE-bench Lite.
+SWE-bench harness for Jingu — runs LLM agents with governance gates on SWE-bench Verified instances, evaluates via official harness, tracks results over time.
 
-## What this does
+## Quick Start
 
-Runs the same LLM (claude-sonnet-4-5 via Bedrock) in two modes on the same SWE-bench instances:
-
-- **baseline**: 2 attempts, no gate, attempt 2 gets no structured hint (truly naive)
-- **jingu**: 2 attempts, B1 trust gate + structured retry with failure evidence
-
-Resolved rate is measured via `python -m swebench.harness.run_evaluation` (official harness).
-Delta = jingu resolved rate − baseline resolved rate.
-
-## Running a calibration experiment
-
-### Prerequisites
-
-Runs in Docker container on EC2 via SSM. See [docs/build-and-deploy.md](docs/build-and-deploy.md).
-
-### Baseline run
+All operations go through `ops.py`:
 
 ```bash
-docker run --rm --privileged \
-  -v /root/results:/app/results \
-  -e AWS_DEFAULT_REGION=us-west-2 \
-  jingu-swebench:latest \
-  --instance-ids django__django-11019 django__django-11039 django__django-11049 \
-                 django__django-11099 django__django-11133 django__django-11179 \
-                 django__django-11422 django__django-11564 django__django-11620 \
-                 django__django-11905 \
-  --mode baseline --max-attempts 2 --workers 5 \
-  --output /app/results/calib-v1-baseline \
-  --run-eval --run-id calib-v1-baseline
+# Build + push Docker image (after code changes)
+python scripts/ops.py build
+
+# Full pipeline: smoke test → batch run → eval → store results
+python scripts/ops.py pipeline --batch-name batch-p26 --runbook-ack
+
+# Monitor a running batch
+python scripts/ops.py watch --batch-name batch-p26
+
+# View historical results
+python scripts/ops.py history
+python scripts/ops.py summary
 ```
-
-### Jingu run
-
-Same instances, same budget, mode=jingu:
-
-```bash
-docker run --rm --privileged \
-  -v /root/results:/app/results \
-  -e AWS_DEFAULT_REGION=us-west-2 \
-  jingu-swebench:latest \
-  --instance-ids django__django-11019 django__django-11039 django__django-11049 \
-                 django__django-11099 django__django-11133 django__django-11179 \
-                 django__django-11422 django__django-11564 django__django-11620 \
-                 django__django-11905 \
-  --mode jingu --max-attempts 2 --workers 5 \
-  --output /app/results/calib-v1-jingu \
-  --run-eval --run-id calib-v1-jingu
-```
-
-### Read results
-
-```bash
-for mode in baseline jingu; do
-  echo "=== $mode ==="
-  python3 -c "
-import json, sys
-r = json.load(open('/root/results/calib-v1-$mode/run_report.json'))
-e = r.get('eval_results', {})
-a = r.get('attempt_stats', {})
-print('resolved:', e.get('resolved_rate'), f'({e.get(\"resolved_count\")}/{e.get(\"total\")})')
-if mode == 'jingu':
-    print('rescued_rate:', a.get('rescued_rate'))
-    print('failure_breakdown:', r.get('failure_breakdown'))
-"
-done
-```
-
-## CLI reference
-
-```
-run_with_jingu_gate.py
-  --instance-ids ID [ID ...]   SWE-bench Lite instance IDs
-  --mode {jingu,baseline}      default: jingu
-  --max-attempts N             default: 2
-  --workers N                  default: 10
-  --output DIR                 output directory
-  --run-eval                   run official harness after inference
-  --run-id STR                 run identifier (required with --run-eval)
-```
-
-## Output files
-
-```
-<output>/
-  jingu-predictions.jsonl      (or baseline-predictions.jsonl)
-  run_report.json              summary: attempt_stats, failure_breakdown, eval_results
-  <instance_id>/
-    traj.json                  full agent trajectory
-    patch.diff                 accepted patch
-    gate_log.json              gate decision per attempt
-```
-
-`run_report.json` key fields:
-```json
-{
-  "mode": "jingu",
-  "run_id": "calib-v1-jingu",
-  "attempt_stats": {
-    "attempt1_accepted": 6,
-    "attempt2_rescued": 2,
-    "rescued_rate": 0.50
-  },
-  "failure_breakdown": {"no_test_progress": 3, "wrong_direction": 2},
-  "eval_results": {
-    "resolved_count": 8,
-    "total": 10,
-    "resolved_rate": 0.80,
-    "resolved_ids": ["django__django-11019", "..."]
-  }
-}
-```
-
-## Calibration instance set (10 instances)
-
-Selected from SWE-bench Lite django subset: FTP=1-2, ps_len<=2500, single-file logic bugs.
-All IDs verified present in SWE-bench/SWE-bench_Lite (300 instances).
-
-```
-django__django-11019   django__django-11039   django__django-11049
-django__django-11099   django__django-11133   django__django-11179
-django__django-11422   django__django-11564   django__django-11620
-django__django-11905
-```
-
-Decision rule: if jingu delta >= 2 instances on calibration set, expand to 30-instance run.
 
 ## Architecture
 
-### What mini-swe-agent does (one attempt)
-
-mini-swe-agent is a bash-only agent with linear message history (source: mini-swe-agent README +
-`default.py`). Each call to `process_instance()` runs one attempt:
+### Runtime Stack
 
 ```
-process_instance(instance, output_dir, config, progress)
-  get_sb_environment()        # pull SWE-bench Docker image, start container
-  DefaultAgent.run(problem_statement)
-    add_messages(system, user)        # rendered from jingu-swebench.yaml templates
-    while True:
-      query()                         # call LLM -> bash command
-      execute_actions()               # docker exec in container, append result to messages
-      if messages[-1].role == "exit": break
-    return {"exit_status": ..., "submission": <git diff>}
-  write preds.json
+ECS (c5.9xlarge) → Docker container (privileged, DinD)
+  └─ docker-entrypoint.sh
+       ├─ --eval mode → swebench.harness.run_evaluation
+       └─ default    → run_with_jingu_gate.py
+                         └─ JinguAgent (extends mini-swe-agent ProgressTrackingAgent)
+                              └─ per-step: visibility events, checkpoints, gate verdicts
 ```
 
-The agent reads code, runs bash, produces a patch. It does not see test results — test execution
-is the harness's job, not the agent's.
+### Agent Class Hierarchy
 
-### Where jingu hooks in
+```
+mini-swe-agent DefaultAgent
+  └─ ProgressTrackingAgent (step hooks)
+       └─ JinguProgressTrackingAgent (jingu step monitoring)
+            └─ JinguDefaultAgent (Docker container lifecycle)
+                 └─ JinguAgent (phase control, gate integration)
+```
 
-Jingu's retry loop wraps `process_instance`. It does not modify the agent's internal loop:
+### Retry Loop
 
 ```
 for attempt in 1..max_attempts:
-    # inject hint into instance_template before this attempt
-    config["agent"]["instance_template"] += hint_from_last_failure
-
-    process_instance(instance, attempt_dir, config, progress)
-    #   ^--- DefaultAgent.run() is monkey-patched here to run controlled_verify
-    #        on the same container BEFORE it is destroyed (mid-run signal only)
-
-    patch = read from traj.json
-
-    # jingu gate (B1): structural patch evaluation, not test execution
-    gate_result = evaluate_patch(patch, traj)
-    if gate_result.accepted: break
-
-    # build hint for next attempt from gate failure classification
-    # + controlled_verify output (test counts, failing test names)
-    last_failure = retry_controller(failure_class, exec_feedback)
-
-best patch -> predictions.jsonl
-_run_official_evaluation() -> python -m swebench.harness.run_evaluation  # final score only
+    JinguAgent.run(instance)         # LLM agent with governance gates
+    gate_result = evaluate_patch()   # structural patch evaluation
+    if accepted: break
+    hint = retry_controller(failure_class, exec_feedback)
+    # inject hint for next attempt
+best_patch → predictions.jsonl → S3
 ```
 
-**controlled_verify** (`run_controlled_verify`): orchestrator runs `git apply` + FAIL_TO_PASS
-tests via `docker exec` on the already-running container. Used to build the retry hint
-(failure counts, test names). It is mid-run signal only — not the official score.
+### Visibility System (p228-p230)
 
-**Official score**: `swebench.harness.run_evaluation` runs after all inference is done,
-on a fresh container per instance. Its resolved_rate is the benchmark number.
+Each attempt produces:
+- `attempt_N/step_events.jsonl` — per-step structured events (phase, gate verdict, files read/written)
+- `attempt_N/prompt_snapshot.json` — complete prompt sent to LLM at attempt start
+- `attempt_N/decisions.jsonl` — every gate verdict, retry decision, phase advance
 
-### Prompt injection
+### Checkpoint + Replay System (p231-p235)
 
-`AgentConfig` (mini-swe-agent) has only `system_template` and `instance_template`.
-There is no `instance_template_extra` field. We append directly to `instance_template`
-before each attempt (`run_with_jingu_gate.py:1441`):
+- `attempt_N/checkpoints/step_N.json.gz` — full conversation state at phase transitions
+- `replay_engine.py` — resume from any checkpoint with modified prompts
+- `traj_diff.py` — compare two trajectories, find first divergence point
+- `prompt_regression.py` — A/B replay + golden trajectory regression testing
 
-```python
-config["agent"]["instance_template"] = (
-    config["agent"]["instance_template"] + "\n\n" + "\n\n".join(extra_parts)
-)
+## ops.py Commands
+
+| Command | Purpose |
+|---------|---------|
+| `build` | Build Docker image on EC2 via SSM, push to ECR |
+| `pipeline` | Full pipeline: smoke → batch → eval → store (recommended) |
+| `smoke` | Launch + live-tail logs (or attach to existing task) |
+| `run` | Launch ECS task only (no eval, no history — use `pipeline` instead) |
+| `watch` | Real-time log tail for batch or single instance |
+| `eval` | Launch SWE-bench eval on S3 predictions |
+| `eval-all` | Discover + eval all unevaluated batches |
+| `status` | ECS task status |
+| `logs` | CloudWatch log tail |
+| `history` | Pipeline run history (resolved rates over time) |
+| `summary` | Per-instance summary table grouped by repo |
+| `backfill` | Populate per-instance records from historical batches |
+| `discover` | Scan S3 for all predictions and eval status |
+| `list-tasks` | Show running/pending ECS tasks |
+
+## Pipeline Flow
+
+```
+ops.py pipeline --batch-name NAME
+  │
+  ├─ Step 1: Smoke test (1 instance, verify new behavior)
+  │    └─ Check for ACCEPTED signal in logs
+  │
+  ├─ Step 2: Batch run (30 default django instances)
+  │    └─ ECS task → run_with_jingu_gate.py → predictions.jsonl → S3
+  │
+  ├─ Step 3: Eval (SWE-bench official harness)
+  │    └─ ECS task → swebench.harness.run_evaluation → eval_results.json → S3
+  │
+  └─ Step 4: Store results
+       ├─ pipeline-results/history.json (batch-level)
+       └─ pipeline-results/instances/<id>.json (per-instance)
 ```
 
-`extra_parts` contains: DECLARATION PROTOCOL + FAIL_TO_PASS test list + previous failure hint.
+## Output Structure
 
-### Config layer
+```
+<batch_name>/
+  jingu-predictions.jsonl          # predictions for SWE-bench eval
+  run_report.json                  # execution identity, model usage, cost
+  <instance_id>/
+    traj.json                      # full agent trajectory
+    patch.diff                     # accepted patch
+    attempt_1/
+      step_events.jsonl            # per-step structured events
+      prompt_snapshot.json         # prompt sent to LLM
+      decisions.jsonl              # gate verdicts, phase advances
+      checkpoints/
+        step_5.json.gz             # checkpoint at phase transitions
+    attempt_2/
+      ...
+eval-<batch_name>/
+  eval_results.json                # resolved_ids, unresolved_ids
+```
 
-`config/jingu-swebench.yaml` is baked into the Docker image at
-`/usr/local/lib/python3.12/site-packages/minisweagent/config/benchmarks/jingu-swebench.yaml`.
-Fork of the official `swebench.yaml`. Adds FORBIDDEN ACTIONS block (pip install, running tests,
-reproduction scripts). Agent sees these constraints for the full attempt.
+## Infrastructure
 
-## Build and deploy
+- **ECR**: `235494812052.dkr.ecr.us-west-2.amazonaws.com/jingu-swebench:latest`
+- **ECS Cluster**: `jingu-swebench` (EC2 launch type, c5.9xlarge)
+- **S3**: `jingu-swebench-results` (all results + pipeline history)
+- **CloudWatch**: `/ecs/jingu-swebench` (container logs)
+- **ASG**: `jingu-swebench-ecs-asg` (scale 0↔1 for cost control)
+- **Dataset**: SWE-bench Verified (500 instances, 231 django)
 
-See [docs/build-and-deploy.md](docs/build-and-deploy.md).
+## Replay (offline, from checkpoints)
+
+```bash
+# List checkpoints for an instance
+python scripts/replay_cli.py list-checkpoints --traj-dir results/<instance_id>
+
+# Replay from step 5 with a hint
+python scripts/replay_cli.py replay --traj-dir results/<instance_id> \
+  --from-step 5 --inject-hint "Focus on the QuerySet.union() method"
+
+# Compare original vs replayed trajectory
+python scripts/replay_cli.py compare --original orig.traj.json --replayed replay.traj.json
+
+# A/B prompt regression test
+python scripts/prompt_regression.py ab --checkpoint path/to/step_5.json.gz \
+  --variant-b "v2-explicit-scope" --inject-hint-b "Be more explicit about scope"
+```
+
+## Build and Deploy
+
+See [docs/build-and-deploy.md](docs/build-and-deploy.md) and `.claude/smoke-test-runbook.md`.
