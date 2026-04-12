@@ -1,0 +1,9 @@
+[
+    {
+        "instance_id": "django__django-10097",
+        "description": "Smoke test instance — well-understood behavior",
+        "checkpoint_step": null,
+        "expected_outcome": "resolved",
+        "notes": "Use latest checkpoint from any successful run"
+    }
+]
