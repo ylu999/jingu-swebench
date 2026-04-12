@@ -62,6 +62,12 @@ def is_extraction_message(msg: dict) -> bool:
 class JinguModel(LitellmModel):
     """LitellmModel with structured phase extraction capability."""
 
+    def __init__(self, *, config_class=LitellmModelConfig, **kwargs):
+        print(f"[JinguModel.__init__] config_class={config_class.__name__}, kwargs.keys={list(kwargs.keys())}", flush=True)
+        print(f"[JinguModel.__init__] model_name={kwargs.get('model_name', 'NOT_SET')}", flush=True)
+        super().__init__(config_class=config_class, **kwargs)
+        print(f"[JinguModel.__init__] self.config.model_name={self.config.model_name}", flush=True)
+
     def structured_extract(
         self,
         accumulated_text: str,
