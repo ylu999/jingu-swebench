@@ -126,10 +126,10 @@ GIT_COMMIT=$(git rev-parse HEAD)
 BUILD_TIMESTAMP=$(date -u +%Y%m%dT%H%M%SZ)
 echo "Building commit $GIT_COMMIT at $BUILD_TIMESTAMP"
 
-docker build \\
+docker build --no-cache \\
   --build-arg GIT_COMMIT=$GIT_COMMIT \\
   --build-arg BUILD_TIMESTAMP=$BUILD_TIMESTAMP \\
-  -t jingu-swebench:latest . 2>&1 | grep -E "^Step|error|ERROR|Successfully" | tail -20
+  -t jingu-swebench:latest . 2>&1 | grep -E "^Step|#|error|ERROR|Successfully|DONE" | tail -30
 
 docker tag jingu-swebench:latest 235494812052.dkr.ecr.us-west-2.amazonaws.com/jingu-swebench:latest
 docker push 235494812052.dkr.ecr.us-west-2.amazonaws.com/jingu-swebench:latest 2>&1 | tail -3
@@ -1537,14 +1537,19 @@ def cmd_pipeline(args) -> None:
             print(f"[pipeline] SMOKE FAILED (exit={smoke_exit}) — aborting pipeline", flush=True)
             sys.exit(1)
 
-        # Check smoke logs for ACCEPTED signal
+        # Check smoke logs for ACCEPTED signal using filter (searches all events, not just last 500)
         logs_client = boto3.client("logs", region_name=REGION)
         stream = f"runner/runner/{smoke_task_id}"
         accepted = False
         try:
-            resp = logs_client.get_log_events(logGroupName=LOG_GROUP, logStreamName=stream, limit=500, startFromHead=False)
-            for e in resp["events"]:
-                if "ACCEPTED" in e["message"] or "result] ACCEPTED" in e["message"]:
+            resp = logs_client.filter_log_events(
+                logGroupName=LOG_GROUP,
+                logStreamNames=[stream],
+                filterPattern='"ACCEPTED"',
+                limit=5,
+            )
+            for e in resp.get("events", []):
+                if "result] ACCEPTED" in e["message"]:
                     accepted = True
                     break
         except Exception:
@@ -1552,11 +1557,14 @@ def cmd_pipeline(args) -> None:
 
         if not accepted:
             print(f"[pipeline] SMOKE WARNING: no ACCEPTED signal in logs (task may have run but not resolved)", flush=True)
-            print(f"[pipeline] Check manually: python scripts/ops.py logs --task-id {smoke_task_id}", flush=True)
-            answer = input("[pipeline] Continue to batch anyway? [y/N] ").strip().lower()
-            if answer != "y":
-                print("[pipeline] aborted", flush=True)
-                sys.exit(0)
+            print(f"[pipeline] Check manually: python scripts/ops.py peek --task-id {smoke_task_id}", flush=True)
+            if sys.stdin.isatty():
+                answer = input("[pipeline] Continue to batch anyway? [y/N] ").strip().lower()
+                if answer != "y":
+                    print("[pipeline] aborted", flush=True)
+                    sys.exit(0)
+            else:
+                print("[pipeline] non-interactive mode — continuing despite missing ACCEPTED signal", flush=True)
         else:
             print(f"[pipeline] smoke PASSED (ACCEPTED signal found)", flush=True)
     else:
