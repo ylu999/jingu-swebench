@@ -11,7 +11,7 @@ Git commit under test: d20c673
 | # | Subsystem | Status | Detail |
 |---|-----------|--------|--------|
 | S1 | Phase Tracking | PARTIAL | OBSERVE(28 steps) -> ANALYZE(5 steps), never reached EXECUTE/VERIFY. step_events correctly recorded each step's phase. |
-| S2 | Cognition Gate | NOT ACTIVE | `phase_injection=NONE`, `principal_section=NONE`. Prompt snapshot shows no cognition injection. Bundle not loaded or phase_prompt.py not triggered. |
+| S2 | Cognition Gate / Bundle Loading | NOT ACTIVE | **ROOT CAUSE CONFIRMED**: `compile_bundle()` threw exception at `jingu_agent.py:665`. Exception silently caught, fell through to hardcoded fallback (line 681). `prompt_snapshot.reasoning_protocol` contains fallback text ("STEP 1 — before writing any code"), NOT bundle-generated phase prompts. Bundle file exists in image (`/app/bundle.json`, 66KB), but compilation failed. Error message only in stdout (`[jingu_onboard] prompt load error (fallback): ...`), not in decisions.jsonl or step_events — **zero structured visibility of this critical failure**. |
 | S3 | Policy / Principal | SURFACE ONLY | Agent wrote `PHASE: observe` / `PRINCIPALS: evidence_completeness` in text, but system-level enforcement absent. decisions.jsonl has only 1 record (advance OBSERVE->ANALYZE). |
 | S4 | Prompt Injection | NOT ACTIVE | `phase_injection=NONE`, `principal_section=NONE`. Cognition bundle may not be loaded. |
 | S5 | Response Structure | SURFACE ONLY | Agent declared phase/principals in text, but `extraction_metrics` all 0 (structured=0, regex_fallback=0, no_schema=0). Declaration extractor extracted nothing. |
@@ -41,9 +41,28 @@ Git commit under test: d20c673
 7. agent writes own small test (passes) -> submits, but official eval uses full auth_tests -> fails
 ```
 
-Two independent problems:
+Three independent problems:
+- **Bundle compilation failure** (S2) -- compile_bundle() exception silently caught, entire governance system falls back to hardcoded prompts. Zero visibility.
 - **controlled_verify timeout** (C1+C2 below) -- agent has no test signal
-- **cognition gate not active** (S2+S4 below) -- governance system offline
+- **cognition gate not active** (S2+S4 below) -- consequence of bundle failure
+
+### Bundle Loading Trace
+
+```
+jingu_agent.py:627  compile_bundle() called
+jingu_agent.py:665  except Exception -> "[jingu_onboard] prompt load error (fallback): <error>"
+jingu_agent.py:669  _phase_prompt_parts is empty (bundle failed)
+jingu_agent.py:681  FALLBACK: hardcoded reasoning protocol injected
+                    -> prompt_snapshot shows "STEP 1 — before writing any code" (fallback text)
+                    -> phase_injection = NONE (bundle prompts never loaded)
+                    -> principal_section = NONE (bundle contracts never loaded)
+                    -> extraction_metrics = all 0 (structured schema not available)
+```
+
+**This is the #1 issue**: bundle compilation fails silently, and the ENTIRE governance
+system degrades to surface-level text matching with hardcoded prompts. No structured
+extraction, no phase enforcement, no principal gates — just keyword matching on
+agent output that happens to include "PHASE:" markers from the fallback prompt.
 
 ---
 
@@ -162,3 +181,59 @@ Each force-pass must:
 1. Log to decisions.jsonl with full context
 2. Be configurable (max_rejects from bundle, not hardcoded)
 3. Never silently bypass — always emit `[gate-force-pass]` signal
+
+---
+
+## Part 5: Bundle Loading Deep Dive
+
+### What bundle.json provides (when working)
+
+- Per-phase prompts (OBSERVE/ANALYZE/DECISION/EXECUTE/VERIFY)
+- Per-phase principal requirements (required + forbidden)
+- Type contracts (subtype -> required principals mapping)
+- Structured output schemas (for declaration extraction)
+- Gate configurations (thresholds, validation rules)
+- Cognition loader data (phase definitions, principal registry)
+
+### What happens when bundle fails (current state)
+
+| Component | With Bundle | Without Bundle (fallback) |
+|-----------|------------|--------------------------|
+| Phase prompts | Dynamic per-phase from bundle | Hardcoded 4-step "REASONING PROTOCOL" |
+| Principal requirements | From contracts (per-subtype) | Hardcoded `_analysis_req`, `_decision_req`, `_execute_req` |
+| Structured extraction | Bundle schema -> structured JSON parse | `extraction_metrics.structured = 0`, falls to regex |
+| Phase injection | Per-phase guidance from cognition | `phase_injection = NONE` |
+| Principal section | Dynamic from contracts | `principal_section = NONE` |
+| Gate enforcement | Full contract validation | Surface keyword matching only |
+| Type contracts | Compiled from bundle | Hardcoded string in `_type_contracts_block` |
+
+### Evidence from this run
+
+```
+prompt_snapshot.sections:
+  - forbidden_actions: 486 chars (hardcoded, not from bundle)
+  - reasoning_protocol: 1498 chars (FALLBACK — "STEP 1 — before writing any code")
+
+extraction_metrics: {structured: 0, regex_fallback: 0, no_schema: 0, total: 0}
+  -> structured = 0 means bundle schema was NOT available for parsing
+  -> regex_fallback = 0 means even regex fallback extracted nothing
+  -> total = 0 means declaration_extractor produced ZERO records
+
+phase_injection: NONE
+principal_section: NONE
+```
+
+### Why compile_bundle() likely failed
+
+Candidates (need to reproduce):
+1. `bundle.json` exists at `/app/bundle.json` but `JINGU_BUNDLE_PATH` not set -> looks in wrong place
+2. `jingu_loader` package not importable (missing from Python path in container)
+3. Bundle JSON schema mismatch (bundle compiled by newer jingu-cognition, loader expects older format)
+4. Missing dependency in bundle_compiler.py (imports that don't exist in container)
+
+### Required fix
+
+1. `compile_bundle()` failure MUST be a hard error, not a silent fallback
+2. Emit structured event: `{"type": "bundle_load_failure", "error": "...", "fallback_active": true}`
+3. Log to decisions.jsonl so it appears in replay analysis
+4. Consider: should the run ABORT if bundle fails? (governance = offline)
