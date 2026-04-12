@@ -825,11 +825,19 @@ Examples:
                         help="Only show specific attempt number")
     parser.add_argument("--no-color", action="store_true",
                         help="Disable colored output")
+    parser.add_argument("--interactive-replay", action="store_true",
+                        help="Launch interactive replay CLI (delegates to replay_cli.py)")
 
     args = parser.parse_args()
 
     if args.no_color:
         C.ENABLED = False
+
+    # Interactive replay mode — delegate to replay_cli
+    if args.interactive_replay:
+        from replay_cli import main as replay_cli_main
+        replay_cli_main()
+        return
 
     # Dispatch based on input source
     if args.s3:
