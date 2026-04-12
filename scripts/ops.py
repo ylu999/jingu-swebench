@@ -2288,6 +2288,133 @@ def cmd_eval_all(args) -> None:
     print(f"[eval-all] ══════════════════════════════════════════", flush=True)
 
 
+# ── peek ──────────────────────────────────────────────────────────────────────
+
+_PEEK_SIGNALS = [
+    "[phase_record]", "[principal_gate]", "[principal_inference]", "[phase_injection]",
+    "[cp-step]", "[cp] ", "[inner-verify]", "DONE", "FAILED", "ACCEPTED", "REJECTED",
+    "[step ", "[jingu]", "pee:True", "[verify_gate]", "[init]", "Traceback", "Error",
+    "STOPPED", "[attempt ", "[preflight]", "ModuleNotFoundError", "[smoke]",
+    "[pipeline]", "resolved", "BUILD_DONE",
+]
+
+
+def cmd_peek(args) -> None:
+    """
+    Auto-polling CloudWatch signal log viewer.
+
+    Polls every --interval seconds, prints only signal lines (jingu events,
+    errors, phase records, etc.), stops when task reaches STOPPED.
+
+    Use --once for a single snapshot instead of polling.
+    """
+    task_id = args.task_id
+    interval = args.interval
+    once = args.once
+    show_all = args.all
+    max_rounds = args.max_rounds
+
+    logs_client = boto3.client("logs", region_name=REGION)
+    ecs = boto3.client("ecs", region_name=REGION)
+    stream = f"runner/runner/{task_id}"
+
+    # Check task exists
+    try:
+        t_resp = ecs.describe_tasks(cluster=ECS_CLUSTER, tasks=[task_id])
+        tasks = t_resp.get("tasks", [])
+        if tasks:
+            status = tasks[0].get("lastStatus", "?")
+            print(f"[peek] task={task_id}  status={status}", flush=True)
+        else:
+            print(f"[peek] task={task_id}  (not found in ECS — may have expired)", flush=True)
+    except Exception:
+        print(f"[peek] task={task_id}", flush=True)
+
+    print(f"[peek] interval={interval}s  max_rounds={max_rounds}  {'once' if once else 'polling'}", flush=True)
+    print("─" * 70, flush=True)
+
+    # Initial read: get all events from start
+    token = None
+    try:
+        resp = logs_client.get_log_events(
+            logGroupName=LOG_GROUP, logStreamName=stream,
+            limit=500, startFromHead=True,
+        )
+        events = resp.get("events", [])
+        token = resp.get("nextForwardToken")
+
+        for e in events:
+            for line in e["message"].split("\t"):
+                line = line.strip()
+                if not line:
+                    continue
+                if show_all or any(s in line for s in _PEEK_SIGNALS):
+                    print(line[:200], flush=True)
+
+        print(f"─── initial: {len(events)} events ───", flush=True)
+    except Exception as e:
+        print(f"[peek] log stream not available yet: {e}", flush=True)
+
+    if once:
+        return
+
+    # Polling loop
+    for rnd in range(max_rounds):
+        time.sleep(interval)
+
+        # Check task status
+        task_status = "?"
+        try:
+            t_resp = ecs.describe_tasks(cluster=ECS_CLUSTER, tasks=[task_id])
+            tasks = t_resp.get("tasks", [])
+            if tasks:
+                task_status = tasks[0].get("lastStatus", "?")
+        except Exception:
+            pass
+
+        # Read new events
+        new_count = 0
+        try:
+            kwargs = dict(
+                logGroupName=LOG_GROUP, logStreamName=stream,
+                limit=500, startFromHead=False,
+            )
+            if token:
+                kwargs["nextToken"] = token
+            resp = logs_client.get_log_events(**kwargs)
+            new_events = resp.get("events", [])
+            new_token = resp.get("nextForwardToken")
+
+            for e in new_events:
+                for line in e["message"].split("\t"):
+                    line = line.strip()
+                    if not line:
+                        continue
+                    if show_all or any(s in line for s in _PEEK_SIGNALS):
+                        print(line[:200], flush=True)
+                        new_count += 1
+
+            if new_token:
+                token = new_token
+        except Exception:
+            pass
+
+        print(f"─── round {rnd + 1}/{max_rounds}: +{new_count} signals, status={task_status} ───", flush=True)
+
+        if task_status == "STOPPED":
+            # Print final exit code
+            try:
+                t = tasks[0] if tasks else {}
+                exit_code = t.get("containers", [{}])[0].get("exitCode", "?")
+                reason = t.get("stoppedReason", "")
+                print(f"[peek] STOPPED  exit={exit_code}  reason={reason}", flush=True)
+            except Exception:
+                pass
+            break
+
+    print("─" * 70, flush=True)
+
+
 # ── status ─────────────────────────────────────────────────────────────────────
 
 def cmd_status(args) -> None:
@@ -2452,6 +2579,18 @@ def main():
     p_status = sub.add_parser("status", help="ECS task status")
     p_status.add_argument("--task-id", required=True)
 
+    # peek — auto-polling CloudWatch signal log viewer
+    p_peek = sub.add_parser("peek", help="Auto-polling CloudWatch signal logs (replaces jingu_logs.py)")
+    p_peek.add_argument("--task-id", required=True, help="ECS task ID")
+    p_peek.add_argument("--interval", type=int, default=30,
+                        help="Poll interval in seconds (default: 30)")
+    p_peek.add_argument("--max-rounds", type=int, default=60,
+                        help="Max polling rounds before exit (default: 60 = 30min at 30s interval)")
+    p_peek.add_argument("--once", action="store_true",
+                        help="Single snapshot, no polling")
+    p_peek.add_argument("--all", "-a", action="store_true",
+                        help="Show all lines, not just signals")
+
     args = parser.parse_args()
 
     if args.cmd == "build":
@@ -2484,6 +2623,8 @@ def main():
     elif args.cmd == "eval-all":
         _check_runbook_ack(args)
         cmd_eval_all(args)
+    elif args.cmd == "peek":
+        cmd_peek(args)
 
 
 if __name__ == "__main__":
