@@ -418,14 +418,9 @@ def _step_cp_update_and_verdict(
             phase_to=getattr(_step_verdict, "to", None),
         )
         _old_phase = _cp_s.phase
-        if _step_verdict.to is not None:
-            import dataclasses as _dc_adv
-            if cp_state_holder is not None:
-                cp_state_holder[0] = _dc_adv.replace(cp_state_holder[0], phase=_step_verdict.to, no_progress_steps=0)
-                _cp_s = cp_state_holder[0]
-            else:
-                state.cp_state = _dc_adv.replace(state.cp_state, phase=_step_verdict.to, no_progress_steps=0)
-                _cp_s = state.cp_state
+        # Plan-A: defer phase advance until after all gates pass.
+        # _new_phase is computed but NOT applied yet. Applied at bottom of handler.
+        _new_phase = _step_verdict.to
         try:
             from declaration_extractor import _extract_phase_from_message as _epfm, _PHASE_NORM as _pnorm
             _adv_declared_raw = _epfm(latest_assistant_text)
@@ -557,9 +552,64 @@ def _step_cp_update_and_verdict(
         except Exception as _pr_exc:
             print(f"    [phase_record] error (non-fatal): {_pr_exc}", flush=True)
 
+        # Plan-A: Extraction failure gate — block phase advance if extraction failed
+        _MAX_EXTRACTION_RETRIES = 2
+        _extraction_gated = False  # True if extraction gate blocked advance
+        if _pr is None:
+            _ext_key = _eval_phase
+            _ext_retries = state.extraction_retry_counts.get(_ext_key, 0)
+            if _ext_retries < _MAX_EXTRACTION_RETRIES:
+                state.extraction_retry_counts[_ext_key] = _ext_retries + 1
+                state._phase_accumulated_text.pop(_eval_phase, None)
+                _emit_limit_triggered(
+                    state, step_n=_cp_s.step_index,
+                    limit_name="extraction_retry",
+                    configured_value=_MAX_EXTRACTION_RETRIES,
+                    actual_value=_ext_retries + 1,
+                    action_taken="retry_current_phase",
+                    source_file="step_sections.py",
+                    source_line=553,
+                    reason=f"extraction failed for {_eval_phase}, retrying ({_ext_retries + 1}/{_MAX_EXTRACTION_RETRIES})",
+                )
+                agent_self.messages.append({
+                    "role": "user",
+                    "content": (
+                        f"[Phase Gate: EXTRACTION FAILED]\n"
+                        f"Your {_eval_phase} phase output could not be parsed into structured format.\n"
+                        f"Restate your {_eval_phase} findings using the required structure:\n"
+                        f"  PHASE: {_eval_phase.lower()}\n"
+                        f"  PRINCIPALS: <required principals>\n"
+                        f"  <phase-specific content>\n"
+                        f"Retry {_ext_retries + 1}/{_MAX_EXTRACTION_RETRIES}."
+                    ),
+                })
+                print(
+                    f"    [extraction_gate] RETRY {_ext_retries + 1}/{_MAX_EXTRACTION_RETRIES}"
+                    f" phase={_eval_phase} — staying in current phase",
+                    flush=True,
+                )
+                _extraction_gated = True
+            else:
+                _emit_limit_triggered(
+                    state, step_n=_cp_s.step_index,
+                    limit_name="extraction_force_advance",
+                    configured_value=_MAX_EXTRACTION_RETRIES,
+                    actual_value=_ext_retries + 1,
+                    action_taken="force_advance_no_record",
+                    source_file="step_sections.py",
+                    source_line=553,
+                    reason=f"extraction failed {_ext_retries + 1} times for {_eval_phase}, force advancing",
+                )
+                print(
+                    f"    [extraction_gate] FORCE_ADVANCE — {_ext_retries + 1} failures"
+                    f" for {_eval_phase}, advancing with no record",
+                    flush=True,
+                )
+                # Fall through — will advance at bottom with no record
+
         # p222: Cognition validation
         _cognition_rejected = False
-        if _pr is not None:
+        if _pr is not None and not _extraction_gated:
             try:
                 from cognition_prompts import COGNITION_EXECUTION_ENABLED as _COG_ENABLED
                 if _COG_ENABLED:
@@ -587,19 +637,7 @@ def _step_cp_update_and_verdict(
                         )
                         _cog_feedback = _build_cog_feedback(_cog_errors, _pr, _cog_loader)
                         _cognition_rejected = True
-                        import dataclasses as _dc_cog
-                        if cp_state_holder is not None:
-                            cp_state_holder[0] = _dc_cog.replace(
-                                cp_state_holder[0],
-                                phase=_old_phase,
-                                no_progress_steps=0,
-                            )
-                        else:
-                            state.cp_state = _dc_cog.replace(
-                                state.cp_state,
-                                phase=_old_phase,
-                                no_progress_steps=0,
-                            )
+                        # Plan-A: no rollback needed — phase was never advanced
                         _step_verdict = VerdictContinue(reason="cognition_validation_failed")
                         _emit_decision(
                             state, decision_type="gate_verdict", step_n=_cp_s.step_index,
@@ -641,7 +679,7 @@ def _step_cp_update_and_verdict(
         _analysis_gate_rejected = False
         _analysis_gate_force_passed = False
         _AG_MAX_REJECTS = 2
-        if _eval_phase == "ANALYZE" and _pr is not None and not _cognition_rejected:
+        if _eval_phase == "ANALYZE" and _pr is not None and not _cognition_rejected and not _extraction_gated:
             try:
                 from analysis_gate import evaluate_analysis as _eval_analysis
                 _analysis_verdict = _eval_analysis(
@@ -668,17 +706,7 @@ def _step_cp_update_and_verdict(
                     _analysis_gate_force_passed = True
                 elif not _analysis_verdict.passed:
                     _analysis_gate_rejected = True
-                    import dataclasses as _dc_ag
-                    if cp_state_holder is not None:
-                        cp_state_holder[0] = _dc_ag.replace(
-                            cp_state_holder[0], phase="ANALYZE", no_progress_steps=0
-                        )
-                        _cp_s = cp_state_holder[0]
-                    else:
-                        state.cp_state = _dc_ag.replace(
-                            state.cp_state, phase="ANALYZE", no_progress_steps=0
-                        )
-                        _cp_s = state.cp_state
+                    # Plan-A: no rollback needed — phase was never advanced
                     _sdg_repair_used = False
                     if _SDG_ENABLED and getattr(_analysis_verdict, "rejection", None):
                         try:
@@ -727,7 +755,7 @@ def _step_cp_update_and_verdict(
         _design_gate_rejected = False
         _design_gate_force_passed = False
         _DG_MAX_REJECTS = 2
-        if _eval_phase == "DESIGN" and _pr is not None and not _cognition_rejected:
+        if _eval_phase == "DESIGN" and _pr is not None and not _cognition_rejected and not _extraction_gated:
             try:
                 from design_gate import evaluate_design as _eval_design
                 _design_verdict = _eval_design(_pr)
@@ -751,17 +779,7 @@ def _step_cp_update_and_verdict(
                     _design_gate_force_passed = True
                 elif not _design_verdict.passed:
                     _design_gate_rejected = True
-                    import dataclasses as _dc_dg
-                    if cp_state_holder is not None:
-                        cp_state_holder[0] = _dc_dg.replace(
-                            cp_state_holder[0], phase="DESIGN", no_progress_steps=0
-                        )
-                        _cp_s = cp_state_holder[0]
-                    else:
-                        state.cp_state = _dc_dg.replace(
-                            state.cp_state, phase="DESIGN", no_progress_steps=0
-                        )
-                        _cp_s = state.cp_state
+                    # Plan-A: no rollback needed — phase was never advanced
                     _dg_sdg_repair_used = False
                     if _SDG_ENABLED and getattr(_design_verdict, "rejection", None):
                         try:
@@ -808,7 +826,10 @@ def _step_cp_update_and_verdict(
             except Exception as _dg_exc:
                 print(f"    [design_gate] error (non-fatal): {_dg_exc}", flush=True)
 
+        _pg_retryable_no_bypass = False  # Plan-A: tracks if principal gate RETRYABLE redirected phase
         try:
+            if _extraction_gated:
+                raise RuntimeError("extraction_gate blocked, skipping principal gate")
             if _cognition_rejected:
                 raise RuntimeError("cognition_validator rejected, skipping principal gate")
             if _analysis_gate_rejected:
@@ -961,6 +982,7 @@ def _step_cp_update_and_verdict(
                         _contract_bypass = True
 
                     if not _contract_bypass and not state.early_stop_verdict:
+                        _pg_retryable_no_bypass = True  # Plan-A: principal gate handled phase
                         _pv_verdict = decide_next(_cp_s)
                         print(
                             f"    [principal_gate] RETRYABLE → cognition_verdict={_pv_verdict.type}"
@@ -993,6 +1015,8 @@ def _step_cp_update_and_verdict(
             print(f"    [principal_gate] error={_pg_exc}", flush=True)
 
         try:
+            if _extraction_gated:
+                raise RuntimeError("extraction_gate blocked, skipping inference check")
             if _analysis_gate_rejected:
                 raise RuntimeError("analysis_gate rejected, skipping inference check")
             if _analysis_gate_force_passed:
@@ -1109,6 +1133,8 @@ def _step_cp_update_and_verdict(
             print(f"    [principal_inference] check error={_pi_exc}", flush=True)
 
         try:
+            if _extraction_gated:
+                raise RuntimeError("extraction_gate blocked, skipping telemetry")
             if _analysis_gate_rejected:
                 raise RuntimeError("analysis_gate rejected, skipping telemetry")
             if _analysis_gate_force_passed:
@@ -1128,6 +1154,35 @@ def _step_cp_update_and_verdict(
             )
         except Exception:
             pass
+
+        # Plan-A: phase advance at the BOTTOM — only if all gates passed.
+        # _extraction_gated: extraction failed, staying in current phase
+        # _cognition_rejected: cognition validation failed
+        # _analysis_gate_rejected: analysis gate rejected (not force-passed)
+        # _design_gate_rejected: design gate rejected (not force-passed)
+        # Principal gate RETRYABLE: sets pending_redirect_hint + redirects phase already
+        # Principal gate REJECTED: raises StopExecution (never reaches here)
+        _any_gate_rejected = (
+            _extraction_gated
+            or _cognition_rejected
+            or _analysis_gate_rejected
+            or _design_gate_rejected
+            or _pg_retryable_no_bypass
+        )
+        if not _any_gate_rejected:
+            import dataclasses as _dc_adv
+            if cp_state_holder is not None:
+                cp_state_holder[0] = _dc_adv.replace(
+                    cp_state_holder[0], phase=_new_phase, no_progress_steps=0
+                )
+            else:
+                state.cp_state = _dc_adv.replace(
+                    state.cp_state, phase=_new_phase, no_progress_steps=0
+                )
+            print(
+                f"    [Plan-A] phase_advance COMMITTED: {_old_phase} → {_new_phase}",
+                flush=True,
+            )
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

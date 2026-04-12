@@ -124,6 +124,10 @@ class StepMonitorState:
         # _execute_write_seen: True once a write/patch signal is observed in EXECUTE phase
         self._execute_entry_step: int = -1
         self._execute_write_seen: bool = False
+        # Plan-A: extraction retry counts per phase — gates phase advance on extraction failure.
+        # Key = phase name (str), value = consecutive extraction failure count.
+        # Reset per attempt. After _MAX_EXTRACTION_RETRIES, force advance with no record.
+        self.extraction_retry_counts: dict[str, int] = {}
 
     @classmethod
     def from_checkpoint_dict(cls, d: dict, instance: dict | None = None) -> "StepMonitorState":

@@ -1046,6 +1046,8 @@ class JinguAgent:
         _monitor._extraction_structured = 0
         _monitor._extraction_regex_fallback = 0
         _monitor._extraction_no_schema = 0
+        # Plan-A: reset extraction retry counts per attempt
+        _monitor.extraction_retry_counts = {}
 
         self._state = _monitor
         # p231: reset checkpoint tracking for new attempt
