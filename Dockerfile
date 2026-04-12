@@ -94,6 +94,20 @@ COPY scripts/run_with_jingu_gate.py \
      scripts/phase_schemas.py \
      scripts/cognition_prompts.py \
      scripts/jingu_onboard.py \
+     scripts/step_monitor_state.py \
+     scripts/signal_extraction.py \
+     scripts/controlled_verify.py \
+     scripts/jingu_adapter.py \
+     scripts/jingu_agent.py \
+     scripts/step_sections.py \
+     scripts/step_event_emitter.py \
+     scripts/decision_logger.py \
+     scripts/checkpoint.py \
+     scripts/replay_engine.py \
+     scripts/replay_cli.py \
+     scripts/replay_traj.py \
+     scripts/traj_diff.py \
+     scripts/prompt_regression.py \
      /app/scripts/
 # B1-CP: reasoning control plane Python module
 COPY scripts/control/ /app/scripts/control/

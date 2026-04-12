@@ -246,6 +246,9 @@ def cmd_run(args) -> None:
         print(f"[ops] To proceed after user approval: add --confirmed to your command.")
         sys.exit(1)
 
+    print("[ops] WARNING: 'run' does not auto-eval or track results in pipeline history.", flush=True)
+    print("[ops] WARNING: For tracked runs, use: python scripts/ops.py pipeline --batch-name NAME", flush=True)
+
     ecs = boto3.client("ecs", region_name=REGION)
 
     instance_ids_str = " ".join(args.instance_ids)
