@@ -4,7 +4,7 @@
 Subcommands:
   list-checkpoints  Show available checkpoint steps for an instance/attempt
   replay            Launch replay from a checkpoint with optional modifications
-  compare           (stub) Compare original vs replayed trajectory (p234)
+  compare           Compare original vs replayed trajectory, find divergence point
 
 Usage:
   python scripts/replay_cli.py list-checkpoints --traj-dir <dir> [--attempt N]
@@ -98,10 +98,40 @@ def cmd_replay(args: argparse.Namespace) -> None:
 
 
 def cmd_compare(args: argparse.Namespace) -> None:
-    """Stub for p234 — compare original vs replayed trajectory."""
-    print("Compare command will be implemented in p234 (divergence detector).")
-    print(f"  Original: {args.original}")
-    print(f"  Replayed: {args.replayed}")
+    """Compare original vs replayed trajectory — find divergence point."""
+    import json
+    from traj_diff import compare_trajs, format_comparison
+
+    orig_path = Path(args.original)
+    repl_path = Path(args.replayed)
+
+    # Support both direct traj.json paths and instance directories
+    if orig_path.is_dir():
+        candidates = list(orig_path.rglob("*.traj.json"))
+        if not candidates:
+            print(f"No traj.json found in {orig_path}")
+            sys.exit(1)
+        orig_path = candidates[0]
+
+    if repl_path.is_dir():
+        candidates = list(repl_path.rglob("*.traj.json"))
+        if not candidates:
+            print(f"No traj.json found in {repl_path}")
+            sys.exit(1)
+        repl_path = candidates[0]
+
+    with open(orig_path) as f:
+        orig = json.load(f)
+    with open(repl_path) as f:
+        repl = json.load(f)
+
+    result = compare_trajs(orig, repl)
+    print(format_comparison(result))
+
+    # Optionally dump raw JSON
+    if args.json:
+        print("\n--- RAW JSON ---")
+        print(json.dumps(result, indent=2, default=str))
 
 
 # ---------------------------------------------------------------------------
@@ -145,13 +175,14 @@ Examples:
     rp_parser.add_argument("--dry-run", action="store_true", help="Show what would happen without making LLM calls")
     rp_parser.add_argument("--config", default=None, help="Path to config JSON file")
 
-    # -- compare (stub for p234) --
+    # -- compare --
     cmp_parser = subparsers.add_parser(
         "compare",
-        help="Compare original vs replayed trajectory (stub — p234)",
+        help="Compare original vs replayed trajectory — find divergence point",
     )
-    cmp_parser.add_argument("--original", required=True, help="Path to original instance output")
-    cmp_parser.add_argument("--replayed", required=True, help="Path to replayed instance output")
+    cmp_parser.add_argument("--original", required=True, help="Path to original traj.json or instance directory")
+    cmp_parser.add_argument("--replayed", required=True, help="Path to replayed traj.json or instance directory")
+    cmp_parser.add_argument("--json", action="store_true", help="Also dump raw comparison as JSON")
 
     args = parser.parse_args()
 
