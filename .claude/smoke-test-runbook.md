@@ -395,7 +395,7 @@ print(f"Jingu:    {len(j_res & set(INSTANCES))}/12")
 
 ---
 
-## Dockerfile COPY 清单（截至 commit 21adb7c）
+## Dockerfile COPY 清单（updated for p225-p235）
 
 ```dockerfile
 COPY scripts/run_with_jingu_gate.py \
@@ -408,10 +408,59 @@ COPY scripts/run_with_jingu_gate.py \
      scripts/patch_signals.py \
      scripts/declaration_extractor.py \
      scripts/cognition_check.py \
+     scripts/cognition_schema.py \
      scripts/gate_runner.js \
      scripts/patch_admission_policy.js \
+     scripts/subtype_contracts.py \
+     scripts/phase_prompt.py \
+     scripts/principal_gate.py \
+     scripts/principal_inference.py \
+     scripts/phase_record.py \
+     scripts/in_loop_judge.py \
+     scripts/verification_evidence.py \
+     scripts/governance_pack.py \
+     scripts/governance_runtime.py \
+     scripts/swebench_failure_reroute_pack.py \
+     scripts/unresolved_case_classifier.py \
+     scripts/phase_record_pack.py \
+     scripts/failure_classifier.py \
+     scripts/repair_prompts.py \
+     scripts/analysis_gate.py \
+     scripts/gate_rejection.py \
+     scripts/failure_routing.py \
+     scripts/extract_failure_events.py \
+     scripts/compute_routing_stats.py \
+     scripts/suggest_routing.py \
+     scripts/strategy_prompts.py \
+     scripts/policy_onboarding.py \
+     scripts/check_onboarding.py \
+     scripts/cognition_loader.py \
+     scripts/phase_validator.py \
+     scripts/phase_schemas.py \
+     scripts/cognition_prompts.py \
+     scripts/jingu_onboard.py \
+     # p225: decomposition (CRITICAL runtime imports)
+     scripts/step_monitor_state.py \
+     scripts/signal_extraction.py \
+     scripts/controlled_verify.py \
+     scripts/jingu_adapter.py \
+     # p225: core agent + step processing
+     scripts/jingu_agent.py \
+     scripts/step_sections.py \
+     # p228-p235: visibility + replay
+     scripts/step_event_emitter.py \
+     scripts/decision_logger.py \
+     scripts/checkpoint.py \
+     scripts/replay_engine.py \
+     scripts/replay_cli.py \
+     scripts/replay_traj.py \
+     scripts/traj_diff.py \
+     scripts/prompt_regression.py \
      /app/scripts/
 COPY scripts/control/ /app/scripts/control/
+COPY scripts/cognition_contracts/ /app/scripts/cognition_contracts/
+COPY python/jingu_loader/ /app/python/jingu_loader/
+COPY bundle.json /app/bundle.json
 ```
 
 新增 script 必须同时加入这个清单，否则容器里 `ModuleNotFoundError`。
