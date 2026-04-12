@@ -125,6 +125,46 @@ class StepMonitorState:
         self._execute_entry_step: int = -1
         self._execute_write_seen: bool = False
 
+    @classmethod
+    def from_checkpoint_dict(cls, d: dict, instance: dict | None = None) -> "StepMonitorState":
+        """Reconstruct StepMonitorState from a checkpoint dict (inverse of to_checkpoint_dict).
+
+        Args:
+            d: Dict produced by to_checkpoint_dict().
+            instance: SWE-bench instance dict. If None, uses minimal stub.
+
+        Returns:
+            StepMonitorState with restored control-plane fields.
+            Fields not captured in checkpoint (threading lock, cp_state object)
+            are initialized to defaults.
+        """
+        _instance = instance or {"instance_id": d.get("instance_id", "unknown")}
+        state = cls(
+            instance_id=d.get("instance_id", "unknown"),
+            attempt=d.get("attempt", 1),
+            instance=_instance,
+        )
+        state._llm_step = d.get("step_n", 0)
+        state.container_id = d.get("container_id")
+        state.pending_redirect_hint = d.get("pending_redirect_hint", "")
+        state.analysis_gate_rejects = d.get("analysis_gate_rejects", 0)
+        state.design_gate_rejects = d.get("design_gate_rejects", 0)
+        state._execute_entry_step = d.get("execute_entry_step", -1)
+        state._execute_write_seen = d.get("execute_write_seen", False)
+        state.last_analyze_root_cause = d.get("last_analyze_root_cause", "")
+        state._bypassed_principals = set(d.get("bypassed_principals", []))
+        # Restore verify_history length marker (actual history not serialized)
+        state._prev_verify_history_len = d.get("verify_history_len", 0)
+        # Restore phase_records from checkpoint (serialized as list of dicts)
+        state.phase_records = d.get("phase_records", [])
+        # cp_state fields: patch_first_write and no_progress_steps live on cp_state,
+        # not directly on StepMonitorState. We store them so the caller can
+        # reconstruct cp_state if needed.
+        state._checkpoint_no_progress_steps = d.get("no_progress_steps", 0)
+        state._checkpoint_patch_first_write = d.get("patch_first_write", False)
+        state._checkpoint_phase = d.get("phase")
+        return state
+
     def to_checkpoint_dict(self) -> dict:
         """Serialize control-plane state for checkpoint snapshots (p231).
 
