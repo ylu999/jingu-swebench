@@ -68,6 +68,18 @@ class JinguModel(LitellmModel):
         super().__init__(config_class=config_class, **kwargs)
         print(f"[JinguModel.__init__] self.config.model_name={self.config.model_name}", flush=True)
 
+        # DEBUG: monkey-patch litellm.completion to trace model= parameter
+        import traceback as _tb
+        _orig_completion = litellm.completion
+        _self_ref = self
+        def _debug_completion(*args, **kw):
+            _model = kw.get('model', args[0] if args else 'NO_MODEL_ARG')
+            if _model != _self_ref.config.model_name:
+                print(f"[DEBUG] litellm.completion called with model={_model!r} (expected {_self_ref.config.model_name!r})", flush=True)
+                _tb.print_stack()
+            return _orig_completion(*args, **kw)
+        litellm.completion = _debug_completion
+
     def structured_extract(
         self,
         accumulated_text: str,
