@@ -432,9 +432,7 @@ COPY scripts/run_with_jingu_gate.py \
      scripts/compute_routing_stats.py \
      scripts/suggest_routing.py \
      scripts/strategy_prompts.py \
-     scripts/policy_onboarding.py \
      scripts/check_onboarding.py \
-     scripts/cognition_loader.py \
      scripts/phase_validator.py \
      scripts/phase_schemas.py \
      scripts/cognition_prompts.py \
