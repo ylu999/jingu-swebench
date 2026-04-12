@@ -265,6 +265,12 @@ python scripts/tail-logs.py <task-id> --filter '\[step'
 # 全量（去 dockerd 噪音）— 最详细
 python scripts/tail-logs.py <task-id>
 
+# 自动轮询 signal 日志（推荐，每30s拉一次，task STOPPED 自动停）
+python scripts/ops.py peek --task-id <task-id>
+
+# 单次快照
+python scripts/ops.py peek --task-id <task-id> --once
+
 # 查状态（不 tail）
 python scripts/ops.py status --task-id <task-id>
 ```
@@ -384,7 +390,7 @@ print(f"Jingu:    {len(j_res & set(INSTANCES))}/12")
 | 症状 | 根因 | 动作 |
 |------|------|------|
 | `smoke-test.sh` 报 "task already STOPPED" | 容器 crash | `python scripts/ops.py status --task-id <id>` 看 exit code |
-| task 5s exit=1 | entrypoint crash / ModuleNotFoundError | `python scripts/tail-logs.py <id> --all` 看 traceback |
+| task 5s exit=1 | entrypoint crash / ModuleNotFoundError | `python scripts/ops.py peek --task-id <id> --all --once` 看 traceback |
 | `ModuleNotFoundError: No module named 'X'` | 新 script 没加进 Dockerfile COPY，或 build 没用 `ops.py build` | 检查 Dockerfile COPY 清单，重新 `ops.py build` |
 | sympy/sphinx 报 `'accepted'` KeyError | onboarding-fail 返回 dict 缺 accepted key（已在 commit 21adb7c 修复） | 确认用的是修复后的镜像（`ops.py build` 时间 > commit 21adb7c 时间） |
 | 代码改了但行为没变 | 手动 SSM build 没 push 到 ECR | 必须用 `python scripts/ops.py build`，不要手动 build |

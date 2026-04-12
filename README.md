@@ -88,6 +88,7 @@ Each attempt produces:
 | `backfill` | Populate per-instance records from historical batches |
 | `discover` | Scan S3 for all predictions and eval status |
 | `list-tasks` | Show running/pending ECS tasks |
+| `peek` | Auto-polling CloudWatch signal logs (every 30s until STOPPED) |
 
 ## Pipeline Flow
 
