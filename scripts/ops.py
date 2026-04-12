@@ -236,7 +236,24 @@ def _check_runbook_ack(args) -> None:
         sys.exit(1)
 
 
+_PIPELINE_ONLY_MSG = """[ops] BLOCKED: '{cmd}' is disabled. All runs must go through 'pipeline'.
+
+  Pipeline covers all use cases:
+    smoke test:   python scripts/ops.py pipeline --batch-name NAME --runbook-ack
+    batch + eval: python scripts/ops.py pipeline --batch-name NAME --runbook-ack
+    eval only:    python scripts/ops.py pipeline --batch-name NAME --eval-only --runbook-ack
+
+  Why: 'pipeline' guarantees eval runs + results are tracked. Other paths skip eval.
+"""
+
+
 def cmd_run(args) -> None:
+    print(_PIPELINE_ONLY_MSG.format(cmd="run"), flush=True)
+    sys.exit(1)
+
+
+def _cmd_run_impl(args) -> None:
+    """Internal: original run implementation, kept for reference but unreachable."""
     _check_runbook_ack(args)
     # Batch guard: more than BATCH_GUARD_THRESHOLD instances requires explicit --confirmed flag.
     # This prevents accidental large batch launches without user approval.
@@ -572,7 +589,12 @@ def _get_running_tasks() -> list[dict]:
 
 
 def cmd_eval(args) -> None:
-    """Launch ECS task to run SWE-bench eval on an S3 predictions file."""
+    print(_PIPELINE_ONLY_MSG.format(cmd="eval"), flush=True)
+    sys.exit(1)
+
+
+def _cmd_eval_impl(args) -> None:
+    """Internal: original eval implementation, kept for reference but unreachable."""
     _check_runbook_ack(args)
     ecs = boto3.client("ecs", region_name=REGION)
 
@@ -712,6 +734,16 @@ def cmd_list_tasks(args) -> None:
 
 
 def cmd_smoke(args) -> None:
+    # Allow attach-only mode (--task-id) — this is just log tailing, not a launch
+    if args.task_id:
+        pass  # fall through to _cmd_smoke_impl
+    else:
+        print(_PIPELINE_ONLY_MSG.format(cmd="smoke"), flush=True)
+        sys.exit(1)
+    _cmd_smoke_impl(args)
+
+
+def _cmd_smoke_impl(args) -> None:
     """
     Launch ECS task + live-tail logs. Or tail an existing task with --task-id.
 

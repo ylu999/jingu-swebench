@@ -72,23 +72,39 @@ Each attempt produces:
 
 ## ops.py Commands
 
+### Launch (only via pipeline)
+
 | Command | Purpose |
 |---------|---------|
 | `build` | Build Docker image on EC2 via SSM, push to ECR |
-| `pipeline` | Full pipeline: smoke → batch → eval → store (recommended) |
-| `smoke` | Launch + live-tail logs (or attach to existing task) |
-| `run` | Launch ECS task only (no eval, no history — use `pipeline` instead) |
+| `pipeline` | **Only launch path**: smoke → batch → eval → store results |
+| `pipeline --eval-only` | Eval existing S3 predictions (skip smoke + batch) |
+| `pipeline --skip-smoke` | Skip smoke test, go straight to batch + eval |
+
+### Monitor
+
+| Command | Purpose |
+|---------|---------|
+| `peek` | Auto-polling CloudWatch signal logs (every 30s until STOPPED) |
 | `watch` | Real-time log tail for batch or single instance |
-| `eval` | Launch SWE-bench eval on S3 predictions |
-| `eval-all` | Discover + eval all unevaluated batches |
+| `logs` | CloudWatch log tail (raw) |
 | `status` | ECS task status |
-| `logs` | CloudWatch log tail |
+| `list-tasks` | Show running/pending ECS tasks |
+| `smoke --task-id ID` | Attach to existing task (tail only, no launch) |
+
+### Results
+
+| Command | Purpose |
+|---------|---------|
 | `history` | Pipeline run history (resolved rates over time) |
 | `summary` | Per-instance summary table grouped by repo |
 | `backfill` | Populate per-instance records from historical batches |
 | `discover` | Scan S3 for all predictions and eval status |
-| `list-tasks` | Show running/pending ECS tasks |
-| `peek` | Auto-polling CloudWatch signal logs (every 30s until STOPPED) |
+| `eval-all` | Discover + eval all unevaluated batches |
+
+### Blocked (use `pipeline` instead)
+
+`run`, `smoke` (launch mode), `eval` — these skip eval or don't track history. Blocked at entry.
 
 ## Pipeline Flow
 

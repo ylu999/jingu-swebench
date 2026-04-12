@@ -45,15 +45,17 @@ python scripts/ops.py backfill --batches batch-pXX-name   # 只处理指定 batc
 | 命令 | 作用 |
 |------|------|
 | `ops.py build` | Build + push Docker 镜像 |
-| `ops.py smoke --batch-name NAME --instance-ids ID` | Launch + 实时 tail |
-| `ops.py run --batch-name NAME --instance-ids IDs` | Launch（不 tail） |
+| `ops.py pipeline --batch-name NAME` | **唯一 launch 入口**：smoke → batch → eval → store |
+| `ops.py pipeline --batch-name NAME --eval-only` | 只跑 eval（batch 已存在） |
 | `ops.py watch --batch-name NAME` | Attach tail 到已跑 batch |
-| `ops.py watch --batch-name NAME --instance-id ID` | 只 tail 单个 instance |
-| `ops.py status --task-id ID` | 查 ECS task 状态（只支持近期 task） |
-| `ops.py eval --predictions-path KEY --run-id ID` | 跑 SWE-bench eval |
+| `ops.py peek --task-id ID` | 自动轮询 CloudWatch signal 日志 |
+| `ops.py status --task-id ID` | 查 ECS task 状态 |
 | `ops.py backfill` | 把所有历史 batch traj + eval 数据写入 per-instance records |
 | `ops.py summary` | 显示 per-instance 汇总表（按 repo，含 eval resolved） |
 | `ops.py history` | 显示 pipeline 历史（resolved rate 趋势） |
+
+**已禁用的命令（全部指向 pipeline）：**
+`run`、`smoke`（launch 模式）、`eval` — 这些跳过 eval 或不记录 history，已被 block。
 
 ---
 
