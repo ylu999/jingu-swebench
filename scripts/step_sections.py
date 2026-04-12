@@ -451,22 +451,30 @@ def _step_cp_update_and_verdict(
 
         _eval_phase = str(_old_phase).upper()
 
-        _pr = None
+        # ══════════════════════════════════════════════════════════════════
+        # Plan-B STRONG: Phase Record Acquisition
+        #
+        # Contract:
+        #   1. Phase completion = admitted PhaseRecord exists (tool_submitted ONLY)
+        #   2. No transition without admitted record
+        #   3. Fallback = diagnostic only, never admission
+        #
+        # Admitted sources: tool_submitted (only)
+        # Diagnostic sources: structured_extract, regex (separate storage)
+        # ══════════════════════════════════════════════════════════════════
+
+        _pr = None  # admitted phase record — ONLY from tool submission
         _pr_source = "none"
         _pr_foreign_phase = ""
-        _diagnostic_pr = None  # Plan-B: diagnostic-only record from fallback
+        _diagnostic_pr = None  # diagnostic-only, never used for admission/gate/routing
         try:
-            from declaration_extractor import extract_record_for_phase as _extract_for_phase
-
-            # ── Plan-B: Check for tool-submitted phase record (HIGHEST PRIORITY) ──
-            _tool_submitted = None
+            # ── Step 1: Check for tool-submitted phase record (ONLY admitted path) ──
             _model = getattr(agent_self, "model", None)
+            _tool_submitted = None
             if _model is not None and hasattr(_model, "pop_submitted_phase_record"):
                 _tool_submitted = _model.pop_submitted_phase_record()
 
             if _tool_submitted is not None:
-                # Agent submitted a phase record via submit_phase_record tool call.
-                # This is the ONLY path to an admitted phase record (strong enforcement).
                 _pr = build_phase_record_from_structured(
                     _tool_submitted, str(_old_phase)
                 )
@@ -478,217 +486,233 @@ def _step_cp_update_and_verdict(
                 _foreign = bool(_declared_phase and _declared_phase != _eval_phase)
                 print(
                     f"    [phase_record] extraction_method=tool_submitted"
-                    f" fields={list(_tool_submitted.keys())}",
+                    f" fields={list(_tool_submitted.keys())}"
+                    f" admitted=true",
                     flush=True,
                 )
-            else:
-                # ── No tool submission. Check cache first. ──
-                _prev_pr = next(
-                    (r for r in reversed(state.phase_records)
-                     if r.phase.upper() == _eval_phase),
-                    None,
-                )
-                if _prev_pr is not None:
-                    _pr = _prev_pr
-                    _pr_source = "cache"
-                else:
-                    # ── Fallback: structured_extract + regex (DIAGNOSTIC ONLY) ──
-                    # These produce _diagnostic_pr for telemetry but do NOT count
-                    # as admitted phase records under strong enforcement.
-                    _accumulated = state._phase_accumulated_text.get(_eval_phase, "")
-                    _extract_text = _accumulated if _accumulated.strip() else latest_assistant_text
-                    _structured_parsed = None
-                    _extraction_schema = None
-
+                if _foreign:
+                    _pr_foreign_phase = _declared_phase
+                    _PHASE_ORDER = ["UNDERSTAND", "OBSERVE", "ANALYZE", "DECIDE", "EXECUTE", "JUDGE"]
                     try:
-                        from jingu_onboard import onboard as _onboard_fn
-                        _gov = _onboard_fn()
-                        _extraction_schema = _gov.get_constrained_schema(_eval_phase)
-                        _phase_hint = ""
-                        try:
-                            _cog = _gov.get_cognition(_eval_phase)
-                            if _cog and _cog.success_criteria:
-                                _phase_hint = "; ".join(_cog.success_criteria)
-                        except Exception:
-                            pass
-                        if _extraction_schema is not None and _model is not None:
-                            if hasattr(_model, "structured_extract"):
-                                _structured_parsed = _model.structured_extract(
-                                    accumulated_text=_extract_text,
-                                    phase=_eval_phase,
-                                    schema=_extraction_schema,
-                                    phase_hint=_phase_hint,
-                                )
-                    except Exception as _se_exc:
-                        print(
-                            f"    [phase_record] structured_extract error (non-fatal): {_se_exc}",
-                            flush=True,
-                        )
+                        _eval_idx = _PHASE_ORDER.index(_eval_phase)
+                        _decl_idx = _PHASE_ORDER.index(_declared_phase)
+                        _align = "declared_ahead" if _decl_idx > _eval_idx else "declared_behind"
+                        _align_delta = _decl_idx - _eval_idx
+                    except (ValueError, AttributeError):
+                        _align = "unknown_phase"
+                        _align_delta = 0
+                    print(
+                        f"    [phase_record] foreign_phase_declared:"
+                        f" eval_phase={_eval_phase} declared_phase={_declared_phase}"
+                        f" alignment={_align} delta={_align_delta}",
+                        flush=True,
+                    )
+            # _pr is None here = agent did NOT call submit_phase_record.
+            # No cache, no fallback extraction can produce an admitted record.
 
-                    # Plan-C: record structured_extract call in traj for observability
-                    _extract_rec = getattr(_model, "_last_extract_record", None) if _model else None
-                    if _extract_rec is not None:
-                        try:
-                            agent_self.messages.append({
-                                "role": "user",
-                                "content": _extract_rec.extraction_prompt,
-                                "extra": {
-                                    "type": "structured_extract_request",
-                                    "phase": _eval_phase,
-                                    "schema_name": _extract_rec.schema_name,
-                                    "accumulated_text_chars": len(_accumulated) if _accumulated else 0,
-                                    "phase_hint": _extract_rec.phase_hint or "",
-                                    "timestamp": _extract_rec.timestamp_request,
-                                },
-                            })
-                            agent_self.messages.append({
-                                "role": "assistant",
-                                "content": _extract_rec.response_raw or "",
-                                "extra": {
-                                    "type": "structured_extract_response",
-                                    "phase": _eval_phase,
-                                    "success": _extract_rec.success,
-                                    "fields": list((_extract_rec.response_parsed or {}).keys()),
-                                    "cost": _extract_rec.cost,
-                                    "error": _extract_rec.error,
-                                    "timestamp": _extract_rec.timestamp_response,
-                                },
-                            })
-                        except Exception as _traj_exc:
-                            print(f"    [Plan-C] traj recording error (non-fatal): {_traj_exc}", flush=True)
-
-                    if _structured_parsed is not None:
-                        _diagnostic_pr = build_phase_record_from_structured(
-                            _structured_parsed, str(_old_phase)
-                        )
-                        # Plan-B strong: diagnostic record stored for telemetry but
-                        # NOT admitted. _pr stays None — agent must use tool.
-                        _pr_source = "diagnostic_structured"
-                        if hasattr(state, "_extraction_structured"):
-                            state._extraction_structured += 1
-                        _acc_len = len(_accumulated) if _accumulated else 0
-                        print(
-                            f"    [phase_record] extraction_method=diagnostic_structured"
-                            f" extraction_schema_source=bundle"
-                            f" accumulated_chars={_acc_len}"
-                            f" fields={list(_structured_parsed.keys())}"
-                            f" DIAGNOSTIC_ONLY=true (agent did not call submit_phase_record)",
-                            flush=True,
-                        )
-                    else:
-                        _diag_pr, _declared_phase, _foreign = _extract_for_phase(
-                            _extract_text, str(_old_phase)
-                        )
-                        _diagnostic_pr = _diag_pr
-                        _pr_source = "diagnostic_regex"
-                        if hasattr(state, "_extraction_no_schema") and _extraction_schema is None:
-                            state._extraction_no_schema += 1
-                        elif hasattr(state, "_extraction_regex_fallback"):
-                            state._extraction_regex_fallback += 1
-                        _acc_len = len(_accumulated) if _accumulated else 0
-                        print(
-                            f"    [phase_record] extraction_method=diagnostic_regex"
-                            f" accumulated_chars={_acc_len}"
-                            f" DIAGNOSTIC_ONLY=true (agent did not call submit_phase_record)",
-                            flush=True,
-                        )
-
-                    # Store diagnostic record for telemetry (not for admission)
-                    if _diagnostic_pr is not None:
-                        state.phase_records.append(_diagnostic_pr)
-                        # Mark it diagnostic so downstream knows it's not admitted
-                        if hasattr(_diagnostic_pr, '__dict__'):
-                            _diagnostic_pr._diagnostic_only = True
-
-            if _pr_source == "tool_submitted" and _foreign:
-                _pr_foreign_phase = _declared_phase
-                _PHASE_ORDER = ["UNDERSTAND", "OBSERVE", "ANALYZE", "DECIDE", "EXECUTE", "JUDGE"]
+            # ── Step 2: Diagnostic extraction (telemetry ONLY, never admission) ──
+            # Runs regardless of tool submission — for drift analysis.
+            # Stored separately in state.diagnostic_phase_records, NOT in phase_records.
+            _accumulated = state._phase_accumulated_text.get(_eval_phase, "")
+            _extract_text = _accumulated if _accumulated.strip() else latest_assistant_text
+            _structured_parsed = None
+            _extraction_schema = None
+            try:
+                from jingu_onboard import onboard as _onboard_fn
+                _gov = _onboard_fn()
+                _extraction_schema = _gov.get_constrained_schema(_eval_phase)
+                _phase_hint = ""
                 try:
-                    _eval_idx = _PHASE_ORDER.index(_eval_phase)
-                    _decl_idx = _PHASE_ORDER.index(_declared_phase)
-                    _align = "declared_ahead" if _decl_idx > _eval_idx else "declared_behind"
-                    _align_delta = _decl_idx - _eval_idx
-                except (ValueError, AttributeError):
-                    _align = "unknown_phase"
-                    _align_delta = 0
+                    _cog = _gov.get_cognition(_eval_phase)
+                    if _cog and _cog.success_criteria:
+                        _phase_hint = "; ".join(_cog.success_criteria)
+                except Exception:
+                    pass
+                if _extraction_schema is not None and _model is not None:
+                    if hasattr(_model, "structured_extract"):
+                        _structured_parsed = _model.structured_extract(
+                            accumulated_text=_extract_text,
+                            phase=_eval_phase,
+                            schema=_extraction_schema,
+                            phase_hint=_phase_hint,
+                        )
+            except Exception as _se_exc:
                 print(
-                    f"    [phase_record] foreign_phase_declared:"
-                    f" eval_phase={_eval_phase} declared_phase={_declared_phase}"
-                    f" alignment={_align} delta={_align_delta}",
+                    f"    [diagnostic] structured_extract error (non-fatal): {_se_exc}",
                     flush=True,
                 )
 
-            _log_pr = _pr if _pr is not None else _diagnostic_pr
-            if _log_pr is not None:
+            # Plan-C: record structured_extract call in traj for observability
+            _extract_rec = getattr(_model, "_last_extract_record", None) if _model else None
+            if _extract_rec is not None:
+                try:
+                    agent_self.messages.append({
+                        "role": "user",
+                        "content": _extract_rec.extraction_prompt,
+                        "extra": {
+                            "type": "structured_extract_request",
+                            "phase": _eval_phase,
+                            "schema_name": _extract_rec.schema_name,
+                            "accumulated_text_chars": len(_accumulated) if _accumulated else 0,
+                            "phase_hint": _extract_rec.phase_hint or "",
+                            "timestamp": _extract_rec.timestamp_request,
+                        },
+                    })
+                    agent_self.messages.append({
+                        "role": "assistant",
+                        "content": _extract_rec.response_raw or "",
+                        "extra": {
+                            "type": "structured_extract_response",
+                            "phase": _eval_phase,
+                            "success": _extract_rec.success,
+                            "fields": list((_extract_rec.response_parsed or {}).keys()),
+                            "cost": _extract_rec.cost,
+                            "error": _extract_rec.error,
+                            "timestamp": _extract_rec.timestamp_response,
+                        },
+                    })
+                except Exception as _traj_exc:
+                    print(f"    [Plan-C] traj recording error (non-fatal): {_traj_exc}", flush=True)
+
+            if _structured_parsed is not None:
+                from declaration_extractor import extract_record_for_phase as _extract_for_phase
+                _diagnostic_pr = build_phase_record_from_structured(
+                    _structured_parsed, str(_old_phase)
+                )
+                if hasattr(state, "_extraction_structured"):
+                    state._extraction_structured += 1
+                _acc_len = len(_accumulated) if _accumulated else 0
+                print(
+                    f"    [diagnostic] method=structured"
+                    f" accumulated_chars={_acc_len}"
+                    f" fields={list(_structured_parsed.keys())}"
+                    f" DIAGNOSTIC_ONLY=true",
+                    flush=True,
+                )
+            else:
+                try:
+                    from declaration_extractor import extract_record_for_phase as _extract_for_phase
+                    _diag_pr, _diag_declared, _diag_foreign = _extract_for_phase(
+                        _extract_text, str(_old_phase)
+                    )
+                    _diagnostic_pr = _diag_pr
+                except Exception:
+                    pass
+                if hasattr(state, "_extraction_no_schema") and _extraction_schema is None:
+                    state._extraction_no_schema += 1
+                elif hasattr(state, "_extraction_regex_fallback"):
+                    state._extraction_regex_fallback += 1
+                _acc_len = len(_accumulated) if _accumulated else 0
+                print(
+                    f"    [diagnostic] method=regex"
+                    f" accumulated_chars={_acc_len}"
+                    f" DIAGNOSTIC_ONLY=true",
+                    flush=True,
+                )
+
+            # Store diagnostic record in SEPARATE list (never in phase_records)
+            if _diagnostic_pr is not None:
+                if not hasattr(state, "diagnostic_phase_records"):
+                    state.diagnostic_phase_records = []
+                state.diagnostic_phase_records.append(_diagnostic_pr)
+
+            # ── Log summary ──
+            if _pr is not None:
                 print(
                     f"    [phase_record] eval_phase={_eval_phase}"
-                    f" record_phase={_log_pr.phase} source={_pr_source}"
-                    f" subtype={_log_pr.subtype} principals={_log_pr.principals}"
-                    f" evidence_refs={_log_pr.evidence_refs}"
-                    f" admitted={_pr is not None}",
+                    f" record_phase={_pr.phase} source={_pr_source}"
+                    f" subtype={_pr.subtype} principals={_pr.principals}"
+                    f" evidence_refs={_pr.evidence_refs}"
+                    f" admitted=true",
                     flush=True,
                 )
             else:
                 print(
                     f"    [phase_record] eval_phase={_eval_phase}"
-                    f" source={_pr_source} admitted=false",
+                    f" source=none admitted=false"
+                    f" diagnostic_available={_diagnostic_pr is not None}"
+                    f" PROTOCOL_VIOLATION=missing_phase_record",
                     flush=True,
                 )
+
         except Exception as _pr_exc:
             print(f"    [phase_record] error (non-fatal): {_pr_exc}", flush=True)
 
-        # Plan-B strong: Phase completion gate — block advance if no admitted record
-        _MAX_EXTRACTION_RETRIES = 2
-        _extraction_gated = False  # True if extraction gate blocked advance
+        # ══════════════════════════════════════════════════════════════════
+        # Plan-B STRONG: Phase Completion Gate — HARD BLOCK
+        #
+        # No admitted PhaseRecord → phase NOT complete → transition BLOCKED.
+        # Agent gets retries to call submit_phase_record. After max retries,
+        # phase is STILL not complete — protocol violation emitted,
+        # transition remains blocked (no FORCE_ADVANCE).
+        # ══════════════════════════════════════════════════════════════════
+        _MAX_SUBMISSION_RETRIES = 2
+        _extraction_gated = False  # True = transition blocked
         if _pr is None:
+            _extraction_gated = True  # ALWAYS blocked when no admitted record
             _ext_key = _eval_phase
             _ext_retries = state.extraction_retry_counts.get(_ext_key, 0)
-            if _ext_retries < _MAX_EXTRACTION_RETRIES:
-                state.extraction_retry_counts[_ext_key] = _ext_retries + 1
-                state._phase_accumulated_text.pop(_eval_phase, None)
+            state.extraction_retry_counts[_ext_key] = _ext_retries + 1
+
+            # Track missing submissions for telemetry
+            if hasattr(state, "_missing_submission_count"):
+                state._missing_submission_count += 1
+
+            if _ext_retries < _MAX_SUBMISSION_RETRIES:
                 _emit_limit_triggered(
                     state, step_n=_cp_s.step_index,
-                    limit_name="extraction_retry",
-                    configured_value=_MAX_EXTRACTION_RETRIES,
+                    limit_name="phase_record_submission_retry",
+                    configured_value=_MAX_SUBMISSION_RETRIES,
                     actual_value=_ext_retries + 1,
-                    action_taken="retry_current_phase",
+                    action_taken="block_transition_retry",
                     source_file="step_sections.py",
-                    source_line=553,
-                    reason=f"phase record not submitted for {_eval_phase}, retrying ({_ext_retries + 1}/{_MAX_EXTRACTION_RETRIES})",
+                    source_line=640,
+                    reason=f"protocol_violation: no submit_phase_record for {_eval_phase} ({_ext_retries + 1}/{_MAX_SUBMISSION_RETRIES})",
                 )
                 agent_self.messages.append({
                     "role": "user",
                     "content": (
-                        f"[Phase Gate: PHASE RECORD REQUIRED]\n"
-                        f"You have not submitted a phase record for the {_eval_phase} phase.\n"
-                        f"A phase cannot be completed without calling submit_phase_record.\n"
-                        f"Call the submit_phase_record tool now with your {_eval_phase} findings.\n"
-                        f"Retry {_ext_retries + 1}/{_MAX_EXTRACTION_RETRIES}."
+                        f"[PROTOCOL VIOLATION: PHASE RECORD REQUIRED]\n"
+                        f"Phase {_eval_phase} cannot be completed without calling submit_phase_record.\n"
+                        f"This is not optional. The system CANNOT proceed to the next phase.\n"
+                        f"Call submit_phase_record now with your {_eval_phase} findings.\n"
+                        f"Retry {_ext_retries + 1}/{_MAX_SUBMISSION_RETRIES}."
                     ),
                 })
                 print(
-                    f"    [extraction_gate] RETRY {_ext_retries + 1}/{_MAX_EXTRACTION_RETRIES}"
-                    f" phase={_eval_phase} — staying in current phase",
+                    f"    [phase_gate] BLOCKED: no admitted record for {_eval_phase}"
+                    f" retry={_ext_retries + 1}/{_MAX_SUBMISSION_RETRIES}"
+                    f" — transition DENIED, staying in current phase",
                     flush=True,
                 )
-                _extraction_gated = True
             else:
+                # Max retries exhausted. Phase is STILL blocked — no force advance.
+                # Emit protocol violation and terminate this attempt.
                 _emit_limit_triggered(
                     state, step_n=_cp_s.step_index,
-                    limit_name="extraction_force_advance",
-                    configured_value=_MAX_EXTRACTION_RETRIES,
+                    limit_name="phase_record_submission_exhausted",
+                    configured_value=_MAX_SUBMISSION_RETRIES,
                     actual_value=_ext_retries + 1,
-                    action_taken="force_advance_no_record",
+                    action_taken="protocol_violation_stop",
                     source_file="step_sections.py",
-                    source_line=553,
-                    reason=f"extraction failed {_ext_retries + 1} times for {_eval_phase}, force advancing",
+                    source_line=640,
+                    reason=f"protocol_violation: agent never called submit_phase_record for {_eval_phase} after {_ext_retries + 1} attempts",
+                )
+                _emit_decision(
+                    state, decision_type="gate_verdict", step_n=_cp_s.step_index,
+                    verdict="stop", reason="protocol_violation_missing_phase_record",
+                    signals={"phase": _eval_phase, "retries": _ext_retries + 1},
                 )
                 print(
-                    f"    [extraction_gate] FORCE_ADVANCE — {_ext_retries + 1} failures"
-                    f" for {_eval_phase}, advancing with no record",
+                    f"    [phase_gate] PROTOCOL VIOLATION: agent never submitted"
+                    f" phase record for {_eval_phase} after {_ext_retries + 1} retries"
+                    f" — stopping attempt (no force advance)",
                     flush=True,
                 )
-                # Fall through — will advance at bottom with no record
+                state.early_stop_verdict = VerdictStop(
+                    reason="protocol_violation_missing_phase_record",
+                )
+                raise StopExecution("protocol_violation_missing_phase_record")
 
         # p222: Cognition validation
         _cognition_rejected = False
@@ -767,7 +791,7 @@ def _step_cp_update_and_verdict(
                 from analysis_gate import evaluate_analysis as _eval_analysis
                 _analysis_verdict = _eval_analysis(
                     _pr,
-                    structured_output=(_pr_source == "structured"),
+                    structured_output=(_pr_source == "tool_submitted"),
                 )
                 _ag_reject_count = state.analysis_gate_rejects
                 print(
@@ -940,7 +964,7 @@ def _step_cp_update_and_verdict(
                 _pr, _eval_phase,
                 observe_tool_signal=_obs_tool_sig,
                 last_analyze_root_cause=state.last_analyze_root_cause if _eval_phase == "EXECUTE" else "",
-                structured_output=(_pr_source == "structured"),
+                structured_output=(_pr_source == "tool_submitted"),
             )
             if _pr_foreign_phase:
                 _phase_order = ["UNDERSTAND", "OBSERVE", "ANALYZE", "DECIDE", "EXECUTE", "JUDGE"]

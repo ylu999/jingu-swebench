@@ -1042,11 +1042,14 @@ class JinguAgent:
             attempt=attempt,
             instance=instance,
         )
-        # p226-05: per-attempt extraction metrics counters
+        # p226-05 + Plan-B: per-attempt extraction metrics counters
         _monitor._extraction_structured = 0
         _monitor._extraction_regex_fallback = 0
         _monitor._extraction_no_schema = 0
         _monitor._extraction_tool_submitted = 0
+        _monitor._missing_submission_count = 0
+        # Plan-B: separate storage for diagnostic-only records (never admitted)
+        _monitor.diagnostic_phase_records = []
         # Plan-A: reset extraction retry counts per attempt
         _monitor.extraction_retry_counts = {}
 
@@ -1226,25 +1229,31 @@ class JinguAgent:
                 jingu_body["verify_history"] = _monitor.verify_history
                 # p190: per-phase records — one entry per VerdictAdvance during this attempt
                 jingu_body["phase_records"] = [r.as_dict() for r in _monitor.phase_records]
-                # p226-05 + Plan-B: extraction metrics — track tool_submitted vs fallback rates
+                # Plan-B strong: extraction metrics — admitted vs diagnostic rates
                 _em_tool = getattr(_monitor, "_extraction_tool_submitted", 0)
                 _em_structured = getattr(_monitor, "_extraction_structured", 0)
                 _em_regex = getattr(_monitor, "_extraction_regex_fallback", 0)
                 _em_no_schema = getattr(_monitor, "_extraction_no_schema", 0)
-                _em_total = _em_tool + _em_structured + _em_regex + _em_no_schema
+                _em_missing = getattr(_monitor, "_missing_submission_count", 0)
+                _em_total_attempts = _em_tool + _em_missing
                 jingu_body["extraction_metrics"] = {
                     "tool_submitted": _em_tool,
-                    "structured": _em_structured,
-                    "regex_fallback": _em_regex,
-                    "no_schema": _em_no_schema,
-                    "total": _em_total,
+                    "missing_submissions": _em_missing,
+                    "phase_completion_rate": (
+                        f"{_em_tool}/{_em_total_attempts}"
+                        if _em_total_attempts > 0 else "0/0"
+                    ),
+                    "diagnostic_structured": _em_structured,
+                    "diagnostic_regex": _em_regex,
+                    "diagnostic_no_schema": _em_no_schema,
                 }
                 print(
                     f"    [extraction_metrics] attempt={attempt}"
-                    f" tool_submitted={_em_tool}/{_em_total}"
-                    f" diagnostic_structured={_em_structured}/{_em_total}"
-                    f" diagnostic_regex={_em_regex}/{_em_total}"
-                    f" no_schema={_em_no_schema}/{_em_total}",
+                    f" tool_submitted={_em_tool}"
+                    f" missing_submissions={_em_missing}"
+                    f" phase_completion_rate={_em_tool}/{_em_total_attempts}"
+                    f" diagnostic_structured={_em_structured}"
+                    f" diagnostic_regex={_em_regex}",
                     flush=True,
                 )
                 # p207-P9: log selective bypass summary at attempt end
