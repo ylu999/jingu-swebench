@@ -380,22 +380,8 @@ def evaluate_analysis(pr: PhaseRecord, *, structured_output: bool = False) -> An
     # Rule 2: Alternative hypothesis
     score2 = _check_alternative_hypothesis(pr)
     scores["alternative_hypothesis"] = score2
-    if score2 < _THRESHOLD:
-        if structured_output:
-            # In structured mode, the schema already enforces alternative_hypotheses
-            # presence (minItems: 1). A low score means the content is vague but
-            # structurally present. Downgrade to quality signal — don't block.
-            scores["alternative_hypothesis_note"] = (
-                "structured_output: schema enforces presence, score is quality signal only"
-            )
-        else:
-            failed.append("alternative_hypothesis")
-            reasons.append(
-                "Analysis contains a single hypothesis without alternatives. "
-                "Consider at least 2 hypotheses and explain why non-chosen ones were rejected."
-            )
 
-    # Rule 3: Causal chain (semantic check — kept in both modes)
+    # Rule 3: Causal chain (semantic check — always hard gate)
     score3 = _check_causal_chain(pr)
     scores["causal_chain"] = score3
     if score3 < _THRESHOLD:
@@ -409,23 +395,43 @@ def evaluate_analysis(pr: PhaseRecord, *, structured_output: bool = False) -> An
     score4 = _check_invariant_capture(pr)
     scores["invariant_capture"] = score4
     scores["invariant_domain"] = "parsing" if _is_parsing_domain(pr) else "general"
-    if score4 < _THRESHOLD:
-        # Fail-open: in non-parsing domain, if other 3 rules all pass,
-        # downgrade invariant_capture to warning instead of hard reject.
-        # User design: "不该反复 reject 三次。最多：降分，给提醒"
-        other_rules_pass = all(
-            scores.get(r, 0) >= _THRESHOLD
-            for r in ("code_grounding", "causal_chain", "alternative_hypothesis")
-        )
-        is_parsing = _is_parsing_domain(pr)
 
-        if not is_parsing and other_rules_pass:
-            # Fail-open: non-parsing domain + other rules pass → warning only
-            scores["invariant_capture_note"] = (
-                "fail_open: non-parsing domain, other rules pass — downgraded to warning"
+    # ── Soft gate logic for Rules 2 & 4 ─────────────────────────────────────
+    # Core gate = code_grounding + causal_chain (always hard).
+    # alternative_hypothesis + invariant_capture are soft when:
+    #   - Non-parsing domain AND core rules (cg + cc) pass → fail-open
+    #   - Parsing domain → all 4 rules are hard
+    #   - structured_output mode → alternative_hypothesis always soft (schema enforces presence)
+    # Replay evidence (p237): 6/6 unresolved instances had alternative_hypothesis
+    # as sole blocker despite good code_grounding + causal_chain.
+    is_parsing = _is_parsing_domain(pr)
+    core_pass = all(scores.get(r, 0) >= _THRESHOLD for r in ("code_grounding", "causal_chain"))
+
+    # Rule 2 enforcement
+    if score2 < _THRESHOLD:
+        if structured_output:
+            scores["alternative_hypothesis_note"] = (
+                "structured_output: schema enforces presence, score is quality signal only"
+            )
+        elif not is_parsing and core_pass:
+            # Fail-open: core rules pass, alternative_hypothesis is quality signal
+            scores["alternative_hypothesis_note"] = (
+                "fail_open: non-parsing domain, core rules pass — downgraded to warning"
             )
         else:
-            # Hard gate: parsing domain OR other rules also failing
+            failed.append("alternative_hypothesis")
+            reasons.append(
+                "Analysis contains a single hypothesis without alternatives. "
+                "Consider at least 2 hypotheses and explain why non-chosen ones were rejected."
+            )
+
+    # Rule 4 enforcement
+    if score4 < _THRESHOLD:
+        if not is_parsing and core_pass:
+            scores["invariant_capture_note"] = (
+                "fail_open: non-parsing domain, core rules pass — downgraded to warning"
+            )
+        else:
             failed.append("invariant_capture")
             if is_parsing:
                 reasons.append(

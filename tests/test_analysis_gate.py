@@ -171,12 +171,15 @@ class TestEvaluateAnalysis:
         assert "code_grounding" in verdict.failed_rules
         assert verdict.scores["code_grounding"] < 0.5
 
-    def test_single_hypothesis_fails_alternative(self):
-        """Single hypothesis analysis should fail alternative_hypothesis."""
+    def test_single_hypothesis_soft_gate_in_general_domain(self):
+        """Single hypothesis with good core rules → fail-open in general domain."""
         pr = _make_single_hypothesis_pr()
         verdict = evaluate_analysis(pr)
-        assert "alternative_hypothesis" in verdict.failed_rules
+        # v2 soft gate: alternative_hypothesis is downgraded to warning when
+        # non-parsing domain + core rules (code_grounding, causal_chain) pass.
         assert verdict.scores["alternative_hypothesis"] < 0.5
+        assert "alternative_hypothesis" not in verdict.failed_rules
+        assert "fail_open" in verdict.scores.get("alternative_hypothesis_note", "")
 
     def test_no_causal_chain_fails(self):
         """Analysis without causal chain should fail causal_chain."""
