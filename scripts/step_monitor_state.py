@@ -125,6 +125,46 @@ class StepMonitorState:
         self._execute_entry_step: int = -1
         self._execute_write_seen: bool = False
 
+    def to_checkpoint_dict(self) -> dict:
+        """Serialize control-plane state for checkpoint snapshots (p231).
+
+        Returns a dict of all fields relevant to replay-from-step analysis.
+        Never raises — returns partial dict on attribute errors.
+        """
+        result: dict = {}
+        try:
+            result["step_n"] = getattr(self, "_llm_step", 0)
+            result["no_progress_steps"] = getattr(self.cp_state, "no_progress_steps", 0)
+            result["patch_first_write"] = getattr(self.cp_state, "patch_first_write", False)
+            result["phase"] = str(getattr(self.cp_state, "phase", None))
+            result["container_id"] = self.container_id
+            result["instance_id"] = self.instance_id
+            result["attempt"] = self.attempt
+            result["verify_history_len"] = len(self.verify_history)
+            result["early_stop_verdict"] = (
+                str(self.early_stop_verdict) if self.early_stop_verdict else None
+            )
+            result["pending_redirect_hint"] = self.pending_redirect_hint or ""
+            result["analysis_gate_rejects"] = self.analysis_gate_rejects
+            result["design_gate_rejects"] = self.design_gate_rejects
+            result["execute_entry_step"] = self._execute_entry_step
+            result["execute_write_seen"] = self._execute_write_seen
+            result["last_analyze_root_cause"] = self.last_analyze_root_cause
+            result["bypassed_principals"] = list(self._bypassed_principals)
+            # phase_records: serialize each PhaseRecord
+            _prs = []
+            for pr in (self.phase_records or []):
+                if isinstance(pr, dict):
+                    _prs.append(pr)
+                elif hasattr(pr, "__dict__"):
+                    _prs.append(vars(pr))
+                else:
+                    _prs.append(str(pr))
+            result["phase_records"] = _prs
+        except Exception:
+            pass
+        return result
+
     def update_cp_with_step_signals(
         self,
         *,

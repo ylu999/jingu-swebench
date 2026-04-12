@@ -298,6 +298,8 @@ class JinguAgent:
         self._step_emitter: Any | None = None  # StepEventEmitter, per-attempt
         self._step_start_ts: float = 0.0  # ms timestamp set in on_step_start
         self._decision_logger: Any | None = None  # DecisionLogger, per-attempt (p230)
+        self._prompt_sections: list[dict] = []  # p231: prompt sections from p229 snapshot
+        self._prev_phase_records_count: int = 0  # p231: track phase_records length for checkpoint trigger
 
     # -- step-level hooks (called by JinguProgressTrackingAgent.step) --------
 
@@ -425,6 +427,12 @@ class JinguAgent:
         except Exception:
             pass
 
+        # p231: checkpoint at key decision points (phase_advance, gate_stop, gate_redirect, materialization_gate)
+        try:
+            self._maybe_save_checkpoint(agent_self, step_n, _decision)
+        except Exception:
+            pass
+
         return _decision
 
     def _emit_step_event(
@@ -482,6 +490,106 @@ class JinguAgent:
             env_error=env_error,
         )
         self._step_emitter.emit(event)
+
+    def _maybe_save_checkpoint(
+        self, agent_self: Any, step_n: int, decision: StepDecision
+    ) -> None:
+        """Save a checkpoint if this step is a key decision point (p231).
+
+        Triggers:
+        - phase_advance: phase_records count increased since last step
+        - gate_stop: decision.action == "stop"
+        - gate_redirect: decision.action == "redirect"
+        - materialization_gate: detected via decision logger's last event type
+
+        Never raises — all operations wrapped in try/except.
+        """
+        if self._state is None:
+            return
+
+        # Determine trigger type
+        trigger: str | None = None
+        current_pr_count = len(self._state.phase_records)
+        if current_pr_count > self._prev_phase_records_count:
+            trigger = "phase_advance"
+            self._prev_phase_records_count = current_pr_count
+        elif decision.action == "stop":
+            trigger = "gate_stop"
+        elif decision.action == "redirect":
+            trigger = "gate_redirect"
+
+        # Also check for materialization_gate via cp state
+        if (
+            trigger is None
+            and self._state._execute_entry_step >= 0
+            and not self._state._execute_write_seen
+        ):
+            # materialization gate may have fired this step — check decision logger's
+            # last event. We detect it by checking if mat gate emitted a decision.
+            # Simpler proxy: look at messages for mat-gate injection.
+            msgs = getattr(agent_self, "messages", [])
+            if msgs and isinstance(msgs[-1], dict):
+                last_content = msgs[-1].get("content", "")
+                if isinstance(last_content, str) and "[mat-gate]" in last_content.lower():
+                    trigger = "materialization_gate"
+
+        if trigger is None:
+            return
+
+        from checkpoint import Checkpoint, save_checkpoint
+
+        instance_id = self._instance.get("instance_id", "unknown")
+        attempt = self._state.attempt
+
+        # Build cp_state dict
+        cp_state_dict = (
+            self._state.to_checkpoint_dict()
+            if hasattr(self._state, "to_checkpoint_dict")
+            else {}
+        )
+
+        # Phase records
+        phase_records = []
+        for pr in (self._state.phase_records or []):
+            if isinstance(pr, dict):
+                phase_records.append(pr)
+            elif hasattr(pr, "__dict__"):
+                phase_records.append(vars(pr))
+            else:
+                phase_records.append({"raw": str(pr)})
+
+        # Pending hints
+        pending_hints = []
+        if self._state.pending_redirect_hint:
+            pending_hints.append(self._state.pending_redirect_hint)
+
+        # Current phase
+        cp = self._cp_state_holder[0] if self._cp_state_holder else None
+        current_phase = str(getattr(cp, "phase", None)) if cp else "unknown"
+
+        ckpt = Checkpoint(
+            step_n=step_n,
+            instance_id=instance_id,
+            attempt=attempt,
+            trigger=trigger,
+            messages_so_far=list(getattr(agent_self, "messages", [])),
+            cp_state=cp_state_dict,
+            phase_records=phase_records,
+            pending_hints=pending_hints,
+            prompt_sections=self._prompt_sections,
+            metadata={
+                "timestamp_ms": time.time() * 1000,
+                "phase": current_phase,
+                "trigger_detail": decision.reason or "",
+            },
+        )
+        result = save_checkpoint(ckpt, self._output_dir / instance_id)
+        if result:
+            print(
+                f"    [p231] checkpoint saved: step={step_n} trigger={trigger}"
+                f" phase={current_phase} path={result.name}",
+                flush=True,
+            )
 
     # -- attempt-level hooks ------------------------------------------------
 
@@ -651,6 +759,8 @@ class JinguAgent:
             _snap_path = _snap_dir / "prompt_snapshot.json"
             with open(_snap_path, "w") as _snap_f:
                 json.dump(prompt_snapshot, _snap_f, indent=2)
+            # p231: store prompt sections for checkpoint inclusion
+            self._prompt_sections = _snap_sections
         except Exception as _snap_exc:
             logging.getLogger(__name__).warning("[p229] prompt snapshot failed: %s", _snap_exc)
 
@@ -905,6 +1015,8 @@ class JinguAgent:
         _monitor._extraction_no_schema = 0
 
         self._state = _monitor
+        # p231: reset checkpoint tracking for new attempt
+        self._prev_phase_records_count = 0
         # p230: pass decision logger to state for step_sections access
         _monitor._decision_logger = self._decision_logger
         # cp_state_holder already set by caller (run_agent wrapper or run_with_jingu)
