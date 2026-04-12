@@ -414,3 +414,101 @@ class TestNoForceAdvance:
 
         assert state.early_stop_verdict is not None
         assert "protocol_violation" in state.early_stop_verdict.reason
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Integration smoke: real JinguAgent.on_step_end wiring
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TestIntegrationSmoke:
+    """End-to-end: JinguAgent.on_step_end → _step_cp_update_and_verdict → StopExecution → StepDecision.
+
+    This exercises the real wiring, not mocked section3.
+    Only LLM calls and environment are stubbed.
+    """
+
+    def test_on_step_end_stops_on_protocol_violation(self):
+        """Real JinguAgent.on_step_end: no tool submission → stop decision."""
+        from jingu_agent import JinguAgent, StepDecision
+        from pathlib import Path
+
+        instance = {
+            "instance_id": "test__test-0001",
+            "repo": "test/test",
+            "base_commit": "abc123",
+            "problem_statement": "test problem",
+        }
+
+        # Create JinguAgent with minimal governance mock
+        gov = MagicMock()
+        gov.get_constrained_schema.return_value = None
+        gov.get_cognition.return_value = None
+        gov.get_phase_config.return_value = None
+        gov.get_route.return_value = None
+        gov.get_repair_hint.return_value = ""
+
+        ja = JinguAgent(
+            instance=instance,
+            output_dir=Path("/tmp/test-plan-b-smoke"),
+            governance=gov,
+            mode="jingu",
+            max_attempts=1,
+        )
+
+        # Set up internal state as if attempt is running
+        state = _make_state("OBSERVE")
+        ja._state = state
+        ja._cp_state_holder = [state.cp_state]
+
+        # Create agent mock with model that never submits
+        model = _make_model(submitted_record=None)
+        agent_mock = _make_agent(model)
+        agent_mock.env = MagicMock(container_id="fake-container")
+
+        # Simulate on_step_start result: agent wrote some text but no tool call
+        ja._last_observe_result = (
+            "I am analyzing the codebase to find the root cause.",
+            "analyzing the codebase",
+            False,
+        )
+
+        # Mock verify to be a no-op, and decide_next to return VerdictAdvance
+        advance_verdict = VerdictAdvance(to="ANALYZE")
+
+        with patch("step_sections.decide_next", return_value=advance_verdict), \
+             patch("step_sections.extract_weak_progress", return_value=False), \
+             patch.object(state, "update_cp_with_step_signals", return_value=(False, "")), \
+             patch.object(state, "latest_tests_passed", return_value=0), \
+             patch("step_sections._step_verify_if_needed", return_value=False), \
+             patch("step_sections._step_check_structure"), \
+             patch("step_sections._step_inject_phase"), \
+             patch("step_sections._check_materialization_gate"):
+
+            # Step 1: blocked, retry allowed
+            decision1 = ja.on_step_end(agent_mock, step_n=1)
+            assert decision1.action == "continue" or decision1.action == "redirect", \
+                f"First miss should allow retry, got action={decision1.action}"
+            assert ja._cp_state_holder[0].phase == "OBSERVE", \
+                "Phase must not advance on first miss"
+
+            # Step 2: blocked again
+            ja._last_observe_result = ("Still analyzing...", "analyzing", False)
+            decision2 = ja.on_step_end(agent_mock, step_n=2)
+            assert ja._cp_state_holder[0].phase == "OBSERVE"
+
+            # Step 3: max retries exhausted → stop
+            ja._last_observe_result = ("Still no submission...", "no submission", False)
+            decision3 = ja.on_step_end(agent_mock, step_n=3)
+
+            assert decision3.action == "stop", \
+                f"After max retries, must get stop decision, got action={decision3.action}"
+            assert "protocol_violation" in decision3.reason, \
+                f"Stop reason must be protocol_violation, got reason={decision3.reason}"
+
+        # Final state checks
+        assert len(state.phase_records) == 0, \
+            "No admitted records should exist"
+        assert state.early_stop_verdict is not None
+        assert "protocol_violation" in state.early_stop_verdict.reason
+        assert ja._cp_state_holder[0].phase == "OBSERVE", \
+            "Phase must NEVER have advanced"
