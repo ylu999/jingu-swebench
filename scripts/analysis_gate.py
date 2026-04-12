@@ -203,48 +203,117 @@ def _check_causal_chain(pr: PhaseRecord) -> float:
         return 0.0
 
 
-# ── Rule 4: Invariant Capture ──────────────────────────────────────────────
+# ── Rule 4: Invariant Capture (v2 — generalized with applicability) ────────
 
-# Structural signals indicating invariant identification.
-# NOT surface keywords — these indicate the agent structured its reasoning
-# around specific boundary/delimiter constraints.
-_INVARIANT_SIGNALS = {
+# Domain-specific signals: delimiter/boundary/parsing bugs.
+# When these are present, invariant capture should be strict.
+_PARSING_DOMAIN_SIGNALS = re.compile(
+    r'\b(parser|lexer|regex|delimiter|separator|tokeniz|escap|quot|boundary\s+char'
+    r'|validator\s+pattern|pattern\s+match(?:ing|er|es)?|re\.compile|regexp)\b',
+    re.IGNORECASE,
+)
+
+# Generalized invariant signals (apply to ALL bug types):
+# Any of these indicates the agent identified what must be preserved.
+_INVARIANT_SIGNALS_GENERAL = {
+    # Preserved behavior / contract
+    "preserved_behavior": re.compile(
+        r'(?:must\s+(?:still|continue\s+to|remain|preserve|maintain|keep)'
+        r'|(?:preserve|maintain|keep)\s+(?:existing|current|original|backward)'
+        r'|unchanged|invariant|contract|guarantee'
+        r'|non.?regression|compatibility)',
+        re.IGNORECASE,
+    ),
+    # Forbidden behavior (what must NOT happen)
+    "forbidden_behavior": re.compile(
+        r'(?:must\s+not|cannot|should\s+not|forbidden|disallow|reject|prevent|block)'
+        r'\s+(?:contain|allow|accept|appear|pass|return|produce|create|generate)',
+        re.IGNORECASE,
+    ),
+    # Boundary / constraint (domain-general)
+    "boundary_constraint": re.compile(
+        r'(?:boundary|constraint|limitation|restriction|precondition|postcondition'
+        r'|edge\s+case|corner\s+case|valid\s+range|invalid\s+input'
+        r'|type\s+(?:check|error|constraint)|assertion)',
+        re.IGNORECASE,
+    ),
+    # Specific code structural signal (decorator, cache, override, etc.)
+    "code_structural": re.compile(
+        r'(?:cache[_.]clear|lru_cache|decorator|override|super\(\)|__init__'
+        r'|migration|backward|forward|schema|interface|signature|call\s+site'
+        r'|caller|import)',
+        re.IGNORECASE,
+    ),
+}
+
+# Parsing-domain-specific signals (strict — original behavior)
+_INVARIANT_SIGNALS_PARSING = {
     "delimiter": re.compile(r'delimiter|separator|boundary\s+character', re.I),
-    "forbidden": re.compile(r'(?:must\s+not|cannot|should\s+not|forbidden|disallow)\s+(?:contain|allow|accept|appear)', re.I),
+    "forbidden_char": re.compile(
+        r'(?:must\s+not|cannot|should\s+not|forbidden|disallow)\s+(?:contain|allow|accept|appear)',
+        re.I,
+    ),
     "structural_role": re.compile(r'(?:structural|parsing|syntactic)\s+(?:role|meaning|significance|boundary)', re.I),
     "specific_char": re.compile(r'[`\'"]\s*[:@/\\#]\s*[`\'"]', re.I),
 }
 
 
+def _is_parsing_domain(pr: PhaseRecord) -> bool:
+    """Detect if the bug is in the parsing/validator/regex domain.
+
+    When True, invariant_capture uses strict delimiter-focused signals.
+    When False, invariant_capture uses generalized behavioral signals.
+    """
+    text = (pr.root_cause or "") + " " + (pr.content or "")
+    return bool(_PARSING_DOMAIN_SIGNALS.search(text))
+
+
 def _check_invariant_capture(pr: PhaseRecord) -> float:
     """
-    Check that analysis identifies the structural invariant being violated.
+    Check that analysis identifies the behavioral constraint being violated.
 
-    Targets constraint_encoding_failure archetype: agent says "regex too permissive"
-    but fails to identify WHICH delimiter/boundary must not appear and WHY.
+    v2 (p237): Two modes based on domain applicability:
+    - Parsing domain: strict signals (delimiter, forbidden char, structural role)
+    - General domain: generalized signals (preserved behavior, forbidden behavior,
+      boundary constraint, code structural)
+
+    The key change: non-parsing bugs (forms, URL routing, queryset, duration, etc.)
+    are no longer penalized for not discussing "delimiter/boundary" — they just need
+    to identify ANY behavioral constraint the fix must preserve.
 
     Score:
-      0.0 = no invariant mention
-      0.5 = mentions structure vaguely (1-2 signals)
-      1.0 = explicit invariant + delimiter identification (3+ signals)
+      0.0 = no invariant/constraint mention
+      0.5 = mentions constraints vaguely (1 signal)
+      1.0 = explicit constraint identification (2+ signals)
     """
     text = (pr.root_cause or "") + " " + (pr.content or "")
     if not text.strip():
         return 0.0
 
-    matched = sum(1 for p in _INVARIANT_SIGNALS.values() if p.search(text))
-
-    # Also check causal_chain for invariant reasoning
+    # Also include causal_chain
     if pr.causal_chain:
-        matched += sum(1 for p in _INVARIANT_SIGNALS.values() if p.search(pr.causal_chain))
-        matched = min(matched, len(_INVARIANT_SIGNALS))  # cap at max
+        text = text + " " + pr.causal_chain
 
-    if matched >= 3:
-        return 1.0
-    elif matched >= 1:
-        return 0.5
+    is_parsing = _is_parsing_domain(pr)
+
+    if is_parsing:
+        # Strict mode: use parsing-specific signals
+        matched = sum(1 for p in _INVARIANT_SIGNALS_PARSING.values() if p.search(text))
+        if matched >= 3:
+            return 1.0
+        elif matched >= 1:
+            return 0.5
+        else:
+            return 0.0
     else:
-        return 0.0
+        # General mode: use generalized behavioral signals
+        matched = sum(1 for p in _INVARIANT_SIGNALS_GENERAL.values() if p.search(text))
+        if matched >= 2:
+            return 1.0
+        elif matched >= 1:
+            return 0.5
+        else:
+            return 0.0
 
 
 # ── ANALYZE contract (SDG p217) ──────────────────────────────────────────────
@@ -336,16 +405,40 @@ def evaluate_analysis(pr: PhaseRecord, *, structured_output: bool = False) -> An
             "Explain step-by-step how the test failure connects to the root cause."
         )
 
-    # Rule 4: Invariant capture (semantic check — same as other rules)
+    # Rule 4: Invariant capture (with domain-aware fail-open)
     score4 = _check_invariant_capture(pr)
     scores["invariant_capture"] = score4
+    scores["invariant_domain"] = "parsing" if _is_parsing_domain(pr) else "general"
     if score4 < _THRESHOLD:
-        failed.append("invariant_capture")
-        reasons.append(
-            "Analysis identifies the general area but not the structural invariant. "
-            "What delimiter or boundary character must NOT appear in this position? "
-            "Why does allowing it break the parser's structural assumptions?"
+        # Fail-open: in non-parsing domain, if other 3 rules all pass,
+        # downgrade invariant_capture to warning instead of hard reject.
+        # User design: "不该反复 reject 三次。最多：降分，给提醒"
+        other_rules_pass = all(
+            scores.get(r, 0) >= _THRESHOLD
+            for r in ("code_grounding", "causal_chain", "alternative_hypothesis")
         )
+        is_parsing = _is_parsing_domain(pr)
+
+        if not is_parsing and other_rules_pass:
+            # Fail-open: non-parsing domain + other rules pass → warning only
+            scores["invariant_capture_note"] = (
+                "fail_open: non-parsing domain, other rules pass — downgraded to warning"
+            )
+        else:
+            # Hard gate: parsing domain OR other rules also failing
+            failed.append("invariant_capture")
+            if is_parsing:
+                reasons.append(
+                    "Analysis identifies the general area but not the structural invariant. "
+                    "What delimiter or boundary character must NOT appear in this position? "
+                    "Why does allowing it break the parser's structural assumptions?"
+                )
+            else:
+                reasons.append(
+                    "Analysis identifies the root cause but not the behavioral constraint. "
+                    "What property, contract, or boundary must remain unchanged after the fix? "
+                    "What invalid behavior must still be rejected? What valid behavior must remain accepted?"
+                )
 
     extracted = {
         "root_cause": pr.root_cause[:100] if pr.root_cause else "",

@@ -146,8 +146,10 @@ GATE_RULES: list[GateRule] = [
         name="invariant_capture",
         field="root_cause",
         repair_hint=(
-            "Identify the structural invariant: what delimiter/boundary must NOT "
-            "be allowed in this position, and why?"
+            "Identify the behavioral constraint your fix must preserve: "
+            "what property, contract, or boundary must remain unchanged? "
+            "What invalid behavior must still be rejected? "
+            "What valid behavior must remain accepted?"
         ),
     ),
 ]
