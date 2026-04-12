@@ -2327,7 +2327,7 @@ _PEEK_SIGNALS = [
     "[cp-step]", "[cp] ", "[inner-verify]", "DONE", "FAILED", "ACCEPTED", "REJECTED",
     "[step ", "[jingu]", "pee:True", "[verify_gate]", "[init]", "Traceback", "Error",
     "STOPPED", "[attempt ", "[preflight]", "ModuleNotFoundError", "[smoke]",
-    "[pipeline]", "resolved", "BUILD_DONE",
+    "[pipeline]", "resolved", "BUILD_DONE", "[eval-heartbeat]", "[entrypoint]",
 ]
 
 

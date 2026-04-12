@@ -67,8 +67,19 @@ s3.download_file(bucket, key, '/tmp/eval-predictions.jsonl')
 print(f'[entrypoint] downloaded predictions from s3://{bucket}/{key}')
 "
     cd /app
+    # Heartbeat: emit periodic signal so peek/monitors detect early failures
+    EVAL_START=$(date +%s)
+    (
+        while true; do
+            sleep 30
+            ELAPSED=$(( $(date +%s) - EVAL_START ))
+            echo "[eval-heartbeat] still running, elapsed=${ELAPSED}s"
+        done
+    ) &
+    HEARTBEAT_PID=$!
     python3 -m swebench.harness.run_evaluation         --dataset_name "$DATASET"         --predictions_path /tmp/eval-predictions.jsonl         --max_workers "$WORKERS"         --run_id "$RUN_ID"         --cache_level env
     EXIT_CODE=$?
+    kill $HEARTBEAT_PID 2>/dev/null || true
     # Copy report to output dir for S3 upload
     mkdir -p "$OUTPUT_DIR"
     echo "[entrypoint] searching for eval report (run_id=${RUN_ID}):"
