@@ -1046,6 +1046,7 @@ class JinguAgent:
         _monitor._extraction_structured = 0
         _monitor._extraction_regex_fallback = 0
         _monitor._extraction_no_schema = 0
+        _monitor._extraction_tool_submitted = 0
         # Plan-A: reset extraction retry counts per attempt
         _monitor.extraction_retry_counts = {}
 
@@ -1225,12 +1226,14 @@ class JinguAgent:
                 jingu_body["verify_history"] = _monitor.verify_history
                 # p190: per-phase records — one entry per VerdictAdvance during this attempt
                 jingu_body["phase_records"] = [r.as_dict() for r in _monitor.phase_records]
-                # p226-05: structured extraction metrics — track structured vs regex fallback rates
+                # p226-05 + Plan-B: extraction metrics — track tool_submitted vs fallback rates
+                _em_tool = getattr(_monitor, "_extraction_tool_submitted", 0)
                 _em_structured = getattr(_monitor, "_extraction_structured", 0)
                 _em_regex = getattr(_monitor, "_extraction_regex_fallback", 0)
                 _em_no_schema = getattr(_monitor, "_extraction_no_schema", 0)
-                _em_total = _em_structured + _em_regex + _em_no_schema
+                _em_total = _em_tool + _em_structured + _em_regex + _em_no_schema
                 jingu_body["extraction_metrics"] = {
+                    "tool_submitted": _em_tool,
                     "structured": _em_structured,
                     "regex_fallback": _em_regex,
                     "no_schema": _em_no_schema,
@@ -1238,8 +1241,9 @@ class JinguAgent:
                 }
                 print(
                     f"    [extraction_metrics] attempt={attempt}"
-                    f" structured={_em_structured}/{_em_total}"
-                    f" regex_fallback={_em_regex}/{_em_total}"
+                    f" tool_submitted={_em_tool}/{_em_total}"
+                    f" diagnostic_structured={_em_structured}/{_em_total}"
+                    f" diagnostic_regex={_em_regex}/{_em_total}"
                     f" no_schema={_em_no_schema}/{_em_total}",
                     flush=True,
                 )

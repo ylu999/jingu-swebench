@@ -1,24 +1,35 @@
-"""JinguModel — LitellmModel subclass with structured phase extraction.
+"""JinguModel — LitellmModel subclass with phase-boundary cognition enforcement.
 
-Extends LitellmModel with a `structured_extract()` method that makes an
-independent LLM call with grammar-constrained sampling (response_format
-json_schema). This guarantees schema-valid JSON output — no regex needed.
+Two capabilities beyond LitellmModel:
 
-Normal step queries continue to use bash tool calls unmodified.
+1. **submit_phase_record tool** (Plan B — strong version):
+   Every LLM query includes a `submit_phase_record` tool alongside BASH_TOOL.
+   The agent MUST call this tool at phase boundaries to submit a structured
+   PhaseRecord. This is the ONLY way to complete a phase — fallback extraction
+   is diagnostic only, never a substitute for declaration.
+
+2. **structured_extract()** (Plan A — now diagnostic fallback):
+   Independent LLM call with response_format=json_schema for post-hoc extraction.
+   Used for telemetry/diagnosis when agent fails to submit via tool call.
+   Cannot produce an admitted phase record.
+
+Contract (three iron rules):
+  - Phase completion = an admitted PhaseRecord exists (from tool submission)
+  - Transition = upstream record admitted
+  - Fallback extraction = diagnostic only, never admission
 
 Usage:
     model = JinguModel(model_name="bedrock/...", model_kwargs={...})
 
-    # Normal step (bash tool call, unchanged):
+    # Set current phase (step_sections calls this before each query):
+    model.set_current_phase("ANALYZE", schema={...})
+
+    # Normal step (bash + submit_phase_record tools):
     message = model.query(messages)
 
-    # Phase extraction (constrained structured output):
-    result = model.structured_extract(
-        accumulated_text="... agent's ANALYZE phase reasoning ...",
-        phase="ANALYZE",
-        schema=analyze_schema,  # from cognition bundle
-    )
-    # result is a dict guaranteed to match schema
+    # If agent called submit_phase_record, retrieve it:
+    submitted = model.pop_submitted_phase_record()
+    # submitted is a dict matching the phase schema, or None
 """
 
 import json
@@ -30,9 +41,64 @@ from typing import Any
 import litellm
 
 from minisweagent.models.litellm_model import LitellmModel, LitellmModelConfig
+from minisweagent.models.utils.actions_toolcall import BASH_TOOL
 from minisweagent.models.utils.retry import retry
 
 logger = logging.getLogger("jingu_model")
+
+
+# ---------------------------------------------------------------------------
+# submit_phase_record tool definition
+# ---------------------------------------------------------------------------
+
+def _build_phase_record_tool(phase: str, schema: dict[str, Any]) -> dict:
+    """Build a submit_phase_record tool definition for the current phase.
+
+    The tool's parameters ARE the phase schema — the agent fills in the
+    structured fields directly as tool call arguments.
+    """
+    return {
+        "type": "function",
+        "function": {
+            "name": "submit_phase_record",
+            "description": (
+                f"Submit your structured phase record for the {phase} phase. "
+                f"You MUST call this tool when you have completed your work in "
+                f"the current phase. This is the ONLY way to complete a phase "
+                f"and proceed to the next one. Fill in ALL required fields "
+                f"based on your reasoning above."
+            ),
+            "parameters": schema,
+        },
+    }
+
+
+# Fallback tool when no schema is available (e.g. UNDERSTAND phase)
+_SUBMIT_PHASE_RECORD_FALLBACK = {
+    "type": "function",
+    "function": {
+        "name": "submit_phase_record",
+        "description": (
+            "Submit your structured phase record for the current phase. "
+            "Call this when you have completed your work in the current phase."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "phase": {
+                    "type": "string",
+                    "description": "The phase you are completing (e.g. OBSERVE, ANALYZE, DECIDE, EXECUTE, JUDGE)",
+                },
+                "summary": {
+                    "type": "string",
+                    "description": "Brief summary of what you accomplished in this phase",
+                },
+            },
+            "required": ["phase", "summary"],
+            "additionalProperties": False,
+        },
+    },
+}
 
 
 @dataclass
@@ -60,7 +126,224 @@ def is_extraction_message(msg: dict) -> bool:
 
 
 class JinguModel(LitellmModel):
-    """LitellmModel with structured phase extraction capability."""
+    """LitellmModel with phase-boundary cognition enforcement.
+
+    Adds submit_phase_record tool to every query. Agent must call it at
+    phase boundaries. Fallback extraction (structured_extract) is diagnostic only.
+    """
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        # Current phase state — set by step_sections before each query
+        self._current_phase: str | None = None
+        self._current_phase_schema: dict[str, Any] | None = None
+        # Last submitted phase record from tool call (consumed by step_sections)
+        self._submitted_phase_record: dict[str, Any] | None = None
+        self._submitted_phase_record_phase: str | None = None
+
+    # -- Phase state management (called by step_sections) --
+
+    def set_current_phase(self, phase: str, schema: dict[str, Any] | None = None) -> None:
+        """Set the current phase and its schema for submit_phase_record tool."""
+        self._current_phase = phase.upper()
+        self._current_phase_schema = schema
+        logger.info("set_current_phase: phase=%s schema_available=%s",
+                     self._current_phase, schema is not None)
+
+    def pop_submitted_phase_record(self) -> dict[str, Any] | None:
+        """Pop and return the last tool-submitted phase record, or None.
+
+        This is the ONLY way to get an admitted phase record.
+        Calling this clears the stored record.
+        """
+        record = self._submitted_phase_record
+        phase = self._submitted_phase_record_phase
+        self._submitted_phase_record = None
+        self._submitted_phase_record_phase = None
+        if record is not None:
+            logger.info("pop_submitted_phase_record: phase=%s fields=%s",
+                        phase, list(record.keys()))
+        return record
+
+    # -- Override _query to inject submit_phase_record tool --
+
+    def _query(self, messages: list[dict[str, str]], **kwargs):
+        """Override to add submit_phase_record tool alongside BASH_TOOL."""
+        # Build phase-specific tool if schema available
+        if self._current_phase and self._current_phase_schema:
+            phase_tool = _build_phase_record_tool(
+                self._current_phase, self._current_phase_schema
+            )
+        elif self._current_phase:
+            phase_tool = _SUBMIT_PHASE_RECORD_FALLBACK
+        else:
+            phase_tool = _SUBMIT_PHASE_RECORD_FALLBACK
+
+        tools = [BASH_TOOL, phase_tool]
+
+        try:
+            return litellm.completion(
+                model=self.config.model_name,
+                messages=messages,
+                tools=tools,
+                **(self.config.model_kwargs | kwargs),
+            )
+        except litellm.exceptions.AuthenticationError as e:
+            e.message += " You can permanently set your API key with `mini-extra config set KEY VALUE`."
+            raise e
+
+    # -- Override _parse_actions to intercept submit_phase_record --
+
+    def _parse_actions(self, response) -> list[dict]:
+        """Parse tool calls, intercepting submit_phase_record submissions.
+
+        submit_phase_record calls are stored (not executed as bash).
+        bash calls are returned as normal actions.
+        """
+        from minisweagent.exceptions import FormatError
+        from jinja2 import StrictUndefined, Template
+
+        tool_calls = response.choices[0].message.tool_calls or []
+
+        if not tool_calls:
+            raise FormatError(
+                {
+                    "role": "user",
+                    "content": Template(
+                        self.config.format_error_template,
+                        undefined=StrictUndefined,
+                    ).render(
+                        error=(
+                            "No tool calls found in the response. "
+                            "Every response MUST include at least one tool call. "
+                            "Use the bash tool for commands, or submit_phase_record "
+                            "to complete the current phase."
+                        )
+                    ),
+                    "extra": {"interrupt_type": "FormatError"},
+                }
+            )
+
+        bash_actions = []
+        for tc in tool_calls:
+            if tc.function.name == "submit_phase_record":
+                # Intercept: parse and store, don't execute
+                try:
+                    args = json.loads(tc.function.arguments)
+                    self._submitted_phase_record = args
+                    self._submitted_phase_record_phase = self._current_phase
+                    logger.info(
+                        "submit_phase_record intercepted: phase=%s fields=%s",
+                        self._current_phase,
+                        list(args.keys()),
+                    )
+                except Exception as e:
+                    logger.error(
+                        "submit_phase_record parse error: %s", e
+                    )
+                continue
+
+            if tc.function.name == "bash":
+                try:
+                    args = json.loads(tc.function.arguments)
+                except Exception as e:
+                    raise FormatError(
+                        {
+                            "role": "user",
+                            "content": Template(
+                                self.config.format_error_template,
+                                undefined=StrictUndefined,
+                            ).render(
+                                error=f"Error parsing bash tool call arguments: {e}."
+                            ),
+                            "extra": {"interrupt_type": "FormatError"},
+                        }
+                    )
+                if "command" not in args:
+                    raise FormatError(
+                        {
+                            "role": "user",
+                            "content": Template(
+                                self.config.format_error_template,
+                                undefined=StrictUndefined,
+                            ).render(
+                                error="Missing 'command' argument in bash tool call."
+                            ),
+                            "extra": {"interrupt_type": "FormatError"},
+                        }
+                    )
+                bash_actions.append({
+                    "command": args["command"],
+                    "tool_call_id": tc.id,
+                })
+                continue
+
+            # Unknown tool
+            raise FormatError(
+                {
+                    "role": "user",
+                    "content": Template(
+                        self.config.format_error_template,
+                        undefined=StrictUndefined,
+                    ).render(
+                        error=f"Unknown tool '{tc.function.name}'. Use 'bash' or 'submit_phase_record'."
+                    ),
+                    "extra": {"interrupt_type": "FormatError"},
+                }
+            )
+
+        # If agent ONLY submitted phase record (no bash), we still need a valid
+        # step. Return empty bash_actions — the tool result for submit_phase_record
+        # is handled by format_observation_messages override.
+        return bash_actions
+
+    def format_observation_messages(
+        self, message: dict, outputs: list[dict], template_vars: dict | None = None,
+    ) -> list[dict]:
+        """Override to inject tool result for submit_phase_record tool call.
+
+        The Anthropic API requires every tool_call to have a corresponding tool
+        result message. We synthesize one for submit_phase_record since it's
+        intercepted (not executed as bash).
+        """
+        # Get normal bash tool results from parent
+        result_msgs = super().format_observation_messages(message, outputs, template_vars)
+
+        # Check if the raw response had a submit_phase_record tool call
+        raw_response = message.get("extra", {}).get("response", {})
+        tool_calls = (
+            raw_response.get("choices", [{}])[0]
+            .get("message", {})
+            .get("tool_calls", [])
+            or []
+        )
+        for tc in tool_calls:
+            tc_fn = tc.get("function", {})
+            if tc_fn.get("name") == "submit_phase_record":
+                tc_id = tc.get("id", "")
+                if self._submitted_phase_record is not None:
+                    ack_content = (
+                        f"Phase record for {self._submitted_phase_record_phase or 'unknown'} "
+                        f"received. The record will be evaluated by the admission gate."
+                    )
+                else:
+                    ack_content = (
+                        "Phase record submission failed to parse. "
+                        "Please try again with valid JSON arguments."
+                    )
+                result_msgs.append({
+                    "role": "tool",
+                    "tool_call_id": tc_id,
+                    "content": ack_content,
+                    "extra": {
+                        "type": "phase_record_ack",
+                        "phase": self._submitted_phase_record_phase,
+                        "success": self._submitted_phase_record is not None,
+                        "timestamp": time.time(),
+                    },
+                })
+
+        return result_msgs
 
     def structured_extract(
         self,
