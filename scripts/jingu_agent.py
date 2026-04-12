@@ -62,6 +62,8 @@ from minisweagent.utils.log import logger
 # Must accept (model, env, *, progress_manager, instance_id, **agent_config).
 AgentClass = type
 
+# PR1: bundle activation proof — module-level so run_report.json can access it
+_bundle_activation_proof: dict = {"bundle_loaded": "not_yet_attempted"}
 
 # ---------------------------------------------------------------------------
 # AttemptResult / AttemptOutcome — return types for JinguAgent.run_attempt()
@@ -617,6 +619,7 @@ class JinguAgent:
         # B4: phase-structured reasoning protocol — p224-09: loaded via compile_bundle().
         # All phase prompts, principal requirements, type contracts, forbidden moves
         # are derived from bundle.json (compiled by jingu-cognition TS). Zero hardcoded strings.
+        global _bundle_activation_proof  # PR1: exposed for run_report.json
         _phase_prompt_parts: list[str] = []
         _type_contracts_block = "Type contracts: (see principal_gate for v2.0 contracts)"
         _analysis_req = "ontology_alignment, phase_boundary_discipline, causal_grounding, evidence_linkage"

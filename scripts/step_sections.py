@@ -39,6 +39,45 @@ from step_monitor_state import StopExecution
 from declaration_extractor import build_phase_record_from_structured
 
 
+# ── PR3: limit event unification helper ──────────────────────────────────────
+
+def _emit_limit_triggered(
+    state: "StepMonitorState",
+    *,
+    step_n: int,
+    limit_name: str,
+    configured_value: int | float,
+    actual_value: int | float,
+    action_taken: str,
+    source_file: str,
+    source_line: int,
+    reason: str = "",
+) -> None:
+    """Emit to BOTH stdout ([limit-triggered] prefix) and decisions.jsonl."""
+    print(
+        f"    [limit-triggered] {limit_name}: configured={configured_value}"
+        f" actual={actual_value} action={action_taken}"
+        f" source={source_file}:{source_line}"
+        f" reason={reason}",
+        flush=True,
+    )
+    _emit_decision(
+        state,
+        decision_type="limit_triggered",
+        step_n=step_n,
+        verdict=action_taken,
+        reason=f"{limit_name}: configured={configured_value} actual={actual_value} -- {reason}",
+        signals={
+            "limit_name": limit_name,
+            "configured_value": configured_value,
+            "actual_value": actual_value,
+            "action_taken": action_taken,
+            "source_file": source_file,
+            "source_line": source_line,
+        },
+    )
+
+
 # ── p230: decision provenance emission helper ────────────────────────────────
 
 def _emit_decision(
@@ -338,6 +377,13 @@ def _step_cp_update_and_verdict(
                 flush=True,
             )
             if _exec_redirect_count > _EXECUTE_REDIRECT_LIMIT:
+                _emit_limit_triggered(
+                    state, step_n=_cp_s.step_index,
+                    limit_name="execute_redirect_limit",
+                    configured_value=_EXECUTE_REDIRECT_LIMIT, actual_value=_exec_redirect_count,
+                    action_taken="stop", source_file="step_sections.py", source_line=379,
+                    reason="execute_no_progress_loop_exceeded",
+                )
                 _emit_decision(
                     state, decision_type="gate_verdict", step_n=_cp_s.step_index,
                     verdict="stop", reason="execute_no_progress_loop_exceeded",
@@ -612,6 +658,13 @@ def _step_cp_update_and_verdict(
                 )
                 if not _analysis_verdict.passed and _ag_reject_count >= _AG_MAX_REJECTS:
                     print(f"    [analysis_gate] FORCE_PASS — max_rejects={_AG_MAX_REJECTS} reached, allowing advance", flush=True)
+                    _emit_limit_triggered(
+                        state, step_n=_cp_s.step_index,
+                        limit_name="analysis_gate_force_pass",
+                        configured_value=_AG_MAX_REJECTS, actual_value=_ag_reject_count,
+                        action_taken="force_pass", source_file="step_sections.py", source_line=653,
+                        reason=f"failed_rules={_analysis_verdict.failed_rules} scores={_analysis_verdict.scores}",
+                    )
                     _analysis_gate_force_passed = True
                 elif not _analysis_verdict.passed:
                     _analysis_gate_rejected = True
@@ -688,6 +741,13 @@ def _step_cp_update_and_verdict(
                 )
                 if not _design_verdict.passed and _dg_reject_count >= _DG_MAX_REJECTS:
                     print(f"    [design_gate] FORCE_PASS — max_rejects={_DG_MAX_REJECTS} reached, allowing advance", flush=True)
+                    _emit_limit_triggered(
+                        state, step_n=_cp_s.step_index,
+                        limit_name="design_gate_force_pass",
+                        configured_value=_DG_MAX_REJECTS, actual_value=_dg_reject_count,
+                        action_taken="force_pass", source_file="step_sections.py", source_line=729,
+                        reason=f"failed_rules={_design_verdict.failed_rules} scores={_design_verdict.scores}",
+                    )
                     _design_gate_force_passed = True
                 elif not _design_verdict.passed:
                     _design_gate_rejected = True
@@ -888,6 +948,13 @@ def _step_cp_update_and_verdict(
                             f" → contract_bypass ADMITTED (agent continues without principal check)",
                             flush=True,
                         )
+                        _emit_limit_triggered(
+                            state, step_n=_cp_s.step_index,
+                            limit_name="retryable_loop_force_pass",
+                            configured_value=_RETRYABLE_LOOP_LIMIT, actual_value=_loop_count,
+                            action_taken="bypass", source_file="step_sections.py", source_line=936,
+                            reason=f"phase={_loop_key[0]} violation={_loop_key[1]}",
+                        )
                         _admission.status = "ADMITTED"
                         _admission.reasons = [f"contract_bypass:{_loop_key[1]}"]
                         state._retryable_loop_counts[_loop_key] = 0
@@ -1020,6 +1087,13 @@ def _step_cp_update_and_verdict(
                         ]
                     state._bypassed_principals.update(_fake_principals)
                     state._retryable_loop_counts[_fi_loop_key] = 0
+                    _emit_limit_triggered(
+                        state, step_n=_cp_s.step_index,
+                        limit_name="fake_loop_force_pass",
+                        configured_value=_FAKE_LOOP_LIMIT, actual_value=_fi_loop_count,
+                        action_taken="bypass", source_file="step_sections.py", source_line=1074,
+                        reason=f"phase={_eval_phase} violation={_inf_violation} bypassed={sorted(state._bypassed_principals)}",
+                    )
                     print(
                         f"    [principal_inference] FAKE_LOOP_SELECTIVE_BYPASS:"
                         f" phase={_eval_phase} violation={_inf_violation}"

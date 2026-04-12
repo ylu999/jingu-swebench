@@ -2328,6 +2328,7 @@ _PEEK_SIGNALS = [
     "[step ", "[jingu]", "pee:True", "[verify_gate]", "[init]", "Traceback", "Error",
     "STOPPED", "[attempt ", "[preflight]", "ModuleNotFoundError", "[smoke]",
     "[pipeline]", "resolved", "BUILD_DONE", "[eval-heartbeat]", "[entrypoint]",
+    "[limit-triggered]", "[BUNDLE_ACTIVATED]", "[BUNDLE_LOAD_FAILURE]", "FORCE_PASS",
 ]
 
 

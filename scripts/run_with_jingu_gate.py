@@ -152,6 +152,17 @@ install_governance_pack(PHASE_RECORD_PACK)
 
 # ── Execution Identity (RT1/RT6: artifact provenance) ─────────────────────────
 
+def _get_bundle_activation(mode: str) -> dict | None:
+    """PR1: Read bundle activation proof from jingu_agent module."""
+    if mode != "jingu":
+        return None
+    try:
+        import jingu_agent
+        return getattr(jingu_agent, '_bundle_activation_proof', {"bundle_loaded": "unknown"})
+    except Exception:
+        return {"bundle_loaded": "unknown"}
+
+
 def get_execution_identity() -> dict:
     """
     Collect runtime provenance: git commit, image digest, build timestamp.
@@ -1064,6 +1075,7 @@ def main():
             "rescued_rate": round(attempt2_rescued / max(1, len(args.instance_ids) - attempt1_accepted), 4),
         },
         "failure_breakdown": failure_breakdown,  # jingu mode only; empty for baseline
+        "bundle_activation": _get_bundle_activation(args.mode),
         "execution_identity": _identity,
         "model_usage": {
             "total_api_calls":    totals["api_calls"],
