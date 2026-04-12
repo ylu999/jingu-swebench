@@ -138,6 +138,26 @@ STRATEGY_PROMPTS: dict[str, str] = {
         "4. Do not declare a phase just because it is expected — declare truthfully"
     ),
 
+    "check_all_call_sites": (
+        "[ROUTING: CHECK ALL CALL SITES]\n"
+        "Your change modifies a function/method but you did not verify all callers.\n"
+        "Requirements:\n"
+        "1. Run `grep -rn 'function_name'` to find ALL call sites in the codebase\n"
+        "2. For each caller, verify it still works with your change\n"
+        "3. If you changed a signature, decorator, or return type, update ALL callers\n"
+        "4. Pay special attention to cached references (.cache_clear(), lru_cache, etc.)"
+    ),
+
+    "remove_unnecessary_compat": (
+        "[ROUTING: REMOVE UNNECESSARY BACKWARD COMPAT]\n"
+        "Your patch adds backward-compatibility code that the issue does NOT require.\n"
+        "Requirements:\n"
+        "1. Re-read the issue — does it ask for backward compatibility?\n"
+        "2. Remove any .replace() fallbacks, try/except compat wrappers, or deprecation shims\n"
+        "3. Implement ONLY what the spec/issue asks for — nothing more\n"
+        "4. Extra compat code often causes the official eval tests to fail"
+    ),
+
     "acknowledge_gaps": (
         "[ROUTING: ACKNOWLEDGE UNCERTAINTY]\n"
         "Your analysis presents conclusions with insufficient evidence.\n"

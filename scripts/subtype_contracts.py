@@ -146,6 +146,7 @@ SUBTYPE_CONTRACTS: dict[str, SubtypeContract] = {
         # minimal_change is fake_checkable for execution.code_patch.
         # action_grounding has no inference rule → expected only.
         # ontology_alignment + phase_boundary_discipline have no inference rule → expected only.
+        # scope_completeness + no_unnecessary_compat: p237 principals with inference rules.
         "required_principals": [
             "minimal_change",
         ],
@@ -154,6 +155,8 @@ SUBTYPE_CONTRACTS: dict[str, SubtypeContract] = {
             "phase_boundary_discipline",  # stage=required_enforced, no inference rule
             "action_grounding",           # stage=required_enforced, no inference rule
             "invariant_preservation",
+            "scope_completeness",         # p237: check all call sites before multi-file changes
+            "no_unnecessary_compat",      # p237: don't add backward-compat shims unless required
         ],
         "forbidden_principals": [],
         "required_fields": [],
@@ -164,6 +167,7 @@ SUBTYPE_CONTRACTS: dict[str, SubtypeContract] = {
         "phase": "JUDGE",
         # invariant_preservation is fake_checkable for judge.verification.
         # result_verification + uncertainty_honesty have no inference rule → expected only.
+        # scope_completeness: p237 principal — verify all affected call sites were checked.
         "required_principals": [
             "invariant_preservation",
         ],
@@ -172,6 +176,7 @@ SUBTYPE_CONTRACTS: dict[str, SubtypeContract] = {
             "result_verification",        # stage=required_enforced, no inference rule
             "uncertainty_honesty",        # stage=required_enforced, no inference rule
             "residual_risk_detection",
+            "scope_completeness",         # p237: verify all call sites were checked
         ],
         "forbidden_principals": [],
         "required_fields": [],

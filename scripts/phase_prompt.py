@@ -103,6 +103,12 @@ _EXECUTE_GUIDANCE = (
     "4. If no code change is produced this step, this step counts as FAILED.\n"
     "5. If this entire attempt ends without editing any file, the attempt is DISCARDED\n"
     "   and you will be asked to redo it with a stronger penalty. Execute NOW.\n"
+    "6. Before editing, grep for ALL callers/importers of any function you change.\n"
+    "   If you change a signature, decorator, or return type, check every call site.\n"
+    "   Missing a call site = incomplete fix (scope_completeness).\n"
+    "7. Do NOT add backward-compatibility shims (.replace fallbacks, try/except compat,\n"
+    "   deprecation wrappers) UNLESS the issue explicitly requires it.\n"
+    "   Follow the spec's intent. Extra compat code causes test failures (no_unnecessary_compat).\n"
     + _EXECUTE_PRINCIPAL
     + "\nSuccess condition: a file is edited with a concrete, minimal code change."
 )
@@ -120,6 +126,8 @@ _JUDGE_GUIDANCE = (
     "PRINCIPALS: <principals>\n\n"
     "Rules: You MUST run at least the failing test. VERDICT must be based on test results, "
     "not on reading code. If uncertain, say so.\n"
+    "Verify scope_completeness: were ALL callers of modified functions checked?\n"
+    "If a function signature or decorator changed, grep for all call sites and confirm each works.\n"
     + _JUDGE_PRINCIPAL
 )
 

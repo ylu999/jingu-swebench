@@ -94,6 +94,18 @@ SEED_FAILURE_MATRIX: dict[str, dict] = {
         "confidence": 0.5,
         "sample_count": 0,
     },
+    "EXECUTE:scope_completeness": {
+        "next_phase": "EXECUTE",
+        "strategy": "check_all_call_sites",
+        "confidence": 0.6,
+        "sample_count": 0,
+    },
+    "EXECUTE:no_unnecessary_compat": {
+        "next_phase": "EXECUTE",
+        "strategy": "remove_unnecessary_compat",
+        "confidence": 0.6,
+        "sample_count": 0,
+    },
 
     # DESIGN phase failures
     "DESIGN:option_comparison": {
@@ -120,6 +132,12 @@ SEED_FAILURE_MATRIX: dict[str, dict] = {
         "next_phase": "ANALYZE",
         "strategy": "gather_code_evidence",
         "confidence": 0.5,
+        "sample_count": 0,
+    },
+    "JUDGE:scope_completeness": {
+        "next_phase": "EXECUTE",
+        "strategy": "check_all_call_sites",
+        "confidence": 0.6,
         "sample_count": 0,
     },
 

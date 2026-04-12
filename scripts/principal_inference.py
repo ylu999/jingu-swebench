@@ -14,7 +14,7 @@ Architecture:
   - infer_principals(): backward-compatible wrapper returning list[str]
   - diff_principals(): three-way diff, accepts list[str] or InferredPrincipalResult
 
-Principals inferred (5 built-in + 7 stage-2 from p207-P5):
+Principals inferred (5 built-in + 7 stage-2 from p207-P5 + 2 from p237):
   causal_grounding           — evidence_refs non-empty + causal language in content/claims
   evidence_linkage           — evidence_refs non-empty AND from_steps non-empty
   minimal_change             — execution.code_patch subtype + content line count <= 30
@@ -27,6 +27,8 @@ Principals inferred (5 built-in + 7 stage-2 from p207-P5):
   constraint_satisfaction    — CONSTRAINTS non-empty (decision.fix_direction)
   result_verification        — TEST_RESULTS non-empty (judge.verification)
   uncertainty_honesty        — UNCERTAINTY non-empty (analysis.root_cause)
+  scope_completeness         — grep/search for callers before multi-file changes (execution/judge)
+  no_unnecessary_compat      — no backward-compat shims unless issue requires it (execution)
 """
 
 from __future__ import annotations
@@ -104,6 +106,28 @@ _PRESERVE_KEYWORDS = re.compile(
 )
 
 _SMALL_PATCH_MAX_LINES = 30
+
+# Backward-compat shim patterns: code that adds unnecessary compatibility layers
+_BACKWARD_COMPAT_PATTERNS = re.compile(
+    r"\b(backward.?compat|back.?compat|deprecat|legacy.?support|fallback.?for"
+    r"|\.replace\s*\([^)]+,[^)]+\)\s*#.*compat"
+    r"|# (?:backward|back).?compat"
+    r"|# (?:for|ensure) (?:backward|back).?compat"
+    r"|if\s+hasattr.*#.*compat"
+    r"|try:.*except.*#.*compat"
+    r"|\.get\([^)]+,\s*[^)]+\)\s*#.*(?:fallback|compat|legacy))\b",
+    re.IGNORECASE,
+)
+
+# Caller-search patterns: evidence that agent checked all call sites
+_CALLER_SEARCH_PATTERNS = re.compile(
+    r"\b(grep\s+-[rn]|rg\s+\S|find_all_references|search.*caller"
+    r"|search.*usage|search.*import|who.*call|all.*references"
+    r"|grep.*for.*usage|check.*all.*call.?site"
+    r"|ripgrep|find.*all.*import"
+    r"|\.grep\(|find_usages|search_references)",
+    re.IGNORECASE,
+)
 
 # Structured field extraction regex (mirrors declaration_extractor._STRUCTURED_FIELD_RE)
 _STRUCTURED_FIELD_RE = re.compile(
@@ -639,6 +663,118 @@ def _infer_uncertainty_honesty(phase_record) -> tuple[float, list[str], str]:
     return score, signals, explanation
 
 
+# ── p237 principals: scope_completeness + no_unnecessary_compat ──────────────
+
+def _infer_scope_completeness(phase_record) -> tuple[float, list[str], str]:
+    """scope_completeness: agent searched for all callers/references before editing.
+
+    When changing a function's signature, decorator, or behavior, all call sites
+    must be checked. Detects grep/search commands in the agent's content that
+    indicate caller analysis was performed.
+
+    Origin: django-11333 regression — changed resolvers.py but missed base.py's
+    get_resolver.cache_clear() call because no caller search was done.
+    """
+    _evidence_refs, _from_steps, content, full_text = _extract_fields(phase_record)
+    structured = _extract_structured_from_content(phase_record)
+    score = 0.0
+    signals: list[str] = []
+
+    # Check for caller/reference search evidence in content
+    search_evidence = _CALLER_SEARCH_PATTERNS.findall(full_text)
+    if search_evidence:
+        score += 0.5
+        signals.append(f"has_caller_search_{len(search_evidence)}_hits")
+    else:
+        signals.append("no_caller_search")
+
+    # Check CHANGE_SCOPE field — if multiple files listed, search is more important
+    change_scope = structured.get("change_scope", "")
+    if change_scope:
+        # Count file references in change scope
+        file_refs = re.findall(r"[\w/]+\.py", change_scope)
+        if len(file_refs) >= 2:
+            # Multi-file change: caller search is critical
+            if search_evidence:
+                score += 0.3
+                signals.append(f"multi_file_change_{len(file_refs)}_files_with_search")
+            else:
+                score -= 0.2
+                signals.append(f"multi_file_change_{len(file_refs)}_files_no_search")
+        elif file_refs:
+            score += 0.2
+            signals.append("single_file_change")
+
+    # Bonus: evidence_refs contain multiple distinct files (shows broad investigation)
+    evidence_refs = getattr(phase_record, "evidence_refs", []) or []
+    distinct_files = set()
+    for ref in evidence_refs:
+        file_match = re.match(r"([\w/]+\.\w+)", str(ref))
+        if file_match:
+            distinct_files.add(file_match.group(1))
+    if len(distinct_files) >= 3:
+        score += 0.2
+        score = min(score, 1.0)
+        signals.append(f"evidence_spans_{len(distinct_files)}_files")
+
+    if score >= 0.7:
+        explanation = "Scope completeness verified — caller/reference analysis performed"
+    else:
+        explanation = "No evidence of caller/reference search — potential missed call sites"
+
+    return score, signals, explanation
+
+
+def _infer_no_unnecessary_compat(phase_record) -> tuple[float, list[str], str]:
+    """no_unnecessary_compat: patch does NOT contain unnecessary backward-compat shims.
+
+    Backward compatibility is only justified when the issue explicitly requires it.
+    Adding .replace() fallbacks, try/except compat wrappers, or deprecation shims
+    when not asked for creates noise and can cause test failures.
+
+    Origin: django-11276 regression — agent added `.replace("&#x27;", "&#39;")`
+    backward compat that wasn't needed, causing the official eval to fail.
+
+    Scoring: INVERTED — presence of compat patterns LOWERS score.
+    High score = clean patch without unnecessary compat.
+    """
+    _evidence_refs, _from_steps, content, full_text = _extract_fields(phase_record)
+    score = 1.0  # Start high — no compat patterns = good
+    signals: list[str] = []
+
+    # Check for backward-compat patterns in content
+    compat_matches = _BACKWARD_COMPAT_PATTERNS.findall(full_text)
+    if compat_matches:
+        # Each compat pattern reduces score
+        penalty = min(0.4 * len(compat_matches), 0.8)
+        score -= penalty
+        signals.append(f"has_compat_patterns_{len(compat_matches)}")
+    else:
+        signals.append("no_compat_patterns")
+
+    # Check for explicit .replace() chains in patch content (common compat pattern)
+    replace_chains = re.findall(r"\.replace\s*\([^)]+,[^)]+\)", content)
+    if len(replace_chains) >= 2:
+        score -= 0.3
+        signals.append(f"replace_chain_{len(replace_chains)}")
+
+    # Check if content explicitly justifies backward compat (then it's intentional)
+    if re.search(r"\b(issue\s+(?:requires?|asks?|mentions?)\s+(?:backward|back).?compat"
+                 r"|maintain.*existing.*API|must.*not.*break.*caller)\b",
+                 full_text, re.IGNORECASE):
+        score += 0.3  # Justified compat — restore some score
+        signals.append("compat_justified_by_issue")
+
+    score = max(0.0, min(1.0, score))
+
+    if score >= 0.7:
+        explanation = "Clean patch without unnecessary backward-compat shims"
+    else:
+        explanation = "Patch contains backward-compat patterns — verify they are necessary"
+
+    return score, signals, explanation
+
+
 # ── Register the 5 built-in rules ─────────────────────────────────────────────
 
 register_rule(InferenceRule(
@@ -724,6 +860,22 @@ register_rule(InferenceRule(
     principal="uncertainty_honesty",
     infer=_infer_uncertainty_honesty,
     applies_to=["analysis.root_cause"],
+    threshold=0.7,
+))
+
+# ── Register the 2 p237 principals ───────────────────────────────────────────
+
+register_rule(InferenceRule(
+    principal="scope_completeness",
+    infer=_infer_scope_completeness,
+    applies_to=["execution.code_patch", "judge.verification"],
+    threshold=0.7,
+))
+
+register_rule(InferenceRule(
+    principal="no_unnecessary_compat",
+    infer=_infer_no_unnecessary_compat,
+    applies_to=["execution.code_patch"],
     threshold=0.7,
 ))
 
