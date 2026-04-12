@@ -431,6 +431,9 @@ def extract_jingu_body(traj: dict, patch_text: str, problem_statement: str = "")
                 files_written.add(fp)
 
     for msg in messages:
+        # Plan-C: skip structured_extract traj entries
+        if msg.get("extra", {}).get("type", "").startswith("structured_extract_"):
+            continue
         role = msg.get("role", "")
         extra = msg.get("extra", {})
         actions = extra.get("actions", []) if role == "assistant" else []

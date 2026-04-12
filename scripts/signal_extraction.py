@@ -153,6 +153,9 @@ def compute_steps_since_last_signal(traj_msgs: list[dict]) -> int:
     for msg in reversed(traj_msgs):
         if msg.get("role") != "assistant":
             continue
+        # Plan-C: skip structured_extract traj entries
+        if msg.get("extra", {}).get("type", "").startswith("structured_extract_"):
+            continue
         if _msg_has_signal(msg):
             break
         steps_without_signal += 1

@@ -105,6 +105,9 @@ def _try_parse_structured_output(agent_messages: list[dict]) -> dict | None:
     for msg in reversed(agent_messages):
         if msg.get("role") != "assistant":
             continue
+        # Plan-C: skip structured_extract traj entries
+        if msg.get("extra", {}).get("type", "").startswith("structured_extract_"):
+            continue
         tool_calls = msg.get("tool_calls", [])
         for tc in tool_calls:
             fn = tc.get("function", {})

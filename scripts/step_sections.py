@@ -140,6 +140,9 @@ def _step_observe(agent_self, *, step_n: int, mode: str) -> tuple[str, str, bool
     snippet = ""
     for msg in reversed(agent_self.messages):
         if msg.get("role") == "assistant":
+            # Plan-C: skip structured_extract traj entries
+            if msg.get("extra", {}).get("type", "").startswith("structured_extract_"):
+                continue
             content = msg.get("content", "")
             if isinstance(content, list):
                 for c in content:
@@ -161,6 +164,9 @@ def _step_observe(agent_self, *, step_n: int, mode: str) -> tuple[str, str, bool
     if _state_ref is not None:
         for _msg in reversed(agent_self.messages):
             if _msg.get("role") == "assistant":
+                # Plan-C: skip structured_extract traj entries
+                if _msg.get("extra", {}).get("type", "").startswith("structured_extract_"):
+                    continue
                 _tcs = _msg.get("tool_calls", [])
                 if _tcs:
                     _state_ref._observe_tool_signal = True
@@ -201,6 +207,9 @@ def _step_observe(agent_self, *, step_n: int, mode: str) -> tuple[str, str, bool
     env_error_detected = False
     for msg in reversed(agent_self.messages):
         if msg.get("role") == "assistant":
+            # Plan-C: skip structured_extract traj entries
+            if msg.get("extra", {}).get("type", "").startswith("structured_extract_"):
+                continue
             has_mut, trigger = _msg_has_env_mutation(msg)
             if has_mut:
                 env_error_detected = True
@@ -238,6 +247,9 @@ def _step_verify_if_needed(
     step_patch_non_empty = False
     for msg in reversed(agent_self.messages):
         if msg.get("role") == "assistant":
+            # Plan-C: skip structured_extract traj entries
+            if msg.get("extra", {}).get("type", "").startswith("structured_extract_"):
+                continue
             if not _msg_has_signal(msg):
                 break
             step_patch_non_empty = True
@@ -482,6 +494,38 @@ def _step_cp_update_and_verdict(
                         f"    [phase_record] structured_extract error (non-fatal): {_se_exc}",
                         flush=True,
                     )
+
+                # Plan-C: record structured_extract call in traj for observability
+                _extract_rec = getattr(_model, "_last_extract_record", None)
+                if _extract_rec is not None:
+                    try:
+                        agent_self.messages.append({
+                            "role": "user",
+                            "content": _extract_rec.extraction_prompt,
+                            "extra": {
+                                "type": "structured_extract_request",
+                                "phase": _eval_phase,
+                                "schema_name": _extract_rec.schema_name,
+                                "accumulated_text_chars": len(_accumulated) if _accumulated else 0,
+                                "phase_hint": _extract_rec.phase_hint or "",
+                                "timestamp": _extract_rec.timestamp_request,
+                            },
+                        })
+                        agent_self.messages.append({
+                            "role": "assistant",
+                            "content": _extract_rec.response_raw or "",
+                            "extra": {
+                                "type": "structured_extract_response",
+                                "phase": _eval_phase,
+                                "success": _extract_rec.success,
+                                "fields": list((_extract_rec.response_parsed or {}).keys()),
+                                "cost": _extract_rec.cost,
+                                "error": _extract_rec.error,
+                                "timestamp": _extract_rec.timestamp_response,
+                            },
+                        })
+                    except Exception as _traj_exc:
+                        print(f"    [Plan-C] traj recording error (non-fatal): {_traj_exc}", flush=True)
 
                 if _structured_parsed is not None:
                     _pr = build_phase_record_from_structured(

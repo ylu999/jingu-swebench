@@ -83,6 +83,9 @@ def extract_last_agent_message(messages: list[dict]) -> str:
     for m in reversed(messages):
         if m.get("role") != "assistant":
             continue
+        # Plan-C: skip structured_extract traj entries
+        if m.get("extra", {}).get("type", "").startswith("structured_extract_"):
+            continue
         content = m.get("content", "")
         if isinstance(content, str):
             return content

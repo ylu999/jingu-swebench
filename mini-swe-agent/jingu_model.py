@@ -23,6 +23,8 @@ Usage:
 
 import json
 import logging
+import time
+from dataclasses import dataclass, field
 from typing import Any
 
 import litellm
@@ -33,8 +35,36 @@ from minisweagent.models.utils.retry import retry
 logger = logging.getLogger("jingu_model")
 
 
+@dataclass
+class ExtractRecord:
+    """Records a structured_extract call for traj observability (Plan-C)."""
+    phase: str
+    extraction_prompt: str
+    schema: dict
+    schema_name: str
+    phase_hint: str
+    response_raw: str | None = None
+    response_parsed: dict | None = None
+    response_dump: dict | None = None
+    success: bool = False
+    error: str | None = None
+    cost: float = 0.0
+    timestamp_request: float = 0.0
+    timestamp_response: float = 0.0
+
+
+def is_extraction_message(msg: dict) -> bool:
+    """Check if a traj message is a structured_extract entry (Plan-C)."""
+    return (msg.get("extra", {}).get("type", "")
+            .startswith("structured_extract_"))
+
+
 class JinguModel(LitellmModel):
     """LitellmModel with structured phase extraction capability."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._last_extract_record: ExtractRecord | None = None
 
     def structured_extract(
         self,
@@ -60,6 +90,8 @@ class JinguModel(LitellmModel):
         Returns:
             Parsed dict matching schema, or None on failure.
         """
+        self._last_extract_record = None
+
         if not accumulated_text or not accumulated_text.strip():
             logger.warning("structured_extract: empty accumulated_text for phase=%s", phase)
             return None
@@ -86,6 +118,7 @@ class JinguModel(LitellmModel):
             f"Every field must be grounded in the text above — do not invent information."
         )
 
+        _schema_name = f"{phase.lower()}_extraction"
         messages = [
             {"role": "user", "content": extraction_prompt},
         ]
@@ -95,11 +128,12 @@ class JinguModel(LitellmModel):
         response_format = {
             "type": "json_schema",
             "json_schema": {
-                "name": f"{phase.lower()}_extraction",
+                "name": _schema_name,
                 "schema": schema,
             },
         }
 
+        _ts_request = time.time()
         try:
             for attempt in retry(logger=logger, abort_exceptions=self.abort_exceptions):
                 with attempt:
@@ -111,12 +145,26 @@ class JinguModel(LitellmModel):
                         temperature=0,
                         # Don't pass tools — this is a pure JSON extraction call
                     )
+            _ts_response = time.time()
 
             # Extract JSON from response
             content = response.choices[0].message.content
             if not content:
                 logger.warning("structured_extract: empty response content for phase=%s", phase)
+                self._last_extract_record = ExtractRecord(
+                    phase=phase, extraction_prompt=extraction_prompt,
+                    schema=schema, schema_name=_schema_name, phase_hint=phase_hint,
+                    response_raw=None, success=False, error="empty_response_content",
+                    timestamp_request=_ts_request, timestamp_response=_ts_response,
+                )
                 return None
+
+            # Compute cost
+            _cost = 0.0
+            try:
+                _cost = litellm.completion_cost(completion_response=response)
+            except Exception:
+                pass
 
             parsed = json.loads(content)
             logger.info(
@@ -124,8 +172,29 @@ class JinguModel(LitellmModel):
                 phase,
                 list(parsed.keys()),
             )
+
+            # Plan-C: record successful extraction
+            _resp_dump = None
+            try:
+                _resp_dump = response.model_dump()
+            except Exception:
+                pass
+            self._last_extract_record = ExtractRecord(
+                phase=phase, extraction_prompt=extraction_prompt,
+                schema=schema, schema_name=_schema_name, phase_hint=phase_hint,
+                response_raw=content, response_parsed=parsed,
+                response_dump=_resp_dump, success=True, cost=_cost,
+                timestamp_request=_ts_request, timestamp_response=_ts_response,
+            )
             return parsed
 
         except Exception as e:
+            _ts_response = time.time()
             logger.error("structured_extract failed for phase=%s: %s", phase, e)
+            self._last_extract_record = ExtractRecord(
+                phase=phase, extraction_prompt=extraction_prompt,
+                schema=schema, schema_name=_schema_name, phase_hint=phase_hint,
+                response_raw=None, success=False, error=str(e),
+                timestamp_request=_ts_request, timestamp_response=_ts_response,
+            )
             return None
