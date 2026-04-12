@@ -662,8 +662,38 @@ class JinguAgent:
             _analysis_req = _get_req("ANALYZE")
             _decision_req = _get_req("DECIDE")
             _execute_req  = _get_req("EXECUTE")
+            # Activation proof (RT4)
+            _bundle_activation_proof = {
+                "bundle_loaded": True,
+                "bundle_version": _report.bundle_version,
+                "compiler_version": _report.compiler_version,
+                "phases_compiled": _report.phases_compiled,
+                "contracts_compiled": _report.contracts_compiled,
+                "principals_total": _report.principals_total,
+                "activation_ok": _report.activation_ok,
+            }
+            print(
+                f"    [BUNDLE_ACTIVATED] version={_report.bundle_version} "
+                f"phases={_report.phases_compiled} contracts={_report.contracts_compiled} "
+                f"principals={_report.principals_total} ok={_report.activation_ok}",
+                flush=True,
+            )
         except Exception as _onb_exc:
-            print(f"    [jingu_onboard] prompt load error (fallback): {_onb_exc}", flush=True)
+            import traceback as _tb
+            _bundle_error_msg = str(_onb_exc)
+            _bundle_error_trace = "".join(
+                _tb.format_exception(type(_onb_exc), _onb_exc, _onb_exc.__traceback__)
+            )
+            print(
+                f"    [BUNDLE_LOAD_FAILURE] compile_bundle() failed: {_bundle_error_msg}\n"
+                f"    {_bundle_error_trace}",
+                flush=True,
+            )
+            _bundle_activation_proof = {
+                "bundle_loaded": False,
+                "error": _bundle_error_msg,
+                "fallback_active": True,
+            }
 
         # If bundle provides compiled phase prompts, use them directly
         if _phase_prompt_parts:
@@ -916,7 +946,7 @@ class JinguAgent:
             return
 
         t_cv0 = time.monotonic()
-        cv_result = run_controlled_verify(submitted, self._instance, cid, timeout_s=60)
+        cv_result = run_controlled_verify(submitted, self._instance, cid, timeout_s=None)
         cv_result["elapsed_ms"] = round((time.monotonic() - t_cv0) * 1000, 1)
         # Store as last verify_history entry (step=-1 means end-of-attempt)
         _monitor.record_verify(-1, cv_result)

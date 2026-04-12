@@ -52,61 +52,8 @@ COPY jingu-trust-gate/dist /app/jingu-trust-gate/dist
 COPY jingu-trust-gate/package.json /app/jingu-trust-gate/package.json
 COPY jingu-trust-gate/node_modules /app/jingu-trust-gate/node_modules
 
-# Copy scripts
-COPY scripts/run_with_jingu_gate.py \
-     scripts/jingu_gate_bridge.py \
-     scripts/retry_controller.py \
-     scripts/strategy_logger.py \
-     scripts/aggregate_strategies.py \
-     scripts/preflight.py \
-     scripts/patch_reviewer.py \
-     scripts/patch_signals.py \
-     scripts/declaration_extractor.py \
-     scripts/cognition_check.py \
-     scripts/cognition_schema.py \
-     scripts/gate_runner.js \
-     scripts/patch_admission_policy.js \
-     scripts/subtype_contracts.py \
-     scripts/phase_prompt.py \
-     scripts/principal_gate.py \
-     scripts/principal_inference.py \
-     scripts/phase_record.py \
-     scripts/in_loop_judge.py \
-     scripts/verification_evidence.py \
-     scripts/governance_pack.py \
-     scripts/governance_runtime.py \
-     scripts/swebench_failure_reroute_pack.py \
-     scripts/unresolved_case_classifier.py \
-     scripts/phase_record_pack.py \
-     scripts/failure_classifier.py \
-     scripts/repair_prompts.py \
-     scripts/analysis_gate.py \
-     scripts/gate_rejection.py \
-     scripts/failure_routing.py \
-     scripts/extract_failure_events.py \
-     scripts/compute_routing_stats.py \
-     scripts/suggest_routing.py \
-     scripts/strategy_prompts.py \
-     scripts/check_onboarding.py \
-     scripts/phase_validator.py \
-     scripts/phase_schemas.py \
-     scripts/cognition_prompts.py \
-     scripts/jingu_onboard.py \
-     scripts/step_monitor_state.py \
-     scripts/signal_extraction.py \
-     scripts/controlled_verify.py \
-     scripts/jingu_adapter.py \
-     scripts/jingu_agent.py \
-     scripts/step_sections.py \
-     scripts/step_event_emitter.py \
-     scripts/decision_logger.py \
-     scripts/checkpoint.py \
-     scripts/replay_engine.py \
-     scripts/replay_cli.py \
-     scripts/replay_traj.py \
-     scripts/traj_diff.py \
-     scripts/prompt_regression.py \
-     /app/scripts/
+# Copy all scripts (*.py + *.js) — no flat listing, new scripts auto-included
+COPY scripts/*.py scripts/*.js /app/scripts/
 # B1-CP: reasoning control plane Python module
 COPY scripts/control/ /app/scripts/control/
 # p222: cognition contracts (single source of truth for phase/subtype definitions)
@@ -139,6 +86,7 @@ RUN chmod +x /app/docker-entrypoint.sh
 
 ENV JINGU_TRUST_GATE_DIST=/app/jingu-trust-gate/dist/src
 ENV JINGU_SWEBENCH_SCRIPTS=/app/scripts
-ENV PYTHONPATH=/app/scripts
+ENV PYTHONPATH=/app/scripts:/app/python
+ENV JINGU_BUNDLE_PATH=/app/bundle.json
 
 ENTRYPOINT ["/app/docker-entrypoint.sh"]

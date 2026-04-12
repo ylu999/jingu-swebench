@@ -85,10 +85,22 @@ def _build_test_command(instance: dict, verify_scope: str = "module") -> tuple:
 
         all_labels = f2p_labels + sentinel_labels
 
-        # Guard: if too many classes (>20), targeted is not meaningfully narrower — fall back
-        if all_labels and len(all_labels) <= 20:
+        # Always use targeted scope when labels are available.
+        # No arbitrary class limit — timeout scales with class count instead.
+        if all_labels:
+            if len(all_labels) > 100:
+                print(
+                    f"    [controlled_verify] WARNING: targeted scope has {len(all_labels)} classes"
+                    f" — timeout will scale accordingly",
+                    flush=True,
+                )
             labels_str = " ".join(all_labels)
-            _actual = f"targeted(f2p={len(f2p_labels)},sentinel={len(sentinel_labels)})"
+            _actual = f"targeted(f2p={len(f2p_labels)},sentinel={len(sentinel_labels)},total={len(all_labels)})"
+            print(
+                f"    [controlled_verify] scope={_actual} classes={len(all_labels)}"
+                f" f2p={len(f2p_labels)} sentinel={len(sentinel_labels)}",
+                flush=True,
+            )
             return (
                 "source /opt/miniconda3/bin/activate && "
                 "conda activate testbed && "
@@ -96,7 +108,7 @@ def _build_test_command(instance: dict, verify_scope: str = "module") -> tuple:
                 f"{test_cmd} {labels_str} 2>&1"
             ), _actual
         # else: fall through to module-level with explanation
-        _fallback_reason = "no_labels" if not all_labels else f"too_many({len(all_labels)})"
+        _fallback_reason = "no_labels"
         _actual = f"module(fallback:{_fallback_reason})"
     else:
         _actual = "module"
@@ -340,7 +352,7 @@ def run_controlled_verify(
     patch_text: str,
     instance: dict,
     container_id: str,
-    timeout_s: int = 60,
+    timeout_s: int | None = None,
     apply_test_patch: bool = True,
     verify_scope: str = "targeted+sentinel",
 ) -> dict:
@@ -509,6 +521,19 @@ def run_controlled_verify(
 
         # Step 4: run tests using targeted or module scope
         test_cmd, _actual_scope = _build_test_command(instance, verify_scope=verify_scope)
+
+        # Dynamic timeout: auto-scale based on scope when timeout_s is None
+        if timeout_s is None:
+            if "targeted" in _actual_scope:
+                # Count classes from scope string: targeted(f2p=N,sentinel=M,total=T)
+                import re as _re_to
+                _m_total = _re_to.search(r'total=(\d+)', _actual_scope)
+                _n_classes = int(_m_total.group(1)) if _m_total else 10
+                # base 30s + 1.5s per class, cap 300s
+                timeout_s = min(300, 30 + int(_n_classes * 1.5))
+            else:
+                # module-level fallback: generous timeout
+                timeout_s = 120
         print(f"    [verify] scope={_actual_scope}  timeout={timeout_s}s", flush=True)
 
         test_result = _sp.run(

@@ -236,7 +236,7 @@ def _step_verify_if_needed(
             def _run_verify(patch=current_patch, container=cid, step=step_n):
                 try:
                     cv_result = run_controlled_verify(
-                        patch, state.instance, container, timeout_s=45,
+                        patch, state.instance, container, timeout_s=None,
                         apply_test_patch=False,
                     )
                     state.record_verify(step, cv_result)
