@@ -58,6 +58,21 @@ from minisweagent.run.benchmarks.swebench import (
 from minisweagent.run.benchmarks.utils.batch_progress import RunBatchProgressManager
 from minisweagent.utils.log import logger
 
+
+def _parse_fail_to_pass(instance: dict) -> list[str]:
+    """Parse FAIL_TO_PASS from instance dict, handling both list and JSON-string formats."""
+    raw = instance.get("FAIL_TO_PASS", [])
+    if isinstance(raw, list):
+        return raw
+    if isinstance(raw, str):
+        try:
+            parsed = json.loads(raw)
+            if isinstance(parsed, list):
+                return parsed
+        except (json.JSONDecodeError, TypeError):
+            pass
+    return []
+
 # Type alias for agent classes that are compatible with process_instance flow.
 # Must accept (model, env, *, progress_manager, instance_id, **agent_config).
 AgentClass = type
@@ -739,7 +754,7 @@ class JinguAgent:
                 "  - PRINCIPALS must include ALL required for your type, none of the forbidden"
             )
 
-        fail_to_pass = self._instance.get("FAIL_TO_PASS", [])
+        fail_to_pass = _parse_fail_to_pass(self._instance)
         if fail_to_pass:
             tests_str = "\n".join(f"  - {t}" for t in fail_to_pass[:10])
             extra_parts.append(
@@ -783,7 +798,7 @@ class JinguAgent:
                 "mode": self._mode,
                 "sections": _snap_sections,
                 "has_retry_hint": bool(previous_failure),
-                "fail_to_pass_count": len(self._instance.get("FAIL_TO_PASS", [])),
+                "fail_to_pass_count": len(_parse_fail_to_pass(self._instance)),
                 "total_chars": _snap_total_chars,
             }
 
@@ -1714,9 +1729,7 @@ class JinguAgent:
                                   f"Possible wrong direction.")
                     # B3: retry-controller
                     if attempt < self._max_attempts:
-                        fail_to_pass = self._instance.get("FAIL_TO_PASS", [])
-                        if not isinstance(fail_to_pass, list):
-                            fail_to_pass = []
+                        fail_to_pass = _parse_fail_to_pass(self._instance)
                         exec_feedback = build_execution_feedback(
                             jingu_body=jingu_body or {},
                             fail_to_pass_tests=fail_to_pass,
