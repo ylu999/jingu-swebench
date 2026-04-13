@@ -204,7 +204,7 @@ def select_targeted_tests(instance, changed_files):
 # ── Sentinel test selection (P2P regression detection) ───────────────────────
 
 _SENTINEL_MAX = 3
-_SENTINEL_TIMEOUT_S = 15
+_SENTINEL_TIMEOUT_S = 30
 
 
 def select_sentinel_tests(instance, changed_files):
@@ -831,6 +831,9 @@ def run_quick_judge(patch, instance, container_id, changed_files,
         if target_status == "passed":
             try:
                 sentinel_ids = select_sentinel_tests(instance, changed_files)
+                print(f"    [quick-judge] sentinel selected={len(sentinel_ids)}"
+                      f"{' ids=' + ','.join(sentinel_ids[:3]) if sentinel_ids else ''}",
+                      flush=True)
                 if sentinel_ids:
                     sentinel_cmd, _ = _build_quick_test_command(
                         instance, sentinel_ids
@@ -855,9 +858,12 @@ def run_quick_judge(patch, instance, container_id, changed_files,
                     if sentinel_failed_count > 0:
                         regression_detected = True
                         regression_names = s_failing[:3]
-            except Exception:
+                    print(f"    [quick-judge] sentinel executed={sentinel_run} "
+                          f"passed={sentinel_passed_count} failed={sentinel_failed_count} "
+                          f"regression={regression_detected}", flush=True)
+            except Exception as _sentinel_exc:
                 # Sentinel failure must not crash quick judge
-                pass
+                print(f"    [quick-judge] sentinel ERROR: {_sentinel_exc}", flush=True)
 
         elapsed_ms = round((time.monotonic() - t0) * 1000, 1)
 

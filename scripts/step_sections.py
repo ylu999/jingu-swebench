@@ -322,7 +322,7 @@ def _step_verify_if_needed(
                         step=_canonical_step,
                     )
 
-                    # Record in telemetry (target-aware fields)
+                    # Record in telemetry (target-aware + sentinel fields)
                     state.record_quick_judge(_canonical_step, {
                         "step": _canonical_step,
                         "tier": "quick",
@@ -343,6 +343,15 @@ def _step_verify_if_needed(
                         "invoked": True,
                         "acknowledged": None,
                         "effective": None,
+                        "sentinel_tests_run": qj_result.sentinel_tests_run,
+                        "sentinel_tests_passed": qj_result.sentinel_tests_passed,
+                        "sentinel_tests_failed": qj_result.sentinel_tests_failed,
+                        "regression_detected": qj_result.regression_detected,
+                        "regression_test_names": qj_result.regression_test_names,
+                        "f2p_targeted": qj_result.f2p_targeted,
+                        "f2p_passed": qj_result.f2p_passed,
+                        "f2p_failed": qj_result.f2p_failed,
+                        "f2p_coverage": qj_result.f2p_coverage,
                     })
 
                     # Format message for agent injection (consumed by jingu_agent.py)
