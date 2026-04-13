@@ -120,14 +120,25 @@ class TestPromptGuidanceToolAlignment:
             "Agent may write natural language instead of calling the tool."
         )
 
-    def test_prompt_guidance_mentions_key_fields(self):
-        """PROMPT_GUIDANCE should mention the key gate-checked fields."""
+    def test_prompt_guidance_no_hardcoded_field_descriptions(self):
+        """PROMPT_GUIDANCE should NOT contain hardcoded field descriptions.
+
+        Field descriptions are rendered at runtime from schema by
+        schema_field_guidance.render_schema_field_guidance(). PROMPT_GUIDANCE
+        should only contain behavioral guidance (goals, rules, constraints).
+        """
         from cognition_contracts.analysis_root_cause import PROMPT_GUIDANCE
-        key_fields = ["root_cause", "causal_chain", "evidence_refs"]
-        for field in key_fields:
-            assert field in PROMPT_GUIDANCE, (
-                f"PROMPT_GUIDANCE doesn't mention '{field}'. "
-                f"Agent won't know this field is gate-checked."
+        # These patterns indicate a hardcoded field description copy
+        hardcoded_patterns = [
+            "root_cause: specific file:line",
+            "causal_chain: test failure",
+            "evidence_refs: list of file:line",
+        ]
+        for pattern in hardcoded_patterns:
+            assert pattern not in PROMPT_GUIDANCE, (
+                f"PROMPT_GUIDANCE contains hardcoded field description: '{pattern}'. "
+                f"Field descriptions should come from schema via "
+                f"schema_field_guidance.render_schema_field_guidance()."
             )
 
     def test_no_conflicting_natural_language_format(self):
@@ -137,7 +148,6 @@ class TestPromptGuidanceToolAlignment:
         a root_cause JSON field, the agent gets contradictory instructions.
         """
         from cognition_contracts.analysis_root_cause import PROMPT_GUIDANCE
-        # Check for the old natural-language section format
         conflicting_patterns = [
             r"ROOT_CAUSE:\n",
             r"CAUSAL_CHAIN:\n",
@@ -151,6 +161,35 @@ class TestPromptGuidanceToolAlignment:
                 f"instruction: '{pattern}'. This conflicts with the tool-call "
                 f"JSON field format."
             )
+
+    def test_schema_renderer_produces_field_guidance(self):
+        """render_schema_field_guidance() must produce field guidance from bundle schema."""
+        from schema_field_guidance import render_schema_field_guidance
+        contract = _load_bundle_analyze()
+        schema = contract["schema"]
+        guidance = render_schema_field_guidance(schema, phase="ANALYZE")
+        assert "root_cause" in guidance
+        assert "causal_chain" in guidance
+        assert "evidence_refs" in guidance
+        assert "required" in guidance
+
+    def test_tool_description_uses_renderer_not_hardcode(self):
+        """jingu_model._build_phase_record_tool must use the renderer."""
+        # Verify by importing and checking the function source
+        import inspect
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "mini-swe-agent"))
+        from jingu_model import _build_phase_record_tool
+        source = inspect.getsource(_build_phase_record_tool)
+        assert "render_schema_field_guidance" in source, (
+            "_build_phase_record_tool does not call render_schema_field_guidance. "
+            "It may still use hardcoded field guidance."
+        )
+        assert "For ANALYZE:" not in source, (
+            "_build_phase_record_tool still contains hardcoded 'For ANALYZE:' text."
+        )
+        assert "For EXECUTE:" not in source, (
+            "_build_phase_record_tool still contains hardcoded 'For EXECUTE:' text."
+        )
 
 
 class TestFieldNamingConsistency:

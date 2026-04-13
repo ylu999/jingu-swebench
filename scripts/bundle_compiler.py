@@ -692,6 +692,50 @@ def _compile_prompts(resolved: ResolvedBundle) -> list[CompilationWarning]:
 
 
 # ---------------------------------------------------------------------------
+# S5b — SCHEMA DESCRIPTION COMPLETENESS
+# ---------------------------------------------------------------------------
+
+def _check_schema_descriptions(resolved: "ResolvedBundle") -> "list[CompilationWarning]":
+    """S5b: Verify every schema property has a non-empty description.
+
+    Schema descriptions are the SST for field semantics — they drive both the
+    tool description (jingu_model.py) and step guidance (phase_prompt.py) via
+    schema_field_guidance.render_schema_field_guidance(). Missing descriptions
+    mean the agent gets no guidance for that field.
+
+    Currently warnings only. Upgrade to errors once all schemas are complete.
+    """
+    warnings: list[CompilationWarning] = []
+
+    try:
+        from schema_field_guidance import validate_schema_descriptions
+    except ImportError:
+        warnings.append(CompilationWarning(
+            stage="S5b",
+            code="SCHEMA_DESC_CHECK_UNAVAILABLE",
+            message="schema_field_guidance module not available — skipping description check",
+            context={},
+        ))
+        return warnings
+
+    for subtype_key, contract in resolved.subtype_to_contract.items():
+        schema = contract.get("schema")
+        if not schema:
+            continue
+        phase = contract.get("phase", subtype_key)
+        missing = validate_schema_descriptions(schema, phase=phase)
+        for msg in missing:
+            warnings.append(CompilationWarning(
+                stage="S5b",
+                code="SCHEMA_DESCRIPTION_MISSING",
+                message=msg,
+                context={"subtype": subtype_key},
+            ))
+
+    return warnings
+
+
+# ---------------------------------------------------------------------------
 # S6 — COMPILE_VALIDATORS
 # ---------------------------------------------------------------------------
 
@@ -897,7 +941,10 @@ def _compile_bundle_uncached(path: "str | None") -> "CompiledBundle":
     # S5: Compile prompts (warnings only)
     prompt_warnings = _compile_prompts(resolved)
 
-    all_warnings = s4_warnings + prompt_warnings
+    # S5b: Schema description completeness (warnings only — upgrade to fatal later)
+    schema_desc_warnings = _check_schema_descriptions(resolved)
+
+    all_warnings = s4_warnings + prompt_warnings + schema_desc_warnings
 
     # Fail fast: any fatal error aborts compilation
     if fatal_errors:

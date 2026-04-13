@@ -175,15 +175,14 @@ PROMPT_REQUIRED_SECTIONS: list[str] = [
 PROMPT_GUIDANCE = (
     "Identify the root cause with causal evidence. Do NOT write any fix yet.\n\n"
     "Investigate the code, then call submit_phase_record with your findings.\n\n"
-    "The gate checks these fields (fill them in the tool call, not as text sections):\n"
-    "- root_cause: specific file:line location and what is wrong there\n"
-    "- causal_chain: test failure → condition → code location → why it fails\n"
-    "- evidence_refs: list of file:line references grounding your analysis\n"
-    "- alternative_hypotheses: at least 1 other hypothesis + why ruled out (recommended)\n\n"
     "Rules: root_cause must reference a specific file:line. "
     "causal_chain must connect evidence to the root cause. Do NOT propose fixes here.\n\n"
     "If any required field is missing or empty, you will be returned to ANALYZE.\n"
 )
+# NOTE: Field descriptions are NO LONGER listed here. They are rendered at
+# runtime from the bundle schema by schema_field_guidance.render_schema_field_guidance().
+# phase_prompt.build_phase_prefix() calls the renderer to inject field guidance.
+# This eliminates the second copy of field descriptions that previously drifted.
 
 
 # ── Structured output schema fields ─────────────────────────────────────────

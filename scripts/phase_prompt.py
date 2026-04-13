@@ -144,12 +144,34 @@ PHASE_GUIDANCE: dict[str, str] = {
 }
 
 
+def _get_schema_field_guidance(phase: str) -> str:
+    """Render field guidance from bundle schema (SST).
+
+    Returns rendered field list, or "" if schema unavailable (safe degradation).
+    This replaces the hardcoded field listings that previously lived in
+    analysis_root_cause.PROMPT_GUIDANCE and similar per-phase constants.
+    """
+    try:
+        from jingu_onboard import onboard
+        from schema_field_guidance import render_schema_field_guidance
+        gov = onboard()
+        schema = gov.get_constrained_schema(phase.upper())
+        if schema:
+            return render_schema_field_guidance(schema, phase=phase.upper())
+    except Exception:
+        pass
+    return ""
+
+
 def build_phase_prefix(phase: str) -> str:
     """
     Build a user-message prefix string for the given phase.
 
     Returns "[Phase: OBSERVE] Focus on gathering evidence...\n\n" if phase is known,
     or "" if phase is unknown (safe fallback — no injection).
+
+    Field guidance is rendered from the bundle schema (SST) — not hardcoded here.
+    Behavioral guidance (goals, rules, constraints) comes from PHASE_GUIDANCE constants.
 
     Args:
         phase: phase string (e.g. "OBSERVE", "EXECUTE"). String, not enum.
@@ -158,4 +180,10 @@ def build_phase_prefix(phase: str) -> str:
     guidance = PHASE_GUIDANCE.get(phase, "")
     if not guidance:
         return ""
+
+    # Append schema-derived field guidance for phases with structured submission
+    schema_guidance = _get_schema_field_guidance(phase)
+    if schema_guidance:
+        guidance = f"{guidance}\n\n{schema_guidance}\n\nWhen ready, call submit_phase_record with these fields."
+
     return f"[Phase: {phase}] {guidance}\n\n"

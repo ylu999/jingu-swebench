@@ -56,33 +56,37 @@ def _build_phase_record_tool(phase: str, schema: dict[str, Any]) -> dict:
 
     The tool's parameters ARE the phase schema — the agent fills in the
     structured fields directly as tool call arguments.
+
+    Field guidance is rendered from schema property descriptions (SST).
+    No hardcoded field names here — if a field is renamed in the schema,
+    the tool description updates automatically.
     """
-    # Build phase-specific description with field guidance
-    field_guidance = ""
-    if phase == "ANALYZE":
-        field_guidance = (
-            " For ANALYZE: put your identified root cause (with file:line) in 'root_cause', "
-            "put the step-by-step causal chain in 'causal_chain', "
-            "and list evidence file:line references in 'evidence_refs'. "
-            "Do NOT put analysis content in 'observations' or 'claims' — "
-            "those fields are not checked by the gate."
-        )
-    elif phase == "EXECUTE":
-        field_guidance = (
-            " For EXECUTE: put your fix plan (referencing the root cause) in 'plan'."
-        )
+    base_description = (
+        f"Submit your structured phase record for the {phase} phase. "
+        f"You MUST call this tool when you have completed your work in "
+        f"the current phase. This is the ONLY way to complete a phase "
+        f"and proceed to the next one. Fill in ALL required fields "
+        f"based on your reasoning above."
+    )
+
+    # Render field guidance from schema descriptions (single source of truth)
+    try:
+        from schema_field_guidance import render_schema_field_guidance
+        guidance = render_schema_field_guidance(schema, phase=phase)
+        if guidance:
+            description = f"{base_description}\n\n{guidance}"
+        else:
+            description = base_description
+    except Exception:
+        # Safe degradation: tool still works, just without field guidance
+        logger.warning("render_schema_field_guidance unavailable for phase=%s", phase)
+        description = base_description
 
     return {
         "type": "function",
         "function": {
             "name": "submit_phase_record",
-            "description": (
-                f"Submit your structured phase record for the {phase} phase. "
-                f"You MUST call this tool when you have completed your work in "
-                f"the current phase. This is the ONLY way to complete a phase "
-                f"and proceed to the next one. Fill in ALL required fields "
-                f"based on your reasoning above.{field_guidance}"
-            ),
+            "description": description,
             "parameters": schema,
         },
     }
