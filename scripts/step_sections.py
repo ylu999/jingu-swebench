@@ -236,6 +236,7 @@ def _step_verify_if_needed(
     *,
     state: "StepMonitorState",
     verify_debounce_s: float,
+    cp_state_holder: list | None = None,
 ) -> bool:
     """
     Section 2: patch signal detection + conditional quick judge dispatch.
@@ -272,7 +273,11 @@ def _step_verify_if_needed(
 
             # E1: Quick Judge — synchronous targeted test signal
             patch_hash = _hl.md5(current_patch.encode()).hexdigest()[:16]
-            if state.should_trigger_quick_judge(patch_hash):
+            # Pass real phase from cp_state_holder (state.cp_state may be stale)
+            _real_phase = None
+            if cp_state_holder:
+                _real_phase = getattr(cp_state_holder[0], 'phase', None)
+            if state.should_trigger_quick_judge(patch_hash, current_phase=_real_phase):
                 try:
                     from quick_judge import run_quick_judge, format_agent_message, QuickJudgeResult
 

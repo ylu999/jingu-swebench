@@ -386,7 +386,8 @@ class JinguAgent:
 
         # Section 2: verify + quick judge
         patch_non_empty = _step_verify_if_needed(
-            agent_self, state=self._state, verify_debounce_s=5.0
+            agent_self, state=self._state, verify_debounce_s=5.0,
+            cp_state_holder=cp_holder,
         )
 
         # E1: inject quick judge message if pending (system-originated signal)

@@ -342,7 +342,7 @@ class StepMonitorState:
                 flush=True,
             )
 
-    def should_trigger_quick_judge(self, current_patch_hash: str) -> bool:
+    def should_trigger_quick_judge(self, current_patch_hash: str, *, current_phase: str | None = None) -> bool:
         """Check all trigger conditions for quick judge.
 
         Returns True only when ALL conditions are met:
@@ -352,9 +352,14 @@ class StepMonitorState:
         C4: At least 15s since last quick judge
         C5: Attempt not in terminal path
         C6: Quota not exhausted (max 3 per attempt)
+
+        Args:
+            current_patch_hash: MD5 hash of the current patch.
+            current_phase: Override phase from cp_state_holder (state.cp_state
+                may be stale when cp_state_holder is used by jingu_agent).
         """
         # C1: EXECUTE phase only
-        phase = getattr(self.cp_state, 'phase', None)
+        phase = current_phase or getattr(self.cp_state, 'phase', None)
         if phase != "EXECUTE":
             return False
         # C2: Patch changed

@@ -421,6 +421,17 @@ class TestShouldTriggerQuickJudge:
         state = _make_state(quick_judge_count=5)
         assert state.should_trigger_quick_judge("new_hash") is False
 
+    def test_current_phase_override_takes_precedence(self):
+        """current_phase kwarg overrides stale cp_state.phase (production bug fix)."""
+        # cp_state says OBSERVE (stale), but current_phase says EXECUTE (real)
+        state = _make_state(phase="OBSERVE")
+        assert state.should_trigger_quick_judge("new_hash") is False  # without override
+        assert state.should_trigger_quick_judge("new_hash", current_phase="EXECUTE") is True
+
+        # cp_state says EXECUTE, but current_phase says ANALYZE (override wins)
+        state2 = _make_state(phase="EXECUTE")
+        assert state2.should_trigger_quick_judge("new_hash", current_phase="ANALYZE") is False
+
 
 # ===========================================================================
 # 5. test_detect_acknowledged
