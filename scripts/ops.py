@@ -1366,9 +1366,35 @@ def _append_pipeline_history(record: dict) -> None:
     )
 
 
+def _run_replay_gate() -> bool:
+    """Run replay gate tests (SST projection chain verification).
+
+    Returns True if all tests pass, False otherwise.
+    Must pass before any pipeline launch — catches contract drift locally.
+    """
+    import subprocess
+    print("[pipeline] STEP 0: replay gate (SST projection chain verification)", flush=True)
+    result = subprocess.run(
+        [sys.executable, "-m", "pytest", "tests/test_replay_gate.py", "-v", "--tb=short"],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        print("[pipeline] REPLAY GATE FAILED — contract drift detected", flush=True)
+        print(result.stdout[-2000:] if len(result.stdout) > 2000 else result.stdout, flush=True)
+        if result.stderr:
+            print(result.stderr[-500:], flush=True)
+        return False
+    # Show summary line
+    for line in result.stdout.splitlines():
+        if "passed" in line or "failed" in line:
+            print(f"[pipeline] replay gate: {line.strip()}", flush=True)
+    return True
+
+
 def cmd_pipeline(args) -> None:
     """
     Full automated pipeline:
+      0. Replay gate — SST projection chain verification (local, no LLM)
       1. Smoke test (1 instance) — verify new behavior present
       2. Batch run (30 instances)
       3. Eval (SWE-bench official)
@@ -1382,6 +1408,12 @@ def cmd_pipeline(args) -> None:
     model = getattr(args, "model", None)
     skip_smoke = args.skip_smoke
     eval_only = getattr(args, "eval_only", False)
+
+    # ── Step 0: Replay gate (always runs, even in eval-only mode) ──────────
+    if not _run_replay_gate():
+        print("[pipeline] ABORTED — fix contract drift before deploying", flush=True)
+        sys.exit(1)
+    print("[pipeline] replay gate PASSED\n", flush=True)
 
     timestamp = datetime.datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
     smoke_batch = f"smoke-{batch_name}"
