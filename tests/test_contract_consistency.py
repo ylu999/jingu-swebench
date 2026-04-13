@@ -74,38 +74,68 @@ class TestBundleSchemaGateAlignment:
 
 
 class TestBundlePromptSchemaAlignment:
-    """Bundle prompt must mention the same fields as the bundle schema."""
+    """Bundle prompt should NOT duplicate field descriptions (renderer owns those)."""
 
-    def test_prompt_mentions_required_schema_fields(self):
-        """Bundle prompt must mention every required schema field by name."""
+    def test_prompt_does_not_duplicate_field_descriptions(self):
+        """Bundle prompt should not contain field descriptions — renderer handles those.
+
+        The bundle prompt is for behavioral guidance (goals, rules, constraints).
+        Field descriptions come from schema via render_schema_field_guidance().
+        If the prompt also lists fields, agent sees them twice.
+        """
         contract = _load_bundle_analyze()
         prompt = contract["prompt"]
-        schema_required = contract["schema"]["required"]
-
-        # These are auto-filled or obvious, no need to mention in prompt
-        auto_fields = {"phase", "subtype"}
-
-        for field in schema_required:
-            if field in auto_fields:
-                continue
-            assert field in prompt, (
-                f"Bundle schema requires '{field}' but bundle prompt doesn't "
-                f"mention it. Agent won't know to fill it."
+        # These patterns indicate duplicated field descriptions in the prompt
+        duplication_patterns = [
+            "### Required Fields",
+            "### Optional Fields",
+            "root_cause (string):",
+            "causal_chain (string):",
+            "evidence_refs (array",
+        ]
+        for pattern in duplication_patterns:
+            assert pattern not in prompt, (
+                f"Bundle prompt contains field description '{pattern}'. "
+                f"Field descriptions should only come from schema via the renderer."
             )
 
-    def test_prompt_mentions_optional_fields(self):
-        """Bundle prompt should mention optional schema fields for quality."""
+    def test_tool_description_mentions_all_required_fields(self):
+        """Tool description (rendered from schema) must mention all required fields."""
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "mini-swe-agent"))
+        from jingu_model import _build_phase_record_tool
+
         contract = _load_bundle_analyze()
-        prompt = contract["prompt"]
-        schema_props = set(contract["schema"]["properties"].keys())
-        schema_required = set(contract["schema"]["required"])
+        schema = contract["schema"]
+        tool = _build_phase_record_tool("ANALYZE", schema)
+        desc = tool["function"]["description"]
+
+        auto_fields = {"phase", "subtype"}
+        for field in schema["required"]:
+            if field in auto_fields:
+                continue
+            assert field in desc, (
+                f"Schema requires '{field}' but tool description doesn't mention it."
+            )
+
+    def test_tool_description_mentions_optional_fields(self):
+        """Tool description must also mention optional fields."""
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "mini-swe-agent"))
+        from jingu_model import _build_phase_record_tool
+
+        contract = _load_bundle_analyze()
+        schema = contract["schema"]
+        tool = _build_phase_record_tool("ANALYZE", schema)
+        desc = tool["function"]["description"]
+
+        schema_props = set(schema["properties"].keys())
+        schema_required = set(schema["required"])
         auto_fields = {"phase", "subtype"}
 
         optional = schema_props - schema_required - auto_fields
         for field in optional:
-            assert field in prompt, (
-                f"Bundle schema has optional field '{field}' but bundle prompt "
-                f"doesn't mention it. Agent won't know it exists."
+            assert field in desc, (
+                f"Schema has optional field '{field}' but tool description "
+                f"doesn't mention it."
             )
 
 
