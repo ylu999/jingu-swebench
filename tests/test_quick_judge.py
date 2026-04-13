@@ -36,6 +36,7 @@ try:
         _parse_django_test_id,
         _parse_pytest_test_id,
         _classify_signal_kind,
+        _classify_multi_target_signal,
     )
     QUICK_JUDGE_AVAILABLE = True
 except ImportError:
@@ -357,6 +358,7 @@ class TestFormatAgentMessage:
     def test_contains_target_identity(self):
         msg = format_agent_message(self._result(target_test_id="test_foo (m.C)"))
         assert "Target: test_foo (m.C)" in msg
+        assert "PASSED" in msg  # status label included
 
     def test_contains_step(self):
         msg = format_agent_message(self._result())
@@ -524,7 +526,223 @@ class TestDetectEffective:
 
 
 # ===========================================================================
-# 10. Signal gating integration
+# 10. Multi-F2P target coverage
+# ===========================================================================
+
+@skip_quick_judge
+class TestMultiF2PCoverage:
+    """Tests for multi-F2P target resolution and partial coverage signal."""
+
+    def test_classify_multi_target_all_passed(self):
+        target_results = {
+            "test_a (m.C)": "passed",
+            "test_b (m.C)": "passed",
+            "test_c (m.C)": "passed",
+        }
+        signal, fp, ff, cov = _classify_multi_target_signal(target_results, "test_a (m.C)")
+        assert signal == "target_passed"
+        assert fp == 3
+        assert ff == 0
+        assert cov == 1.0
+
+    def test_classify_multi_target_partial(self):
+        """Primary passes but others fail → target_partial."""
+        target_results = {
+            "test_a (m.C)": "passed",
+            "test_b (m.C)": "failed",
+            "test_c (m.C)": "passed",
+        }
+        signal, fp, ff, cov = _classify_multi_target_signal(target_results, "test_a (m.C)")
+        assert signal == "target_partial"
+        assert fp == 2
+        assert ff == 1
+        assert abs(cov - 2/3) < 0.01
+
+    def test_classify_multi_target_primary_failed(self):
+        """Primary fails → target_failed regardless of others."""
+        target_results = {
+            "test_a (m.C)": "failed",
+            "test_b (m.C)": "passed",
+        }
+        signal, fp, ff, cov = _classify_multi_target_signal(target_results, "test_a (m.C)")
+        assert signal == "target_failed"
+        assert fp == 1
+        assert ff == 1
+        assert cov == 0.5
+
+    def test_classify_multi_target_primary_error(self):
+        target_results = {
+            "test_a (m.C)": "error",
+            "test_b (m.C)": "passed",
+        }
+        signal, fp, ff, cov = _classify_multi_target_signal(target_results, "test_a (m.C)")
+        assert signal == "target_error"
+
+    def test_classify_multi_target_primary_missing(self):
+        target_results = {
+            "test_a (m.C)": "missing",
+            "test_b (m.C)": "passed",
+        }
+        signal, fp, ff, cov = _classify_multi_target_signal(target_results, "test_a (m.C)")
+        assert signal == "target_missing"
+
+    def test_classify_multi_target_empty(self):
+        signal, fp, ff, cov = _classify_multi_target_signal({}, "test_a (m.C)")
+        assert signal == "non_corrective_noise"
+        assert fp == 0
+        assert ff == 0
+        assert cov == 0.0
+
+    def test_classify_single_target_passed(self):
+        """Single F2P → same as before (target_passed)."""
+        target_results = {"test_a (m.C)": "passed"}
+        signal, fp, ff, cov = _classify_multi_target_signal(target_results, "test_a (m.C)")
+        assert signal == "target_passed"
+        assert fp == 1
+        assert cov == 1.0
+
+    def test_classify_single_target_failed(self):
+        target_results = {"test_a (m.C)": "failed"}
+        signal, fp, ff, cov = _classify_multi_target_signal(target_results, "test_a (m.C)")
+        assert signal == "target_failed"
+
+    def test_result_fields_populated(self):
+        """QuickJudgeResult carries multi-F2P fields."""
+        r = QuickJudgeResult(
+            target_results={"t1": "passed", "t2": "failed", "t3": "passed"},
+            f2p_targeted=3,
+            f2p_passed=2,
+            f2p_failed=1,
+            f2p_coverage=2/3,
+        )
+        assert r.f2p_targeted == 3
+        assert r.f2p_passed == 2
+        assert r.f2p_failed == 1
+        assert abs(r.f2p_coverage - 2/3) < 0.01
+        assert len(r.target_results) == 3
+
+    def test_format_partial_message(self):
+        """target_partial produces corrective partial message."""
+        r = QuickJudgeResult(
+            step=15,
+            target_test_id="test_a (m.C)",
+            target_status="passed",
+            signal_kind="target_partial",
+            corrective=True,
+            command_scope="method",
+            target_results={
+                "test_a (m.C)": "passed",
+                "test_b (m.C)": "failed",
+                "test_c (m.C)": "passed",
+            },
+            f2p_targeted=3,
+            f2p_passed=2,
+            f2p_failed=1,
+            f2p_coverage=2/3,
+        )
+        msg = format_agent_message(r)
+        assert "PARTIAL" in msg
+        assert "2/3 F2P targets pass" in msg
+        assert "Still failing: test_b (m.C)" in msg
+        assert "misses edge cases" in msg
+
+    def test_format_all_passed_no_partial(self):
+        """All F2P pass → target_passed, not partial."""
+        r = QuickJudgeResult(
+            step=15,
+            target_test_id="test_a (m.C)",
+            target_status="passed",
+            signal_kind="target_passed",
+            corrective=True,
+            command_scope="method",
+            target_results={
+                "test_a (m.C)": "passed",
+                "test_b (m.C)": "passed",
+            },
+            f2p_targeted=2,
+            f2p_passed=2,
+            f2p_failed=0,
+            f2p_coverage=1.0,
+        )
+        msg = format_agent_message(r)
+        assert "TARGET PASSED" in msg
+        assert "PARTIAL" not in msg
+        assert "2/2 F2P targets pass" in msg
+
+    def test_format_single_target_no_coverage_suffix(self):
+        """Single F2P target → no coverage suffix."""
+        r = QuickJudgeResult(
+            step=10,
+            target_test_id="test_a (m.C)",
+            target_status="passed",
+            signal_kind="target_passed",
+            corrective=True,
+            command_scope="method",
+            f2p_targeted=1,
+            f2p_passed=1,
+            f2p_coverage=1.0,
+        )
+        msg = format_agent_message(r)
+        assert "F2P targets pass" not in msg
+
+    def test_format_partial_multiple_still_failing(self):
+        """Multiple still-failing tests shown (max 3)."""
+        r = QuickJudgeResult(
+            step=15,
+            target_test_id="test_a (m.C)",
+            target_status="passed",
+            signal_kind="target_partial",
+            corrective=True,
+            command_scope="method",
+            target_results={
+                "test_a (m.C)": "passed",
+                "test_b (m.C)": "failed",
+                "test_c (m.C)": "error",
+                "test_d (m.C)": "failed",
+                "test_e (m.C)": "failed",
+            },
+            f2p_targeted=5,
+            f2p_passed=1,
+            f2p_failed=4,
+            f2p_coverage=0.2,
+        )
+        msg = format_agent_message(r)
+        assert "PARTIAL" in msg
+        assert "1/5 F2P targets pass" in msg
+        # At most 3 still-failing lines
+        still_failing_count = msg.count("Still failing:")
+        assert still_failing_count <= 3
+
+    def test_backward_compat_target_test_id_and_status(self):
+        """target_test_id and target_status still report primary target."""
+        r = QuickJudgeResult(
+            target_test_id="test_a (m.C)",
+            target_status="passed",
+            signal_kind="target_partial",
+            target_results={
+                "test_a (m.C)": "passed",
+                "test_b (m.C)": "failed",
+            },
+            f2p_targeted=2,
+            f2p_passed=1,
+            f2p_failed=1,
+        )
+        assert r.target_test_id == "test_a (m.C)"
+        assert r.target_status == "passed"  # primary target status
+        assert r.signal_kind == "target_partial"  # but signal reflects partial
+
+    def test_corrective_true_for_partial(self):
+        """target_partial is corrective (primary passed → corrective=True)."""
+        r = QuickJudgeResult(
+            target_status="passed",
+            signal_kind="target_partial",
+            corrective=True,
+        )
+        assert r.corrective is True
+
+
+# ===========================================================================
+# 11. Signal gating integration
 # ===========================================================================
 
 @skip_quick_judge

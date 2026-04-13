@@ -58,6 +58,7 @@ TargetStatus = Literal[
 SignalKind = Literal[
     "target_passed",            # target test passed — corrective positive
     "target_failed",            # target test failed — corrective negative
+    "target_partial",           # primary target passed but other F2P tests still failing
     "target_error",             # target test errored — likely infra/syntax issue
     "target_missing",           # target test not in output — test selection or infra
     "non_corrective_noise",     # could not determine target status — no signal
@@ -86,6 +87,13 @@ class QuickJudgeResult:
     corrective: bool = False
     command_scope: CommandScope = "class"
 
+    # Multi-F2P target coverage
+    target_results: dict = field(default_factory=dict)  # test_id -> TargetStatus
+    f2p_targeted: int = 0    # how many F2P tests were targeted
+    f2p_passed: int = 0      # how many F2P tests passed
+    f2p_failed: int = 0      # how many F2P tests failed (includes error)
+    f2p_coverage: float = 0.0  # f2p_passed / f2p_targeted (0.0 if no targets)
+
     # Aggregate counts (secondary, for telemetry)
     tests_targeted: int = 0
     tests_passed: int = 0
@@ -95,6 +103,13 @@ class QuickJudgeResult:
     failing_test_names: list = field(default_factory=list)  # max 3 names
     elapsed_ms: float = 0.0
     direction: QuickJudgeDirection = "first_signal"
+
+    # P2P sentinel regression detection
+    sentinel_tests_run: int = 0
+    sentinel_tests_passed: int = 0
+    sentinel_tests_failed: int = 0
+    regression_detected: bool = False
+    regression_test_names: list = field(default_factory=list)
 
     @property
     def all_passed(self):
@@ -110,6 +125,21 @@ class QuickJudgeResult:
 def _parse_fail_to_pass(instance):
     """Parse FAIL_TO_PASS from instance dict, handling both list and JSON-string formats."""
     raw = instance.get("FAIL_TO_PASS", [])
+    if isinstance(raw, list):
+        return raw
+    if isinstance(raw, str):
+        try:
+            parsed = json.loads(raw)
+            if isinstance(parsed, list):
+                return parsed
+        except (json.JSONDecodeError, TypeError):
+            pass
+    return []
+
+
+def _parse_pass_to_pass(instance):
+    """Parse PASS_TO_PASS from instance dict, handling both list and JSON-string formats."""
+    raw = instance.get("PASS_TO_PASS", [])
     if isinstance(raw, list):
         return raw
     if isinstance(raw, str):
@@ -167,6 +197,58 @@ def select_targeted_tests(instance, changed_files):
     )
 
     selected = (matching + rest)[:5]
+    return sorted(selected)
+
+
+# ── Sentinel test selection (P2P regression detection) ───────────────────────
+
+_SENTINEL_MAX = 3
+_SENTINEL_TIMEOUT_S = 15
+
+
+def select_sentinel_tests(instance, changed_files):
+    """
+    Select up to 3 P2P sentinel tests for regression detection.
+
+    These tests SHOULD keep passing after the patch. If any fail, the patch
+    has introduced a regression.
+
+    Priority:
+      1. Tests whose module name matches a changed file name (most related)
+      2. Shortest test names first (proxy for simplest/fastest)
+
+    Returns a deterministic sorted list of P2P test IDs (max 3).
+    """
+    p2p = _parse_pass_to_pass(instance)
+    if not p2p:
+        return []
+
+    # Build set of changed basenames (without extension) for matching
+    changed_basenames = set()
+    for fpath in (changed_files or []):
+        basename = os.path.basename(fpath)
+        name_no_ext = os.path.splitext(basename)[0]
+        changed_basenames.add(name_no_ext.lower())
+
+    def _matches_changed(test_id):
+        """Check if test ID contains any changed file basename."""
+        test_lower = test_id.lower()
+        for cb in changed_basenames:
+            if cb in test_lower:
+                return True
+        return False
+
+    # Partition: matching tests first (most likely to regress), then rest
+    matching = sorted(
+        [t for t in p2p if _matches_changed(t)],
+        key=lambda t: (len(t), t),
+    )
+    rest = sorted(
+        [t for t in p2p if not _matches_changed(t)],
+        key=lambda t: (len(t), t),
+    )
+
+    selected = (matching + rest)[:_SENTINEL_MAX]
     return sorted(selected)
 
 
@@ -375,6 +457,40 @@ def _classify_signal_kind(target_status):
         return "non_corrective_noise"
 
 
+def _classify_multi_target_signal(target_results, primary_target):
+    """
+    Classify signal_kind accounting for ALL F2P targets, not just primary.
+
+    Returns (signal_kind, f2p_passed, f2p_failed, f2p_coverage).
+
+    Logic:
+      - ALL pass → target_passed
+      - Primary passes but others fail → target_partial
+      - Primary fails → target_failed / target_error / target_missing
+      - No targets → non_corrective_noise
+    """
+    if not target_results:
+        return "non_corrective_noise", 0, 0, 0.0
+
+    f2p_targeted = len(target_results)
+    f2p_passed = sum(1 for s in target_results.values() if s == "passed")
+    f2p_failed = sum(1 for s in target_results.values() if s in ("failed", "error"))
+    f2p_coverage = f2p_passed / f2p_targeted if f2p_targeted > 0 else 0.0
+
+    primary_status = target_results.get(primary_target, "unknown")
+
+    # If primary target didn't pass, classify based on primary status alone
+    if primary_status != "passed":
+        return _classify_signal_kind(primary_status), f2p_passed, f2p_failed, f2p_coverage
+
+    # Primary passed — check if ALL passed
+    if f2p_passed == f2p_targeted:
+        return "target_passed", f2p_passed, f2p_failed, f2p_coverage
+
+    # Primary passed but some others failed → partial
+    return "target_partial", f2p_passed, f2p_failed, f2p_coverage
+
+
 def _build_quick_test_command(instance, test_ids):
     """
     Build docker exec test command for targeted F2P tests.
@@ -487,12 +603,62 @@ def run_quick_judge(patch, instance, container_id, changed_files,
         if passed == 0 and failed == 0 and errored == 0:
             errored = n_targeted
 
-        elapsed_ms = round((time.monotonic() - t0) * 1000, 1)
+        # Resolve target status for ALL F2P targets
+        all_target_results = {}
+        for tid in test_ids:
+            try:
+                all_target_results[tid] = _resolve_target_status(test_results, tid)
+            except Exception:
+                all_target_results[tid] = "unknown"
 
-        # Resolve target status
-        target_status = _resolve_target_status(test_results, primary_target)
-        signal_kind = _classify_signal_kind(target_status)
+        # Primary target status (backward compatible)
+        target_status = all_target_results.get(primary_target, "unknown")
+
+        # Multi-target signal classification
+        signal_kind, f2p_passed, f2p_failed, f2p_coverage = (
+            _classify_multi_target_signal(all_target_results, primary_target)
+        )
         corrective = target_status in ("passed", "failed", "error")
+
+        # ── Sentinel regression check (only when target passes) ──────
+        sentinel_run = 0
+        sentinel_passed_count = 0
+        sentinel_failed_count = 0
+        regression_detected = False
+        regression_names = []
+
+        if target_status == "passed":
+            try:
+                sentinel_ids = select_sentinel_tests(instance, changed_files)
+                if sentinel_ids:
+                    sentinel_cmd, _ = _build_quick_test_command(
+                        instance, sentinel_ids
+                    )
+                    sentinel_proc = subprocess.run(
+                        ["docker", "exec", container_id, "bash", "-c",
+                         sentinel_cmd],
+                        capture_output=True, text=True,
+                        timeout=_SENTINEL_TIMEOUT_S,
+                    )
+                    sentinel_output = (
+                        (sentinel_proc.stdout or "")
+                        + (sentinel_proc.stderr or "")
+                    )
+                    sentinel_results, (s_passed, s_failed, s_errored,
+                                       s_failing) = (
+                        _parse_quick_test_output(sentinel_output, sentinel_ids)
+                    )
+                    sentinel_run = len(sentinel_ids)
+                    sentinel_passed_count = s_passed
+                    sentinel_failed_count = s_failed + s_errored
+                    if sentinel_failed_count > 0:
+                        regression_detected = True
+                        regression_names = s_failing[:3]
+            except Exception:
+                # Sentinel failure must not crash quick judge
+                pass
+
+        elapsed_ms = round((time.monotonic() - t0) * 1000, 1)
 
         result = QuickJudgeResult(
             step=step,
@@ -501,6 +667,11 @@ def run_quick_judge(patch, instance, container_id, changed_files,
             signal_kind=signal_kind,
             corrective=corrective,
             command_scope=scope,
+            target_results=all_target_results,
+            f2p_targeted=len(test_ids),
+            f2p_passed=f2p_passed,
+            f2p_failed=f2p_failed,
+            f2p_coverage=f2p_coverage,
             tests_targeted=n_targeted,
             tests_passed=passed,
             tests_failed=failed,
@@ -509,6 +680,11 @@ def run_quick_judge(patch, instance, container_id, changed_files,
             failing_test_names=failing_names[:3],
             elapsed_ms=elapsed_ms,
             direction="first_signal",  # placeholder, classified below
+            sentinel_tests_run=sentinel_run,
+            sentinel_tests_passed=sentinel_passed_count,
+            sentinel_tests_failed=sentinel_failed_count,
+            regression_detected=regression_detected,
+            regression_test_names=regression_names,
         )
         result.direction = classify_direction(result, previous_result)
         return result
@@ -555,8 +731,11 @@ def format_agent_message(result):
       target_status=unknown → warning (no signal)
       command_scope != method → downgrade confidence
     """
-    # Determine message based on target_status (not aggregate counts)
-    if result.target_status == "passed":
+    # Determine message based on signal_kind (accounts for multi-F2P)
+    if result.signal_kind == "target_partial":
+        header = "PARTIAL"
+        hint = "Your fix addresses the main issue but misses edge cases. Check the failing tests."
+    elif result.target_status == "passed":
         header = "TARGET PASSED"
         hint = "Target F2P test is passing. Your patch fixes the reported issue."
     elif result.target_status == "failed":
@@ -577,16 +756,32 @@ def format_agent_message(result):
     if result.command_scope != "method":
         confidence = f" (scope={result.command_scope}, lower confidence)"
 
+    # F2P coverage suffix for multi-target
+    coverage_suffix = ""
+    if result.f2p_targeted > 1:
+        coverage_suffix = f" — {result.f2p_passed}/{result.f2p_targeted} F2P targets pass"
+
     lines = [
-        f"[QUICK_CHECK step={result.step}] {header}{confidence}",
+        f"[QUICK_CHECK step={result.step}] {header}{confidence}{coverage_suffix}",
     ]
 
     # Show target test identity
     if result.target_test_id:
-        lines.append(f"Target: {result.target_test_id}")
+        status_label = result.target_status.upper() if result.target_status != "unknown" else "UNKNOWN"
+        lines.append(f"Target: {result.target_test_id} — {status_label}")
 
-    # Show failing tests only for failed/error
-    if result.target_status in ("failed", "error") and result.failing_test_names:
+    # Show still-failing F2P tests for partial coverage
+    if result.signal_kind == "target_partial" and result.target_results:
+        still_failing = [
+            tid for tid, s in result.target_results.items()
+            if s in ("failed", "error") and tid != result.target_test_id
+        ]
+        if still_failing:
+            for tid in still_failing[:3]:
+                lines.append(f"Still failing: {tid}")
+
+    # Show failing tests for failed/error (single-target case)
+    elif result.target_status in ("failed", "error") and result.failing_test_names:
         names_str = ", ".join(result.failing_test_names[:3])
         lines.append(f"Failing: {names_str}")
 
