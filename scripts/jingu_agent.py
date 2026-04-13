@@ -73,6 +73,30 @@ def _parse_fail_to_pass(instance: dict) -> list[str]:
             pass
     return []
 
+
+def _extract_approach_summary(jingu_body: dict | None, patch: str, fp: dict) -> str:
+    """Extract a short summary of the approach direction from this attempt.
+
+    Uses: files changed + root cause from phase records (if available).
+    This is a deterministic extraction — no LLM call.
+    """
+    parts = []
+    # Files changed
+    files = fp.get("files", []) if fp else []
+    if files:
+        parts.append(f"files={','.join(sorted(files))}")
+
+    # Root cause from ANALYZE phase record
+    if jingu_body:
+        phase_recs = jingu_body.get("phase_records", [])
+        analyze_rec = next((r for r in phase_recs if r.get("phase") == "ANALYZE"), None)
+        if analyze_rec and analyze_rec.get("root_cause"):
+            rc = analyze_rec["root_cause"][:100]
+            parts.append(f"root_cause={rc}")
+
+    return " | ".join(parts) if parts else ""
+
+
 # Type alias for agent classes that are compatible with process_instance flow.
 # Must accept (model, env, *, progress_manager, instance_id, **agent_config).
 AgentClass = type
@@ -1544,6 +1568,7 @@ class JinguAgent:
         _no_progress_streak = 0
         total_llm_calls = 0
         _strategy_entries: list[dict] = []
+        _past_approach_summaries: list[str] = []  # WS-4: track approach directions across attempts
         _test_counts_by_attempt: dict[int, int] = {}
         cp_state_holder: list = [initial_reasoning_state("OBSERVE")]
         self._cp_state_holder = cp_state_holder
@@ -2183,6 +2208,10 @@ class JinguAgent:
                                 pass
 
                             _prev_raw_patch = patch
+                            # WS-4: Track approach direction for exploration enforcement
+                            _approach_summary = _extract_approach_summary(jingu_body, patch, fp)
+                            if _approach_summary:
+                                _past_approach_summaries.append(_approach_summary)
                             last_failure = retry_plan.next_attempt_prompt[:600]
                             _jb_ft = (jingu_body or {}).get("failure_type")
                             _jb_routing = (jingu_body or {}).get("failure_routing")
@@ -2205,7 +2234,24 @@ class JinguAgent:
                                               f"strategy={_p216_strategy}", flush=True)
                                 except Exception as _p216_exc:
                                     print(f"    [p216-routing] error (non-fatal): {_p216_exc}", flush=True)
+                            # WS-4: Exploration enforcement — warn about repeated approaches
+                            if len(_past_approach_summaries) >= 2:
+                                _last_approach = _past_approach_summaries[-1]
+                                _repeated = sum(1 for a in _past_approach_summaries[:-1] if a == _last_approach)
+                                if _repeated > 0:
+                                    _past_str = "\n".join(f"  attempt {i+1}: {a}" for i, a in enumerate(_past_approach_summaries))
+                                    _exploration_warning = (
+                                        f"EXPLORATION ENFORCEMENT: You have tried the same approach {_repeated + 1} times.\n"
+                                        f"Past approaches:\n{_past_str}\n"
+                                        f"You MUST try a DIFFERENT approach — different files, different root cause hypothesis.\n\n"
+                                    )
+                                    last_failure = _exploration_warning + last_failure
+                                    print(f"    [ws4-exploration] REPEATED approach detected (count={_repeated + 1})")
                         else:
+                            # WS-4: Track approach direction (else branch — no retry_plan)
+                            _approach_summary = _extract_approach_summary(jingu_body, patch, fp)
+                            if _approach_summary:
+                                _past_approach_summaries.append(_approach_summary)
                             last_failure = exec_feedback[:400]
                             _jb_ft = (jingu_body or {}).get("failure_type")
                             _jb_routing = (jingu_body or {}).get("failure_routing")
@@ -2228,6 +2274,19 @@ class JinguAgent:
                                               f"strategy={_p216_strategy}", flush=True)
                                 except Exception as _p216_exc:
                                     print(f"    [p216-routing] error (non-fatal): {_p216_exc}", flush=True)
+                            # WS-4: Exploration enforcement (else branch — no retry_plan)
+                            if len(_past_approach_summaries) >= 2:
+                                _last_approach = _past_approach_summaries[-1]
+                                _repeated = sum(1 for a in _past_approach_summaries[:-1] if a == _last_approach)
+                                if _repeated > 0:
+                                    _past_str = "\n".join(f"  attempt {i+1}: {a}" for i, a in enumerate(_past_approach_summaries))
+                                    _exploration_warning = (
+                                        f"EXPLORATION ENFORCEMENT: You have tried the same approach {_repeated + 1} times.\n"
+                                        f"Past approaches:\n{_past_str}\n"
+                                        f"You MUST try a DIFFERENT approach — different files, different root cause hypothesis.\n\n"
+                                    )
+                                    last_failure = _exploration_warning + last_failure
+                                    print(f"    [ws4-exploration] REPEATED approach detected (count={_repeated + 1})")
                     else:
                         last_failure = ""
                     agent_exit = None
