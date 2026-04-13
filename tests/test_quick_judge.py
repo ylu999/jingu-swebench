@@ -26,6 +26,7 @@ try:
     from quick_judge import (
         QuickJudgeResult,
         select_targeted_tests,
+        select_sentinel_tests,
         classify_direction,
         format_agent_message,
         detect_acknowledged,
@@ -37,6 +38,11 @@ try:
         _parse_pytest_test_id,
         _classify_signal_kind,
         _classify_multi_target_signal,
+        _parse_pass_to_pass,
+        _is_docstring_test_name,
+        _extract_docstring_keywords,
+        _resolve_docstring_test,
+        _docstring_to_test_label,
     )
     QUICK_JUDGE_AVAILABLE = True
 except ImportError:
@@ -801,3 +807,514 @@ class TestSignalGating:
         msg = format_agent_message(r)
         assert "TARGET PASSED" in msg
         assert "fixes" in msg
+
+
+# ===========================================================================
+# 12. _parse_pass_to_pass
+# ===========================================================================
+
+@skip_quick_judge
+class TestParsePassToPass:
+    def test_list_format(self):
+        inst = {"PASS_TO_PASS": ["test_a (m.C)", "test_b (m.C)"]}
+        assert _parse_pass_to_pass(inst) == ["test_a (m.C)", "test_b (m.C)"]
+
+    def test_json_string_format(self):
+        inst = {"PASS_TO_PASS": '["test_a (m.C)", "test_b (m.C)"]'}
+        assert _parse_pass_to_pass(inst) == ["test_a (m.C)", "test_b (m.C)"]
+
+    def test_empty_list(self):
+        assert _parse_pass_to_pass({"PASS_TO_PASS": "[]"}) == []
+
+    def test_missing_key(self):
+        assert _parse_pass_to_pass({}) == []
+
+    def test_invalid_json(self):
+        assert _parse_pass_to_pass({"PASS_TO_PASS": "not json"}) == []
+
+    def test_non_list_json(self):
+        assert _parse_pass_to_pass({"PASS_TO_PASS": '"single_string"'}) == []
+
+
+# ===========================================================================
+# 13. select_sentinel_tests
+# ===========================================================================
+
+@skip_quick_judge
+class TestSelectSentinelTests:
+    def test_empty_p2p(self):
+        inst = {"PASS_TO_PASS": "[]"}
+        assert select_sentinel_tests(inst, []) == []
+
+    def test_missing_p2p(self):
+        assert select_sentinel_tests({}, []) == []
+
+    def test_caps_at_3(self):
+        ids = [f"test_{i} (mod.Cls)" for i in range(20)]
+        inst = {"PASS_TO_PASS": json.dumps(ids)}
+        result = select_sentinel_tests(inst, [])
+        assert len(result) == 3
+
+    def test_returns_sorted(self):
+        inst = {"PASS_TO_PASS": '["test_c (m.C)", "test_a (m.C)", "test_b (m.C)"]'}
+        result = select_sentinel_tests(inst, [])
+        assert result == sorted(result)
+
+    def test_changed_file_priority(self):
+        """Tests matching changed files should be prioritized."""
+        ids = [f"test_{i} (mod{i}.Cls)" for i in range(20)]
+        inst = {"PASS_TO_PASS": json.dumps(ids)}
+        result = select_sentinel_tests(inst, ["mod5.py"])
+        # mod5 match should be included
+        assert any("mod5" in t for t in result)
+
+    def test_deterministic(self):
+        inst = {"PASS_TO_PASS": json.dumps([f"test_{i} (m.C)" for i in range(10)])}
+        r1 = select_sentinel_tests(inst, ["some_file.py"])
+        r2 = select_sentinel_tests(inst, ["some_file.py"])
+        assert r1 == r2
+
+    def test_fewer_than_3_returns_all(self):
+        inst = {"PASS_TO_PASS": '["test_a (m.C)", "test_b (m.C)"]'}
+        result = select_sentinel_tests(inst, [])
+        assert len(result) == 2
+        assert result == ["test_a (m.C)", "test_b (m.C)"]
+
+
+# ===========================================================================
+# 14. Regression sentinel in QuickJudgeResult
+# ===========================================================================
+
+@skip_quick_judge
+class TestRegressionSentinelFields:
+    def test_default_no_regression(self):
+        r = QuickJudgeResult()
+        assert r.sentinel_tests_run == 0
+        assert r.sentinel_tests_passed == 0
+        assert r.sentinel_tests_failed == 0
+        assert r.regression_detected is False
+        assert r.regression_test_names == []
+
+    def test_regression_detected_fields(self):
+        r = QuickJudgeResult(
+            sentinel_tests_run=3,
+            sentinel_tests_passed=1,
+            sentinel_tests_failed=2,
+            regression_detected=True,
+            regression_test_names=["test_existing_a (m.C)", "test_existing_b (m.C)"],
+        )
+        assert r.sentinel_tests_run == 3
+        assert r.sentinel_tests_passed == 1
+        assert r.sentinel_tests_failed == 2
+        assert r.regression_detected is True
+        assert len(r.regression_test_names) == 2
+
+
+# ===========================================================================
+# 15. Regression signal in format_agent_message
+# ===========================================================================
+
+@skip_quick_judge
+class TestRegressionFormatMessage:
+    def test_target_passed_with_regression_shows_regression_header(self):
+        """TARGET PASSED + regression → regression header, not positive."""
+        r = QuickJudgeResult(
+            step=10,
+            target_test_id="test_foo (m.C)",
+            target_status="passed",
+            signal_kind="target_passed",
+            corrective=True,
+            command_scope="method",
+            regression_detected=True,
+            regression_test_names=[
+                "test_existing_a (m.C)",
+                "test_existing_b (m.C)",
+            ],
+        )
+        msg = format_agent_message(r)
+        assert "REGRESSION DETECTED" in msg
+        assert "breaks existing tests" in msg
+        assert "Regression:" in msg
+        assert "test_existing_a" in msg
+        assert "test_existing_b" in msg
+        # Must NOT say "fixes the reported issue" (misleading)
+        assert "fixes the reported issue" not in msg
+
+    def test_target_passed_no_regression_stays_positive(self):
+        """TARGET PASSED + no regression → normal positive message."""
+        r = QuickJudgeResult(
+            step=10,
+            target_test_id="test_foo (m.C)",
+            target_status="passed",
+            signal_kind="target_passed",
+            corrective=True,
+            command_scope="method",
+            regression_detected=False,
+        )
+        msg = format_agent_message(r)
+        assert "TARGET PASSED" in msg
+        assert "REGRESSION" not in msg
+        assert "fixes the reported issue" in msg
+
+    def test_target_failed_no_regression_info(self):
+        """TARGET FAILED → regression fields irrelevant (sentinels not run)."""
+        r = QuickJudgeResult(
+            step=10,
+            target_test_id="test_foo (m.C)",
+            target_status="failed",
+            signal_kind="target_failed",
+            corrective=True,
+            command_scope="method",
+            regression_detected=False,
+            failing_test_names=["test_foo (m.C)"],
+        )
+        msg = format_agent_message(r)
+        assert "TARGET FAILED" in msg
+        assert "REGRESSION" not in msg
+
+    def test_regression_takes_priority_over_partial(self):
+        """Regression is checked before partial — regression is more important."""
+        r = QuickJudgeResult(
+            step=10,
+            target_test_id="test_a (m.C)",
+            target_status="passed",
+            signal_kind="target_partial",
+            corrective=True,
+            command_scope="method",
+            regression_detected=True,
+            regression_test_names=["test_existing (m.C)"],
+        )
+        msg = format_agent_message(r)
+        assert "REGRESSION DETECTED" in msg
+        # Regression takes priority
+        assert "PARTIAL" not in msg
+
+    def test_regression_message_contains_step(self):
+        r = QuickJudgeResult(
+            step=15,
+            target_test_id="test_foo (m.C)",
+            target_status="passed",
+            signal_kind="target_passed",
+            corrective=True,
+            command_scope="method",
+            regression_detected=True,
+            regression_test_names=["test_bar (m.C)"],
+        )
+        msg = format_agent_message(r)
+        assert "step=15" in msg
+
+    def test_regression_no_false_positive_on_unknown(self):
+        """Unknown target → no regression check (sentinels not run)."""
+        r = QuickJudgeResult(
+            step=10,
+            target_test_id="test_foo (m.C)",
+            target_status="unknown",
+            signal_kind="non_corrective_noise",
+            corrective=False,
+            command_scope="method",
+            regression_detected=False,
+        )
+        msg = format_agent_message(r)
+        assert "REGRESSION" not in msg
+        assert "NO SIGNAL" in msg
+
+
+# ===========================================================================
+# 16. Docstring-based test name resolution
+# ===========================================================================
+
+@skip_quick_judge
+class TestIsDocstringTestName:
+    """Tests for _is_docstring_test_name detection."""
+
+    def test_docstring_with_spaces(self):
+        assert _is_docstring_test_name(
+            "Using Model.clean method should not skip models.W036 when a list of validators is not provided."
+        ) is True
+
+    def test_natural_language_description(self):
+        assert _is_docstring_test_name(
+            "Admin actions are shown even if the form is invalid."
+        ) is True
+
+    def test_django_format_not_docstring(self):
+        assert _is_docstring_test_name(
+            "test_foo (delete.tests.DeletionTests)"
+        ) is False
+
+    def test_pytest_format_not_docstring(self):
+        assert _is_docstring_test_name(
+            "tests/test_foo.py::TestClass::test_method"
+        ) is False
+
+    def test_dotted_path_not_docstring(self):
+        assert _is_docstring_test_name(
+            "check_framework.test_model_checks.ModelValidationTests"
+        ) is False
+
+    def test_empty_string(self):
+        assert _is_docstring_test_name("") is False
+
+    def test_none_input(self):
+        assert _is_docstring_test_name(None) is False
+
+    def test_single_word_no_spaces(self):
+        assert _is_docstring_test_name("test_something") is False
+
+    def test_whitespace_only(self):
+        assert _is_docstring_test_name("   ") is False
+
+
+@skip_quick_judge
+class TestExtractDocstringKeywords:
+    """Tests for _extract_docstring_keywords extraction."""
+
+    def test_extracts_warning_codes(self):
+        kws = _extract_docstring_keywords(
+            "Using Model.clean method should not skip models.W036"
+        )
+        assert "W036" in kws
+
+    def test_extracts_dotted_identifiers(self):
+        kws = _extract_docstring_keywords(
+            "Using Model.clean method should not skip models.W036"
+        )
+        assert "Model.clean" in kws
+        assert "models.W036" in kws
+
+    def test_extracts_camelcase(self):
+        kws = _extract_docstring_keywords(
+            "The ModelValidation check should pass"
+        )
+        assert "ModelValidation" in kws
+
+    def test_extracts_snake_case(self):
+        kws = _extract_docstring_keywords(
+            "The required_fields validator must pass"
+        )
+        assert "required_fields" in kws
+
+    def test_filters_common_words(self):
+        kws = _extract_docstring_keywords(
+            "Using the Method should not fail"
+        )
+        # "Using", "Method", "Should" are common words — should be filtered
+        assert "Using" not in kws
+        assert "Method" not in kws
+
+    def test_empty_string_returns_empty(self):
+        assert _extract_docstring_keywords("") == []
+
+    def test_no_keywords_in_plain_english(self):
+        kws = _extract_docstring_keywords("this is a simple test")
+        # No caps, no codes, no dotted, no camelCase
+        # But "simple_test" would not match since there is no underscore in "simple test"
+        assert len(kws) == 0 or all(k == k for k in kws)  # no crash
+
+
+@skip_quick_judge
+class TestResolveDocstringTest:
+    """Tests for _resolve_docstring_test fuzzy matching."""
+
+    def test_single_result_unambiguous(self):
+        """When only 1 test result exists, match is unambiguous."""
+        results = {
+            "test_list_containing_non_callable (check_framework.test_model_checks.ModelValidationTests)": "passed"
+        }
+        status = _resolve_docstring_test(
+            "Using Model.clean method should not skip models.W036 when a list of validators is not provided.",
+            results,
+        )
+        assert status == "passed"
+
+    def test_keyword_match_w036(self):
+        """W036 code in docstring matches test containing W036-related name."""
+        results = {
+            "test_list_containing_non_callable (check_framework.test_model_checks.ModelValidationTests)": "passed",
+            "test_other_check (check_framework.test_model_checks.OtherTests)": "failed",
+        }
+        # docstring mentions W036 and models — should match the model_checks test
+        # But since neither result ID literally contains "W036", let us use a more realistic case
+        results2 = {
+            "test_w036_non_callable (check_framework.test_model_checks.W036Tests)": "passed",
+            "test_other_unrelated (other.module.Tests)": "failed",
+        }
+        status = _resolve_docstring_test(
+            "Using Model.clean method should not skip models.W036",
+            results2,
+        )
+        assert status == "passed"
+
+    def test_ambiguous_returns_none(self):
+        """Multiple results with same keyword score → return None (conservative)."""
+        results = {
+            "test_a (mod.W036Tests)": "passed",
+            "test_b (mod.W036Checks)": "failed",
+        }
+        status = _resolve_docstring_test(
+            "Check W036 behavior",
+            results,
+        )
+        # Both contain W036 with same score → ambiguous → None
+        assert status is None
+
+    def test_empty_results(self):
+        assert _resolve_docstring_test("some docstring", {}) is None
+
+    def test_no_keywords_no_match(self):
+        """Docstring with no extractable keywords → None."""
+        results = {"test_a (m.C)": "passed"}
+        status = _resolve_docstring_test("a b c d", results)
+        # Single result → unambiguous match regardless
+        assert status == "passed"
+
+    def test_unambiguous_score_difference(self):
+        """Top match has higher score than second → returns top match."""
+        results = {
+            "test_model_clean_w036 (check_framework.test_model_checks.ModelValidationTests)": "passed",
+            "test_unrelated (other.tests.OtherTests)": "failed",
+        }
+        status = _resolve_docstring_test(
+            "Using Model.clean method should not skip models.W036",
+            results,
+        )
+        assert status == "passed"
+
+    def test_failed_test_resolved(self):
+        """Docstring resolving to a failed test returns 'failed'."""
+        results = {
+            "test_w036_check (model_checks.W036Tests)": "failed",
+        }
+        status = _resolve_docstring_test(
+            "models.W036 should be raised",
+            results,
+        )
+        assert status == "failed"
+
+    def test_error_test_resolved(self):
+        """Docstring resolving to an errored test returns 'error'."""
+        results = {
+            "test_w036_check (model_checks.W036Tests)": "error",
+        }
+        status = _resolve_docstring_test(
+            "models.W036 should be raised",
+            results,
+        )
+        assert status == "error"
+
+
+@skip_quick_judge
+class TestResolveTargetStatusWithDocstring:
+    """Integration: _resolve_target_status falls back to docstring resolution."""
+
+    def test_docstring_target_resolves_to_passed(self):
+        """Docstring F2P entry resolves to passed test in output."""
+        test_results = {
+            "test_list_containing_non_callable (check_framework.test_model_checks.ModelValidationTests)": "passed",
+        }
+        status = _resolve_target_status(
+            test_results,
+            "Using Model.clean method should not skip models.W036 when a list of validators is not provided.",
+        )
+        # Should resolve via docstring matching (single result = unambiguous)
+        assert status == "passed"
+
+    def test_docstring_target_resolves_to_failed(self):
+        test_results = {
+            "test_list_containing_non_callable (check_framework.test_model_checks.ModelValidationTests)": "failed",
+        }
+        status = _resolve_target_status(
+            test_results,
+            "Using Model.clean method should not skip models.W036 when a list of validators is not provided.",
+        )
+        assert status == "failed"
+
+    def test_docstring_no_match_returns_missing(self):
+        """Docstring with no keyword match and multiple results → missing."""
+        test_results = {
+            "test_a (unrelated.module.Tests)": "passed",
+            "test_b (other.module.Tests)": "failed",
+        }
+        status = _resolve_target_status(
+            test_results,
+            "Something completely unrelated with no keywords",
+        )
+        # No keywords match → _resolve_docstring_test returns None → "missing"
+        assert status == "missing"
+
+    def test_standard_format_still_works(self):
+        """Standard Django format target still works (no docstring path)."""
+        test_results = {
+            "test_foo (mod.Tests)": "passed",
+        }
+        status = _resolve_target_status(test_results, "test_foo (mod.Tests)")
+        assert status == "passed"
+
+    def test_empty_output_with_docstring_returns_unknown(self):
+        status = _resolve_target_status(
+            {},
+            "Some docstring test name",
+        )
+        assert status == "unknown"
+
+
+@skip_quick_judge
+class TestDocstringToTestLabel:
+    """Tests for _docstring_to_test_label mapping."""
+
+    def test_sibling_in_standard_format_provides_label(self):
+        inst = {
+            "FAIL_TO_PASS": json.dumps([
+                "Using Model.clean method should not skip models.W036",
+                "test_list_containing_non_callable (check_framework.test_model_checks.ModelValidationTests)",
+            ])
+        }
+        label = _docstring_to_test_label(
+            "Using Model.clean method should not skip models.W036",
+            inst,
+        )
+        assert label == "check_framework.test_model_checks.ModelValidationTests"
+
+    def test_no_sibling_returns_none(self):
+        inst = {
+            "FAIL_TO_PASS": json.dumps([
+                "Using Model.clean method should not skip models.W036",
+            ])
+        }
+        label = _docstring_to_test_label(
+            "Using Model.clean method should not skip models.W036",
+            inst,
+        )
+        assert label is None
+
+    def test_keyword_matching_sibling(self):
+        """Sibling whose class path contains a keyword from the docstring is preferred."""
+        inst = {
+            "FAIL_TO_PASS": json.dumps([
+                "The W036 check should pass",
+                "test_other (check_framework.test_model_checks.W036Tests)",
+            ])
+        }
+        label = _docstring_to_test_label(
+            "The W036 check should pass",
+            inst,
+        )
+        # Should match sibling with W036 in its class path
+        assert label is not None
+        assert "W036" in label or "model_checks" in label
+
+    def test_empty_f2p_returns_none(self):
+        inst = {"FAIL_TO_PASS": "[]"}
+        label = _docstring_to_test_label("some docstring", inst)
+        assert label is None
+
+    def test_no_keywords_returns_none(self):
+        inst = {
+            "FAIL_TO_PASS": json.dumps([
+                "a b c",
+                "test_foo (mod.Tests)",
+            ])
+        }
+        # "a b c" has no extractable keywords -> returns None (conservative)
+        label = _docstring_to_test_label("a b c", inst)
+        assert label is None

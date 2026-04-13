@@ -10,7 +10,8 @@ Core principle: quick judge is target-aware, not aggregate-aware.
 Components:
   - QuickJudgeResult           target-aware structured result
   - select_targeted_tests()    stable F2P subset selection (max 5)
-  - run_quick_judge()          run tests via docker exec, 30s timeout
+  - select_sentinel_tests()    P2P sentinel selection for regression detection (max 3)
+  - run_quick_judge()          run tests via docker exec, 30s timeout + sentinel
   - classify_direction()       compare consecutive results
   - format_agent_message()     gated message: only positive when target passed
   - detect_acknowledged()      L2 metric: agent responded to signal
@@ -310,6 +311,182 @@ def _parse_pytest_test_id(test_id):
     return None, None
 
 
+# ── Docstring-based test name resolution ─────────────────────────────────────
+
+def _is_docstring_test_name(test_id):
+    """Detect whether a test ID is a docstring-based description rather than a standard test ID.
+
+    A docstring-based name:
+      - Does NOT match Django format: method (class.path)
+      - Does NOT match pytest format: path::method
+      - Typically contains spaces and natural language
+
+    Returns True if the test_id appears to be a docstring description.
+    """
+    if not test_id or not isinstance(test_id, str):
+        return False
+
+    test_id = test_id.strip()
+    if not test_id:
+        return False
+
+    # Check Django format: word (dotted.path)
+    if re.match(r'^(\w+)\s+\([\w.]+\)$', test_id):
+        return False
+
+    # Check pytest format: contains ::
+    if '::' in test_id:
+        return False
+
+    # Check simple dotted path (e.g., "module.Class.method")
+    if re.match(r'^[\w.]+$', test_id) and '.' in test_id:
+        return False
+
+    # If it contains spaces, it is likely a docstring description
+    if ' ' in test_id:
+        return True
+
+    return False
+
+
+def _extract_docstring_keywords(test_id):
+    """Extract meaningful keywords from a docstring-based test name for fuzzy matching.
+
+    Extracts:
+      - Warning/error codes (e.g., W036, E001)
+      - Dotted identifiers (e.g., Model.clean, models.W036)
+      - CamelCase identifiers
+      - snake_case identifiers
+
+    Returns a list of keywords ordered by specificity (codes first, then identifiers).
+    """
+    keywords = []
+
+    # 1. Warning/error codes like W036, E001, W003
+    codes = re.findall(r'\b[A-Z]\d{3}\b', test_id)
+    keywords.extend(codes)
+
+    # 2. Dotted identifiers (e.g., Model.clean, models.W036)
+    dotted = re.findall(r'\b[\w]+\.[\w]+\b', test_id)
+    keywords.extend(dotted)
+
+    # 3. CamelCase identifiers
+    camel = re.findall(r'\b[A-Z][a-z]+[A-Z]\w*\b', test_id)
+    keywords.extend(camel)
+
+    # 4. Capitalized words that might be class names (filter common English)
+    _COMMON_WORDS = {
+        'Using', 'When', 'The', 'This', 'That', 'With', 'Should', 'Must',
+        'Can', 'Cannot', 'Does', 'Not', 'And', 'But', 'For', 'Are', 'Is',
+        'If', 'Or', 'An', 'In', 'On', 'At', 'To', 'Of', 'By', 'As',
+        'It', 'Be', 'Do', 'Has', 'Had', 'Have', 'Was', 'Were', 'Will',
+        'May', 'Might', 'Could', 'Would', 'After', 'Before', 'From',
+        'FAIL', 'PASS', 'ERROR', 'OK', 'Test', 'Tests', 'No', 'All',
+        'Any', 'Each', 'Every', 'Some', 'Only', 'Both', 'Also',
+        'Method', 'Check', 'Field', 'List', 'Set', 'Type',
+    }
+    caps = re.findall(r'\b[A-Z][a-z]+\b', test_id)
+    for w in caps:
+        if w not in _COMMON_WORDS and w not in keywords:
+            keywords.append(w)
+
+    # 5. snake_case identifiers (look like code)
+    snake = re.findall(r'\b[a-z]+_[a-z_]+\b', test_id)
+    for s in snake:
+        if s not in keywords:
+            keywords.append(s)
+
+    return keywords
+
+
+def _resolve_docstring_test(test_id, test_results):
+    """Try to resolve a docstring-based test name against parsed test results.
+
+    Strategies (in order):
+      1. If only 1 test result exists -> unambiguous match
+      2. Keyword matching: extract codes/identifiers from docstring,
+         match against test result IDs
+      3. If exactly 1 match found -> return it; if ambiguous -> return None
+
+    Returns the matched status ("passed"/"failed"/"error") or None if no match.
+    """
+    if not test_results:
+        return None
+
+    # Strategy 1: unambiguous single result
+    if len(test_results) == 1:
+        return list(test_results.values())[0]
+
+    # Strategy 2: keyword matching
+    keywords = _extract_docstring_keywords(test_id)
+    if not keywords:
+        return None
+
+    # Score each test result by how many keywords match
+    scored = []
+    for result_id, status in test_results.items():
+        result_lower = result_id.lower()
+        score = 0
+        for kw in keywords:
+            kw_lower = kw.lower()
+            if kw_lower in result_lower:
+                # Codes and dotted identifiers are higher value
+                if re.match(r'^[A-Z]\d{3}$', kw) or '.' in kw:
+                    score += 3
+                else:
+                    score += 1
+        if score > 0:
+            scored.append((score, result_id, status))
+
+    if not scored:
+        return None
+
+    # Sort by score descending
+    scored.sort(key=lambda x: -x[0])
+
+    # Only return if the top match is unambiguous (clearly ahead of second)
+    if len(scored) == 1:
+        return scored[0][2]
+
+    # If top two have different scores, the top one wins
+    if scored[0][0] > scored[1][0]:
+        return scored[0][2]
+
+    # Ambiguous -- multiple matches with same score
+    return None
+
+
+def _docstring_to_test_label(test_id, instance):
+    """Try to map a docstring-based test name to a runnable Django test label.
+
+    Uses keyword extraction to find a plausible test module/class path from
+    sibling F2P entries that are in standard format.
+    Returns a test label string or None if mapping fails.
+    """
+    keywords = _extract_docstring_keywords(test_id)
+    if not keywords:
+        return None
+
+    # Try to find a matching test module from the instance's F2P siblings
+    f2p = _parse_fail_to_pass(instance)
+    for sibling in f2p:
+        if sibling == test_id:
+            continue
+        # If a sibling is in standard format, use its module as a hint
+        method, class_path = _parse_django_test_id(sibling)
+        if method and class_path:
+            # Check if any keyword matches the sibling's class path
+            class_lower = class_path.lower()
+            for kw in keywords:
+                if kw.lower() in class_lower:
+                    return class_path  # Use sibling's class as the test label
+            # Even without keyword match, if there is a sibling in standard format,
+            # it is likely in the same module -- use it as fallback
+            return class_path
+
+    return None
+
+
 # ── Test runner ──────────────────────────────────────────────────────────────
 
 _QUICK_JUDGE_TIMEOUT_S = 30
@@ -437,6 +614,20 @@ def _resolve_target_status(test_results, target_test_id):
                 else:
                     return "failed"
 
+    # Docstring-based test name resolution
+    try:
+        if _is_docstring_test_name(target_test_id):
+            resolved = _resolve_docstring_test(target_test_id, test_results)
+            if resolved:
+                if resolved == "passed":
+                    return "passed"
+                elif resolved == "error":
+                    return "error"
+                else:
+                    return "failed"
+    except Exception:
+        pass  # exception-safe: fall through to missing/unknown
+
     # Not found in results
     if test_results:
         return "missing"  # tests ran but target not in output
@@ -525,6 +716,16 @@ def _build_quick_test_command(instance, test_ids):
             method_labels.append(f"{module_path}::{method}")
             class_labels.add(module_path)
             continue
+
+        # Docstring-based test name — try to map to a runnable label
+        if _is_docstring_test_name(entry):
+            try:
+                label = _docstring_to_test_label(entry, instance)
+                if label:
+                    class_labels.add(label)
+                    continue
+            except Exception:
+                pass  # exception-safe fallback
 
         # Unknown format — use as-is at class level
         class_labels.add(entry)
@@ -731,8 +932,11 @@ def format_agent_message(result):
       target_status=unknown → warning (no signal)
       command_scope != method → downgrade confidence
     """
-    # Determine message based on signal_kind (accounts for multi-F2P)
-    if result.signal_kind == "target_partial":
+    # Determine message based on signal_kind (accounts for multi-F2P + regression)
+    if result.target_status == "passed" and result.regression_detected:
+        header = "TARGET PASSED BUT REGRESSION DETECTED"
+        hint = "Your fix breaks existing tests. Check that you preserve existing behavior."
+    elif result.signal_kind == "target_partial":
         header = "PARTIAL"
         hint = "Your fix addresses the main issue but misses edge cases. Check the failing tests."
     elif result.target_status == "passed":
@@ -784,6 +988,11 @@ def format_agent_message(result):
     elif result.target_status in ("failed", "error") and result.failing_test_names:
         names_str = ", ".join(result.failing_test_names[:3])
         lines.append(f"Failing: {names_str}")
+
+    # Show regression sentinel results
+    if result.regression_detected and result.regression_test_names:
+        reg_str = ", ".join(result.regression_test_names[:3])
+        lines.append(f"Regression: {reg_str}")
 
     lines.append(hint)
     return "\n".join(lines)
