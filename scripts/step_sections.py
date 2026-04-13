@@ -414,17 +414,25 @@ def _step_cp_update_and_verdict(
     # ══════════════════════════════════════════════════════════════════
     # Phase Submission Enforcement — Checkpoint Escalation
     #
-    # Three-level escalation for agents that don't call submit_phase_record:
-    #   Level 1 (soft, step >= 8):  reminder message
-    #   Level 2 (hard, step >= 15): warning message + force armed
-    #   Level 3 (terminal):        handled by protocol_violation_stop (existing)
+    # Four-level escalation for agents that don't call submit_phase_record:
+    #   Level 1 (soft):     reminder message
+    #   Level 2 (hard):     warning message + force armed (continuous)
+    #   Level 3 (terminal): protocol_violation → STOP
     #
-    # Only applies to phases with schemas (OBSERVE, ANALYZE, DECIDE, DESIGN, EXECUTE, JUDGE).
+    # Phase-specific deadlines (steps before hard enforcement):
+    #   OBSERVE=15, ANALYZE=12, DECIDE=8, EXECUTE=10, DESIGN=10
     # Resets when agent submits a phase record or phase changes.
     # ══════════════════════════════════════════════════════════════════
     _current_phase_str = str(_cp_s.phase).upper()
-    _CHECKPOINT_SOFT = 8    # steps before soft reminder
-    _CHECKPOINT_HARD = 15   # steps before hard warning + force
+    _PHASE_DEADLINES = {
+        "OBSERVE": 15, "ANALYZE": 12, "DECIDE": 8,
+        "EXECUTE": 10, "DESIGN": 10, "JUDGE": 8,
+    }
+    _DEFAULT_DEADLINE = 12
+    _phase_deadline = _PHASE_DEADLINES.get(_current_phase_str, _DEFAULT_DEADLINE)
+    _CHECKPOINT_SOFT = max(5, _phase_deadline - 3)   # 3 steps before deadline
+    _CHECKPOINT_HARD = _phase_deadline                # deadline = continuous force
+    _CHECKPOINT_TERMINAL = _phase_deadline + 3        # deadline + 3 = STOP
 
     # Detect phase change → reset counter
     if _current_phase_str != state._last_submission_phase:
@@ -445,55 +453,67 @@ def _step_cp_update_and_verdict(
     else:
         state._steps_without_submission += 1
 
-    # Escalation logic
-    if (
-        state._steps_without_submission >= _CHECKPOINT_HARD
-        and state._submission_escalation_level < 2
-        and _current_phase_str not in ("UNDERSTAND",)
-    ):
-        state._submission_escalation_level = 2
-        agent_self.messages.append({
-            "role": "user",
-            "content": (
-                f"[PHASE CHECKPOINT — HARD WARNING]\n"
-                f"You have been in {_current_phase_str} for {state._steps_without_submission} steps "
-                f"without submitting a phase record.\n"
-                f"The system REQUIRES you to call submit_phase_record to complete this phase.\n"
-                f"Your next response MUST include a submit_phase_record call with your "
-                f"{_current_phase_str} findings. You will not be able to use other tools "
-                f"until you submit."
-            ),
-        })
+    # Escalation logic (4 levels: none → soft → hard → terminal)
+    if _current_phase_str in ("UNDERSTAND",):
+        pass  # Skip enforcement for UNDERSTAND phase
+    elif state._steps_without_submission >= _CHECKPOINT_TERMINAL:
+        # Level 3: TERMINAL — protocol violation → STOP
+        if state._submission_escalation_level < 3:
+            state._submission_escalation_level = 3
+            state.early_stop_verdict = VerdictStop(
+                reason=f"step_governance_timeout_{_current_phase_str.lower()}",
+            )
+            print(
+                f"    [step-governance] TERMINAL: phase={_current_phase_str}"
+                f" steps_without_submission={state._steps_without_submission}"
+                f" deadline={_phase_deadline} → STOP",
+                flush=True,
+            )
+    elif state._steps_without_submission >= _CHECKPOINT_HARD:
+        # Level 2: HARD — warning (once) + continuous force (every step)
+        if state._submission_escalation_level < 2:
+            state._submission_escalation_level = 2
+            agent_self.messages.append({
+                "role": "user",
+                "content": (
+                    f"[PHASE CHECKPOINT — HARD WARNING]\n"
+                    f"You have been in {_current_phase_str} for {state._steps_without_submission} steps "
+                    f"without submitting a phase record.\n"
+                    f"The system REQUIRES you to call submit_phase_record to complete this phase.\n"
+                    f"Your next response MUST include a submit_phase_record call with your "
+                    f"{_current_phase_str} findings. You will not be able to use other tools "
+                    f"until you submit."
+                ),
+            })
+            print(
+                f"    [phase_submission_enforcement] CHECKPOINT HARD:"
+                f" phase={_current_phase_str} steps={state._steps_without_submission}"
+                f" deadline={_phase_deadline} → force armed + warning injected",
+                flush=True,
+            )
+        # Re-arm force on EVERY step after deadline (continuous lock-out)
         if _model_peek is not None and hasattr(_model_peek, "set_force_phase_record"):
             _model_peek.set_force_phase_record(True)
             state._phase_record_force_total += 1
-        print(
-            f"    [phase_submission_enforcement] CHECKPOINT HARD:"
-            f" phase={_current_phase_str} steps={state._steps_without_submission}"
-            f" → force armed + warning injected",
-            flush=True,
-        )
-    elif (
-        state._steps_without_submission >= _CHECKPOINT_SOFT
-        and state._submission_escalation_level < 1
-        and _current_phase_str not in ("UNDERSTAND",)
-    ):
-        state._submission_escalation_level = 1
-        agent_self.messages.append({
-            "role": "user",
-            "content": (
-                f"[PHASE CHECKPOINT — REMINDER]\n"
-                f"You have been in {_current_phase_str} for {state._steps_without_submission} steps. "
-                f"Remember to call submit_phase_record when you have enough findings. "
-                f"Phase completion requires a submitted record."
-            ),
-        })
-        print(
-            f"    [phase_submission_enforcement] CHECKPOINT SOFT:"
-            f" phase={_current_phase_str} steps={state._steps_without_submission}"
-            f" → reminder injected",
-            flush=True,
-        )
+    elif state._steps_without_submission >= _CHECKPOINT_SOFT:
+        # Level 1: SOFT — reminder (once)
+        if state._submission_escalation_level < 1:
+            state._submission_escalation_level = 1
+            agent_self.messages.append({
+                "role": "user",
+                "content": (
+                    f"[PHASE CHECKPOINT — REMINDER]\n"
+                    f"You have been in {_current_phase_str} for {state._steps_without_submission} steps. "
+                    f"Remember to call submit_phase_record when you have enough findings. "
+                    f"Phase completion requires a submitted record."
+                ),
+            })
+            print(
+                f"    [phase_submission_enforcement] CHECKPOINT SOFT:"
+                f" phase={_current_phase_str} steps={state._steps_without_submission}"
+                f" → reminder injected",
+                flush=True,
+            )
 
     _step_verdict = decide_next(_cp_s)
     _verdict_to_log = f"step={_cp_s.step_index} verdict={_step_verdict.type}"
