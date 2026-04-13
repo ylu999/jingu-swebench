@@ -145,6 +145,8 @@ def _build_content_preview(parsed: dict, phase: str) -> str:
     if phase == "ANALYZE":
         if parsed.get("root_cause"):
             parts.append(f"ROOT_CAUSE: {parsed['root_cause']}")
+        if parsed.get("causal_chain"):
+            parts.append(f"CAUSAL_CHAIN: {parsed['causal_chain']}")
         for h in (parsed.get("alternatives_considered") or parsed.get("alternative_hypotheses") or []):
             if isinstance(h, dict):
                 hyp = h.get("hypothesis", "")

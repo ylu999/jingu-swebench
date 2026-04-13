@@ -472,7 +472,7 @@ class TestAnalysisGateRejection:
         fields_failed = [f.field for f in verdict.rejection.failures]
         assert "root_cause" in fields_failed
         assert "causal_chain" in fields_failed
-        assert "alternative_hypothesis" in fields_failed
+        assert "alternatives_considered" in fields_failed
 
     def test_rejection_failures_have_hints(self):
         """Each FieldFailure has a non-empty hint."""

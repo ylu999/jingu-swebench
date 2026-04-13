@@ -383,7 +383,7 @@
       },
       "schema": {
         "type": "object",
-        "description": "Analysis phase output: root cause identification with causal evidence",
+        "description": "Analysis phase output: root cause identification with causal evidence. Put your ROOT CAUSE analysis in the root_cause field (NOT in observations or claims). Put the step-by-step causal chain in the causal_chain field.",
         "properties": {
           "phase": {
             "type": "string",
@@ -405,18 +405,15 @@
             "items": {
               "type": "string"
             },
-            "description": "File:line evidence references"
-          },
-          "claims": {
-            "type": "array",
-            "items": {
-              "type": "string"
-            },
-            "description": "Structured claims made in this phase output"
+            "description": "File:line evidence references grounding the root cause"
           },
           "root_cause": {
             "type": "string",
-            "description": "Identified root cause with causal explanation"
+            "description": "The identified root cause. MUST reference a specific code location (file:function or file:line). Example: 'In django/core/validators.py:97, the regex \\S+ is too permissive — it matches characters like / and @ that should be rejected in URL userinfo.'"
+          },
+          "causal_chain": {
+            "type": "string",
+            "description": "Step-by-step causal chain explaining HOW the bug manifests: test failure → condition → code location → why it fails. Example: 'Test expects URLValidator to reject URLs with / in username → URLValidator.__call__ runs re.match on the URL → the userinfo regex r\"(?:\\S+(?::\\S*)?@)?\" at line 97 uses \\S+ which matches / → URL with / in username is incorrectly accepted'"
           },
           "alternative_hypotheses": {
             "type": "array",
@@ -435,7 +432,7 @@
                 "ruled_out_reason"
               ]
             },
-            "description": "Alternative hypotheses considered and why they were ruled out"
+            "description": "Alternative hypotheses considered and why they were ruled out. At least 1 alternative."
           }
         },
         "required": [
@@ -443,7 +440,8 @@
           "subtype",
           "principals",
           "evidence_refs",
-          "root_cause"
+          "root_cause",
+          "causal_chain"
         ]
       },
       "prompt": "## Phase: ANALYZE\nGoal: Root-cause analysis: connect evidence to a causal hypothesis.\nSubtype: analysis.root_cause (root_cause_analysis)\n\n## Required Fields\n- evidence_refs\n\n## Forbidden Moves\n- do not write code\n- do not skip evidence\n- do not jump to a fix without causal reasoning\n\n## Required Principals\nYou MUST declare: ontology_alignment, phase_boundary_discipline, causal_grounding, evidence_linkage\n\n### ontology_alignment\nEnsure your phase, subtype, and principal declarations use the exact canonical names from the taxonomy.\n\n### phase_boundary_discipline\nStay within the scope of the current phase. Do not perform actions that belong to a different phase.\n\n### causal_grounding\nConnect your root cause analysis to specific observable evidence. Do not speculate without evidence_refs.\n\n### evidence_linkage\nEvery claim must have a traceable evidence_ref (file:line). Add evidence_refs for unsupported claims.\n\n## Forbidden Principals\nDo NOT declare: action_grounding, minimal_change\n\n## Success Criteria\n- root cause identified with evidence\n- causal chain established\n- alternative hypotheses considered",

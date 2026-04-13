@@ -57,6 +57,21 @@ def _build_phase_record_tool(phase: str, schema: dict[str, Any]) -> dict:
     The tool's parameters ARE the phase schema — the agent fills in the
     structured fields directly as tool call arguments.
     """
+    # Build phase-specific description with field guidance
+    field_guidance = ""
+    if phase == "ANALYZE":
+        field_guidance = (
+            " For ANALYZE: put your identified root cause (with file:line) in 'root_cause', "
+            "put the step-by-step causal chain in 'causal_chain', "
+            "and list evidence file:line references in 'evidence_refs'. "
+            "Do NOT put analysis content in 'observations' or 'claims' — "
+            "those fields are not checked by the gate."
+        )
+    elif phase == "EXECUTE":
+        field_guidance = (
+            " For EXECUTE: put your fix plan (referencing the root cause) in 'plan'."
+        )
+
     return {
         "type": "function",
         "function": {
@@ -66,7 +81,7 @@ def _build_phase_record_tool(phase: str, schema: dict[str, Any]) -> dict:
                 f"You MUST call this tool when you have completed your work in "
                 f"the current phase. This is the ONLY way to complete a phase "
                 f"and proceed to the next one. Fill in ALL required fields "
-                f"based on your reasoning above."
+                f"based on your reasoning above.{field_guidance}"
             ),
             "parameters": schema,
         },
