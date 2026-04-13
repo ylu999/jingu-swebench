@@ -6,6 +6,7 @@ enable independent testing of step-monitor logic.
 """
 
 import threading
+import time
 
 from control.reasoning_state import (
     initial_reasoning_state, update_reasoning_state,
@@ -128,6 +129,13 @@ class StepMonitorState:
         # Key = phase name (str), value = consecutive extraction failure count.
         # Reset per attempt. After _MAX_EXTRACTION_RETRIES, force advance with no record.
         self.extraction_retry_counts: dict[str, int] = {}
+        # E1: Quick Judge — in-loop targeted test signal
+        self.quick_judge_history: list[dict] = []      # structured quick judge results
+        self.quick_judge_count: int = 0                # invocation count this attempt
+        self.last_quick_judge_step: int = -10          # _llm_step at last quick judge (-10 = never)
+        self.last_quick_judge_time: float = 0.0        # monotonic time at last quick judge
+        self.last_quick_judge_patch: str = ""          # patch hash at last quick judge
+        self._quick_judge_selected_tests: list[str] | None = None  # locked test subset for this attempt
 
     @classmethod
     def from_checkpoint_dict(cls, d: dict, instance: dict | None = None) -> "StepMonitorState":
@@ -167,6 +175,7 @@ class StepMonitorState:
         state._checkpoint_no_progress_steps = d.get("no_progress_steps", 0)
         state._checkpoint_patch_first_write = d.get("patch_first_write", False)
         state._checkpoint_phase = d.get("phase")
+        state.quick_judge_count = d.get("quick_judge_count", 0)
         return state
 
     def to_checkpoint_dict(self) -> dict:
@@ -205,6 +214,8 @@ class StepMonitorState:
                 else:
                     _prs.append(str(pr))
             result["phase_records"] = _prs
+            result["quick_judge_count"] = self.quick_judge_count
+            result["quick_judge_history_len"] = len(self.quick_judge_history)
         except Exception:
             pass
         return result
@@ -309,6 +320,58 @@ class StepMonitorState:
                   f"{delta_str}  elapsed={result.get('elapsed_ms', 0):.0f}ms  "
                   f"kind={result.get('verification_kind', '?')}",
                   flush=True)
+
+    def record_quick_judge(self, step: int, result: dict) -> None:
+        """Record a quick judge invocation in history.
+
+        Thread-safe. Called from _step_verify_if_needed after quick judge completes.
+        """
+        with self._lock:
+            self.quick_judge_history.append(result)
+            self.quick_judge_count += 1
+            self.last_quick_judge_step = self._llm_step
+            self.last_quick_judge_time = time.monotonic()
+            if "patch_hash" in result:
+                self.last_quick_judge_patch = str(result["patch_hash"])
+            print(
+                f"    [quick-judge] step={step} "
+                f"direction={result.get('direction', '?')} "
+                f"passed={result.get('tests_passed', '?')}/{result.get('tests_targeted', '?')} "
+                f"elapsed={result.get('elapsed_ms', 0):.0f}ms",
+                flush=True,
+            )
+
+    def should_trigger_quick_judge(self, current_patch_hash: str) -> bool:
+        """Check all trigger conditions for quick judge.
+
+        Returns True only when ALL conditions are met:
+        C1: Must be in EXECUTE phase
+        C2: Patch must have changed since last quick judge
+        C3: At least 3 agent steps since last quick judge
+        C4: At least 15s since last quick judge
+        C5: Attempt not in terminal path
+        C6: Quota not exhausted (max 3 per attempt)
+        """
+        # C1: EXECUTE phase only
+        phase = getattr(self.cp_state, 'phase', None)
+        if phase != "EXECUTE":
+            return False
+        # C2: Patch changed
+        if current_patch_hash == self.last_quick_judge_patch:
+            return False
+        # C3: Step interval
+        if (self._llm_step - self.last_quick_judge_step) < 3:
+            return False
+        # C4: Time interval
+        if (time.monotonic() - self.last_quick_judge_time) < 15.0:
+            return False
+        # C5: Not terminal
+        if self.early_stop_verdict is not None:
+            return False
+        # C6: Quota
+        if self.quick_judge_count >= 3:
+            return False
+        return True
 
     def latest_tests_passed(self) -> int:
         """Return most recent known tests_passed count, or -1."""
