@@ -919,8 +919,8 @@ def main():
                         help="Seconds between sandbox starts to avoid image-pull contention (default: 15)")
     parser.add_argument("--mode", choices=["jingu", "baseline"], default="jingu",
                         help="jingu=full pipeline (gate+retry); baseline=no gate, no hint (control condition)")
-    parser.add_argument("--run-eval", action="store_true", default=False,
-                        help="Run official SWE-bench harness after inference (requires Docker)")
+    parser.add_argument("--no-eval", action="store_true", default=False,
+                        help="Skip official SWE-bench evaluation after inference (eval runs by default)")
     parser.add_argument("--run-id", default=None,
                         help="Run ID for eval results (default: auto-generated from mode+timestamp)")
     parser.add_argument("--dataset", choices=["Lite", "Verified"], default="Verified",
@@ -1094,7 +1094,7 @@ def main():
             "actual_wall_s":         round(t_parallel.elapsed, 1),
             "speedup_x":             round(speedup, 1),
         },
-        "eval_results": None,  # filled in below if --run-eval
+        "eval_results": None,  # filled in below (eval runs by default, skip with --no-eval)
     }
 
     # Save machine-readable report (initial write before eval)
@@ -1148,7 +1148,7 @@ def main():
     print(f"  report saved → {report_path}")
 
     # ── Official evaluation (optional) ─────────────────────────────────────────
-    if args.run_eval:
+    if not args.no_eval:
         print(f"\n{'='*62}")
         print(f"  OFFICIAL EVALUATION  mode={args.mode}  run_id={run_id}")
         print(f"{'='*62}")
