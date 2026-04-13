@@ -361,29 +361,22 @@ class StepMonitorState:
         # C1: EXECUTE phase only
         phase = current_phase or getattr(self.cp_state, 'phase', None)
         if phase != "EXECUTE":
-            print(f"    [qj-trigger] C1 FAIL: phase={phase} (need EXECUTE)", flush=True)
             return False
         # C2: Patch changed
         if current_patch_hash == self.last_quick_judge_patch:
-            print(f"    [qj-trigger] C2 FAIL: patch unchanged", flush=True)
             return False
         # C3: Step interval
         if (self._llm_step - self.last_quick_judge_step) < 3:
-            print(f"    [qj-trigger] C3 FAIL: step={self._llm_step} last={self.last_quick_judge_step} (need >=3)", flush=True)
             return False
         # C4: Time interval
         if (time.monotonic() - self.last_quick_judge_time) < 15.0:
-            print(f"    [qj-trigger] C4 FAIL: time interval too short", flush=True)
             return False
         # C5: Not terminal
         if self.early_stop_verdict is not None:
-            print(f"    [qj-trigger] C5 FAIL: early_stop={self.early_stop_verdict}", flush=True)
             return False
         # C6: Quota
         if self.quick_judge_count >= 3:
-            print(f"    [qj-trigger] C6 FAIL: quota exhausted ({self.quick_judge_count})", flush=True)
             return False
-        print(f"    [qj-trigger] ALL PASS: phase={phase} step={self._llm_step} patch={current_patch_hash[:8]}", flush=True)
         return True
 
     def latest_tests_passed(self) -> int:
