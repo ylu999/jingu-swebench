@@ -70,17 +70,10 @@ def _build_phase_record_tool(phase: str, schema: dict[str, Any]) -> dict:
     )
 
     # Render field guidance from schema descriptions (single source of truth)
-    try:
-        from schema_field_guidance import render_schema_field_guidance
-        guidance = render_schema_field_guidance(schema, phase=phase)
-        if guidance:
-            description = f"{base_description}\n\n{guidance}"
-        else:
-            description = base_description
-    except Exception:
-        # Safe degradation: tool still works, just without field guidance
-        logger.warning("render_schema_field_guidance unavailable for phase=%s", phase)
-        description = base_description
+    from schema_field_guidance import render_schema_field_guidance
+    guidance = render_schema_field_guidance(schema, phase=phase)
+    if guidance:
+        description = f"{base_description}\n\n{guidance}"
 
     return {
         "type": "function",

@@ -147,19 +147,15 @@ PHASE_GUIDANCE: dict[str, str] = {
 def _get_schema_field_guidance(phase: str) -> str:
     """Render field guidance from bundle schema (SST).
 
-    Returns rendered field list, or "" if schema unavailable (safe degradation).
-    This replaces the hardcoded field listings that previously lived in
-    analysis_root_cause.PROMPT_GUIDANCE and similar per-phase constants.
+    Returns rendered field list, or "" if phase has no schema (e.g. UNDERSTAND).
+    Import failure = deployment broken → let it raise.
     """
-    try:
-        from jingu_onboard import onboard
-        from schema_field_guidance import render_schema_field_guidance
-        gov = onboard()
-        schema = gov.get_constrained_schema(phase.upper())
-        if schema:
-            return render_schema_field_guidance(schema, phase=phase.upper())
-    except Exception:
-        pass
+    from jingu_onboard import onboard
+    from schema_field_guidance import render_schema_field_guidance
+    gov = onboard()
+    schema = gov.get_constrained_schema(phase.upper())
+    if schema:
+        return render_schema_field_guidance(schema, phase=phase.upper())
     return ""
 
 
