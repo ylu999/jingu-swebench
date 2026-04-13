@@ -2369,6 +2369,7 @@ _PEEK_SIGNALS = [
     "STOPPED", "[attempt ", "[preflight]", "ModuleNotFoundError", "[smoke]",
     "[pipeline]", "resolved", "BUILD_DONE", "[eval-heartbeat]", "[entrypoint]",
     "[limit-triggered]", "[BUNDLE_ACTIVATED]", "[BUNDLE_LOAD_FAILURE]", "FORCE_PASS",
+    "[quick-judge]",
 ]
 
 

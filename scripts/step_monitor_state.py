@@ -137,6 +137,18 @@ class StepMonitorState:
         self.last_quick_judge_patch: str = ""          # patch hash at last quick judge
         self._quick_judge_selected_tests: list[str] | None = None  # locked test subset for this attempt
         self._pending_quick_judge_message: str = ""  # transient: message to inject after quick judge
+        # Phase Submission Enforcement (p14 governance activation)
+        # Tracks consecutive steps in the current phase without a submitted phase record.
+        # Three-level escalation: soft reminder → hard warning → forced tool_choice.
+        self._steps_without_submission: int = 0
+        self._submission_escalation_level: int = 0  # 0=none, 1=reminder, 2=warning, 3=forced
+        self._last_submission_phase: str = ""  # phase at last submission (to detect phase change)
+        # Telemetry
+        self._phase_record_force_total: int = 0
+        self._phase_record_admit_total: int = 0
+        self._phase_record_reject_total: int = 0
+        # Analysis gate redirect tracking
+        self._analysis_observe_redirects: int = 0
 
     @classmethod
     def from_checkpoint_dict(cls, d: dict, instance: dict | None = None) -> "StepMonitorState":

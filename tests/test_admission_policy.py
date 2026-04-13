@@ -525,10 +525,10 @@ def test_bugE_phase_advance_no_progress_reset_is_in_advance_block():
         "handler path. The cascading stagnation happens immediately "
         "after phase transition, so the reset must co-occur with the phase update."
     )
-    # Verify it's co-located with phase assignment (not some unrelated reset)
-    reset_idx = handler_block.find("no_progress_steps=0")
-    nearby = handler_block[max(0, reset_idx - 100):reset_idx + 100]
-    assert "phase=_new_phase" in nearby, (
+    # Verify it's co-located with phase assignment (not some unrelated reset).
+    # Search specifically for the _new_phase pattern (not hardcoded phase redirects
+    # like phase="OBSERVE" from analysis_gate redirect).
+    assert "phase=_new_phase, no_progress_steps=0" in handler_block, (
         "no_progress_steps=0 must be in the same dataclasses.replace call as phase=_new_phase"
     )
 

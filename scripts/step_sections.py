@@ -411,6 +411,90 @@ def _step_cp_update_and_verdict(
             flush=True,
         )
 
+    # ══════════════════════════════════════════════════════════════════
+    # Phase Submission Enforcement — Checkpoint Escalation
+    #
+    # Three-level escalation for agents that don't call submit_phase_record:
+    #   Level 1 (soft, step >= 8):  reminder message
+    #   Level 2 (hard, step >= 15): warning message + force armed
+    #   Level 3 (terminal):        handled by protocol_violation_stop (existing)
+    #
+    # Only applies to phases with schemas (OBSERVE, ANALYZE, DECIDE, DESIGN, EXECUTE, JUDGE).
+    # Resets when agent submits a phase record or phase changes.
+    # ══════════════════════════════════════════════════════════════════
+    _current_phase_str = str(_cp_s.phase).upper()
+    _CHECKPOINT_SOFT = 8    # steps before soft reminder
+    _CHECKPOINT_HARD = 15   # steps before hard warning + force
+
+    # Detect phase change → reset counter
+    if _current_phase_str != state._last_submission_phase:
+        state._steps_without_submission = 0
+        state._submission_escalation_level = 0
+        state._last_submission_phase = _current_phase_str
+
+    # Check if agent submitted a phase record this step (peek, don't consume)
+    _model_peek = getattr(agent_self, "model", None)
+    _has_pending_submission = (
+        _model_peek is not None
+        and hasattr(_model_peek, "_submitted_phase_record")
+        and _model_peek._submitted_phase_record is not None
+    )
+    if _has_pending_submission:
+        state._steps_without_submission = 0
+        state._submission_escalation_level = 0
+    else:
+        state._steps_without_submission += 1
+
+    # Escalation logic
+    if (
+        state._steps_without_submission >= _CHECKPOINT_HARD
+        and state._submission_escalation_level < 2
+        and _current_phase_str not in ("UNDERSTAND",)
+    ):
+        state._submission_escalation_level = 2
+        agent_self.messages.append({
+            "role": "user",
+            "content": (
+                f"[PHASE CHECKPOINT — HARD WARNING]\n"
+                f"You have been in {_current_phase_str} for {state._steps_without_submission} steps "
+                f"without submitting a phase record.\n"
+                f"The system REQUIRES you to call submit_phase_record to complete this phase.\n"
+                f"Your next response MUST include a submit_phase_record call with your "
+                f"{_current_phase_str} findings. You will not be able to use other tools "
+                f"until you submit."
+            ),
+        })
+        if _model_peek is not None and hasattr(_model_peek, "set_force_phase_record"):
+            _model_peek.set_force_phase_record(True)
+            state._phase_record_force_total += 1
+        print(
+            f"    [phase_submission_enforcement] CHECKPOINT HARD:"
+            f" phase={_current_phase_str} steps={state._steps_without_submission}"
+            f" → force armed + warning injected",
+            flush=True,
+        )
+    elif (
+        state._steps_without_submission >= _CHECKPOINT_SOFT
+        and state._submission_escalation_level < 1
+        and _current_phase_str not in ("UNDERSTAND",)
+    ):
+        state._submission_escalation_level = 1
+        agent_self.messages.append({
+            "role": "user",
+            "content": (
+                f"[PHASE CHECKPOINT — REMINDER]\n"
+                f"You have been in {_current_phase_str} for {state._steps_without_submission} steps. "
+                f"Remember to call submit_phase_record when you have enough findings. "
+                f"Phase completion requires a submitted record."
+            ),
+        })
+        print(
+            f"    [phase_submission_enforcement] CHECKPOINT SOFT:"
+            f" phase={_current_phase_str} steps={state._steps_without_submission}"
+            f" → reminder injected",
+            flush=True,
+        )
+
     _step_verdict = decide_next(_cp_s)
     _verdict_to_log = f"step={_cp_s.step_index} verdict={_step_verdict.type}"
     if hasattr(_step_verdict, "to") and _step_verdict.to is not None:
@@ -475,13 +559,34 @@ def _step_cp_update_and_verdict(
             state._retryable_loop_counts[_exec_key] = 0
 
         state.pending_redirect_hint = f"[REDIRECT:{_step_verdict.to}] {_step_verdict.reason}"
-        agent_self.messages.append({
-            "role": "user",
-            "content": (
+        # Phase Submission Enforcement: enriched redirect with cognition context
+        _redirect_content = ""
+        if _step_verdict.reason == "execute_no_progress":
+            _last_rc = state.last_analyze_root_cause or ""
+            _rc_hint = ""
+            if _last_rc:
+                _rc_hint = (
+                    f" Your analysis identified: \"{_last_rc[:200]}\". "
+                    f"Edit the specific file/function from your analysis directly. "
+                    f"If your analysis was wrong, return to ANALYZE with new evidence."
+                )
+            _exec_steps = state._steps_without_submission
+            _redirect_content = (
+                f"[EXECUTE STALL — NO PROGRESS]\n"
+                f"You have spent {_exec_steps} steps in EXECUTE without writing any file changes.\n"
+                f"You must either:\n"
+                f"1. Write a code change NOW (use the bash tool to edit a file)\n"
+                f"2. If you don't know what to change, return to ANALYZE{_rc_hint}"
+            )
+        else:
+            _redirect_content = (
                 f"[Control-plane redirect: {_step_verdict.reason}] "
                 f"Re-examine your environment assumptions. "
                 f"Transition to phase {_step_verdict.to} before patching."
-            ),
+            )
+        agent_self.messages.append({
+            "role": "user",
+            "content": _redirect_content,
         })
         state.pending_redirect_hint = ""
 
@@ -741,6 +846,16 @@ def _step_cp_update_and_verdict(
                         f"Retry {_ext_retries + 1}/{_MAX_SUBMISSION_RETRIES}."
                     ),
                 })
+                # Phase Submission Enforcement: force tool_choice on retry
+                _model_force = getattr(agent_self, "model", None)
+                if _model_force is not None and hasattr(_model_force, "set_force_phase_record"):
+                    _model_force.set_force_phase_record(True)
+                    print(
+                        f"    [phase_submission_enforcement] ARMED:"
+                        f" forcing submit_phase_record on next query"
+                        f" (retry {_ext_retries + 1}/{_MAX_SUBMISSION_RETRIES})",
+                        flush=True,
+                    )
                 print(
                     f"    [phase_gate] BLOCKED: no admitted record for {_eval_phase}"
                     f" retry={_ext_retries + 1}/{_MAX_SUBMISSION_RETRIES}"
@@ -864,15 +979,70 @@ def _step_cp_update_and_verdict(
                     flush=True,
                 )
                 if not _analysis_verdict.passed and _ag_reject_count >= _AG_MAX_REJECTS:
-                    print(f"    [analysis_gate] FORCE_PASS — max_rejects={_AG_MAX_REJECTS} reached, allowing advance", flush=True)
-                    _emit_limit_triggered(
-                        state, step_n=_cp_s.step_index,
-                        limit_name="analysis_gate_force_pass",
-                        configured_value=_AG_MAX_REJECTS, actual_value=_ag_reject_count,
-                        action_taken="force_pass", source_file="step_sections.py", source_line=653,
-                        reason=f"failed_rules={_analysis_verdict.failed_rules} scores={_analysis_verdict.scores}",
-                    )
-                    _analysis_gate_force_passed = True
+                    # Phase Submission Enforcement (p14): redirect to OBSERVE
+                    # instead of force_pass. Agent must gather more evidence.
+                    _AG_OBSERVE_REDIRECT_MAX = 2
+                    _ag_obs_redirects = state._analysis_observe_redirects
+                    if _ag_obs_redirects < _AG_OBSERVE_REDIRECT_MAX:
+                        state._analysis_observe_redirects = _ag_obs_redirects + 1
+                        _missing_rules = _analysis_verdict.failed_rules or []
+                        _missing_str = ", ".join(_missing_rules) if _missing_rules else "quality checks"
+                        agent_self.messages.append({
+                            "role": "user",
+                            "content": (
+                                f"[ANALYSIS INCOMPLETE — REDIRECT TO OBSERVE]\n"
+                                f"Your analysis has been rejected {_ag_reject_count} times. "
+                                f"Failed checks: {_missing_str}.\n"
+                                f"Return to OBSERVE and gather more evidence. Specifically:\n"
+                                + "\n".join(f"- Investigate: {r}" for r in _missing_rules)
+                                + f"\n\nThen re-enter ANALYZE with stronger evidence."
+                            ),
+                        })
+                        # Reset phase to OBSERVE
+                        import dataclasses as _dc_ag
+                        _cp_ref_ag = cp_state_holder[0] if cp_state_holder else state.cp_state
+                        _cp_new_ag = _dc_ag.replace(
+                            _cp_ref_ag, phase="OBSERVE", no_progress_steps=0
+                        )
+                        if cp_state_holder:
+                            cp_state_holder[0] = _cp_new_ag
+                        else:
+                            state.cp_state = _cp_new_ag
+                        state._execute_entry_step = -1
+                        state.phase_records = [
+                            r for r in state.phase_records
+                            if r.phase.upper() != _eval_phase
+                        ]
+                        _analysis_gate_rejected = True
+                        _emit_limit_triggered(
+                            state, step_n=_cp_s.step_index,
+                            limit_name="analysis_gate_redirect_observe",
+                            configured_value=_AG_OBSERVE_REDIRECT_MAX, actual_value=_ag_obs_redirects + 1,
+                            action_taken="redirect_observe", source_file="step_sections.py", source_line=653,
+                            reason=f"failed_rules={_analysis_verdict.failed_rules} scores={_analysis_verdict.scores}",
+                        )
+                        print(
+                            f"    [analysis_gate] REDIRECT TO OBSERVE"
+                            f" ({_ag_obs_redirects + 1}/{_AG_OBSERVE_REDIRECT_MAX})"
+                            f" — failed_rules={_missing_rules}",
+                            flush=True,
+                        )
+                    else:
+                        # Max observe redirects exhausted — force_pass with warning
+                        print(
+                            f"    [analysis_gate] FORCE_PASS — max_observe_redirects="
+                            f"{_AG_OBSERVE_REDIRECT_MAX} exhausted, allowing advance with warning",
+                            flush=True,
+                        )
+                        _emit_limit_triggered(
+                            state, step_n=_cp_s.step_index,
+                            limit_name="analysis_gate_force_pass",
+                            configured_value=_AG_MAX_REJECTS, actual_value=_ag_reject_count,
+                            action_taken="force_pass_after_observe_redirects",
+                            source_file="step_sections.py", source_line=653,
+                            reason=f"failed_rules={_analysis_verdict.failed_rules} scores={_analysis_verdict.scores} observe_redirects={_ag_obs_redirects}",
+                        )
+                        _analysis_gate_force_passed = True
                 elif not _analysis_verdict.passed:
                     _analysis_gate_rejected = True
                     # Plan-A: no rollback needed — phase was never advanced
@@ -1043,6 +1213,11 @@ def _step_cp_update_and_verdict(
                 f" admission={_admission.status} reasons={_admission.reasons}",
                 flush=True,
             )
+            # Phase Submission Enforcement telemetry
+            if _admission.status == "ADMITTED":
+                state._phase_record_admit_total += 1
+            elif _admission.status in ("RETRYABLE", "REJECTED"):
+                state._phase_record_reject_total += 1
             if _admission.status in ("RETRYABLE", "REJECTED"):
                 _pg_violation = _admission.reasons[0] if _admission.reasons else "admission_violation"
                 _pg_feedback = _get_pg_feedback(_pg_violation)
@@ -1179,6 +1354,10 @@ def _step_cp_update_and_verdict(
                                     f"Return to phase {_pv_verdict.to} before proceeding."
                                 ),
                             })
+                            # Phase Submission Enforcement: force submission after redirect
+                            _model_redir = getattr(agent_self, "model", None)
+                            if _model_redir is not None and hasattr(_model_redir, "set_force_phase_record"):
+                                _model_redir.set_force_phase_record(True)
                             state.pending_redirect_hint = ""
         except Exception as _pg_exc:
             print(f"    [principal_gate] error={_pg_exc}", flush=True)

@@ -152,6 +152,13 @@ class JinguModel(LitellmModel):
         # Last submitted phase record from tool call (consumed by step_sections)
         self._submitted_phase_record: dict[str, Any] | None = None
         self._submitted_phase_record_phase: str | None = None
+        # Phase Submission Enforcement (p14 governance activation)
+        # When True, next _query forces tool_choice to submit_phase_record.
+        # One-shot: resets to False after the forced query.
+        self._force_phase_record_next: bool = False
+        # Telemetry counters
+        self._phase_record_force_total: int = 0
+        self._phase_record_submit_total: int = 0
 
     # -- Phase state management (called by step_sections) --
 
@@ -161,6 +168,24 @@ class JinguModel(LitellmModel):
         self._current_phase_schema = schema
         logger.info("set_current_phase: phase=%s schema_available=%s",
                      self._current_phase, schema is not None)
+
+    def set_force_phase_record(self, force: bool = True) -> None:
+        """Request that the NEXT query forces tool_choice to submit_phase_record.
+
+        Called by step_sections at phase boundaries, checkpoint escalation,
+        and protocol violation retries. One-shot: resets after the forced query.
+
+        Trigger conditions (Phase Submission Enforcement):
+          - Protocol violation retry (agent failed to submit)
+          - Checkpoint escalation (N steps without submission in current phase)
+          - Post-redirect re-entry (agent redirected, must re-submit)
+          - Execution attempted without admitted upstream record
+        """
+        self._force_phase_record_next = force
+        if force:
+            self._phase_record_force_total += 1
+            logger.info("set_force_phase_record: ARMED (total=%d)",
+                        self._phase_record_force_total)
 
     def pop_submitted_phase_record(self) -> dict[str, Any] | None:
         """Pop and return the last tool-submitted phase record, or None.
@@ -180,7 +205,13 @@ class JinguModel(LitellmModel):
     # -- Override _query to inject submit_phase_record tool --
 
     def _query(self, messages: list[dict[str, str]], **kwargs):
-        """Override to add submit_phase_record tool alongside BASH_TOOL."""
+        """Override to add submit_phase_record tool alongside BASH_TOOL.
+
+        Phase Submission Enforcement (p14):
+        When _force_phase_record_next is True, tool_choice is set to force
+        submit_phase_record. This is a one-shot: resets after the query.
+        Trigger conditions are documented in set_force_phase_record().
+        """
         # Build phase-specific tool if schema available
         if self._current_phase and self._current_phase_schema:
             phase_tool = _build_phase_record_tool(
@@ -193,12 +224,25 @@ class JinguModel(LitellmModel):
 
         tools = [BASH_TOOL, phase_tool]
 
+        # Phase Submission Enforcement: force tool_choice when armed
+        extra_kwargs: dict[str, Any] = {}
+        if self._force_phase_record_next:
+            extra_kwargs["tool_choice"] = {
+                "type": "function",
+                "function": {"name": "submit_phase_record"},
+            }
+            logger.info(
+                "phase_submission_enforcement: FORCING tool_choice=submit_phase_record"
+                " phase=%s", self._current_phase,
+            )
+            self._force_phase_record_next = False  # One-shot reset
+
         try:
             return litellm.completion(
                 model=self.config.model_name,
                 messages=messages,
                 tools=tools,
-                **(self.config.model_kwargs | kwargs),
+                **(self.config.model_kwargs | kwargs | extra_kwargs),
             )
         except litellm.exceptions.AuthenticationError as e:
             e.message += " You can permanently set your API key with `mini-extra config set KEY VALUE`."
@@ -244,10 +288,13 @@ class JinguModel(LitellmModel):
                     args = json.loads(tc.function.arguments)
                     self._submitted_phase_record = args
                     self._submitted_phase_record_phase = self._current_phase
+                    self._phase_record_submit_total += 1
                     logger.info(
-                        "submit_phase_record intercepted: phase=%s fields=%s",
+                        "submit_phase_record intercepted: phase=%s fields=%s"
+                        " submit_total=%d",
                         self._current_phase,
                         list(args.keys()),
+                        self._phase_record_submit_total,
                     )
                 except Exception as e:
                     logger.error(
