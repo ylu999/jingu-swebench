@@ -271,7 +271,7 @@ def _step_verify_if_needed(
                 step_patch_non_empty = False
                 break
 
-            # E1: Quick Judge — synchronous targeted test signal
+            # E1: Quick Judge — target-aware corrective signal
             patch_hash = _hl.md5(current_patch.encode()).hexdigest()[:16]
             # Pass real phase from cp_state_holder (state.cp_state may be stale)
             _real_phase = None
@@ -294,6 +294,8 @@ def _step_verify_if_needed(
                         prev = state.quick_judge_history[-1]
                         prev_result = QuickJudgeResult(
                             step=prev.get("step", 0),
+                            target_test_id=prev.get("target_test_id", ""),
+                            target_status=prev.get("target_status", "unknown"),
                             tests_targeted=prev.get("tests_targeted", 0),
                             tests_passed=prev.get("tests_passed", 0),
                             tests_failed=prev.get("tests_failed", 0),
@@ -303,9 +305,10 @@ def _step_verify_if_needed(
                             direction=prev.get("direction", "first_signal"),
                         )
 
-                    step_n = agent_self.n_calls
+                    # Canonical step identity: use state._llm_step (monotonic per step)
+                    _canonical_step = state._llm_step
                     print(
-                        f"    [quick-judge] triggering at step={step_n} "
+                        f"    [quick-judge] triggering at step={_canonical_step} "
                         f"(patch changed, container={cid[:12]}...)",
                         flush=True,
                     )
@@ -316,14 +319,19 @@ def _step_verify_if_needed(
                         container_id=cid,
                         changed_files=changed_files,
                         previous_result=prev_result,
-                        step=step_n,
+                        step=_canonical_step,
                     )
 
-                    # Record in telemetry
-                    state.record_quick_judge(step_n, {
-                        "step": step_n,
+                    # Record in telemetry (target-aware fields)
+                    state.record_quick_judge(_canonical_step, {
+                        "step": _canonical_step,
                         "tier": "quick",
                         "trigger_source": "automatic_patch_detected",
+                        "target_test_id": qj_result.target_test_id,
+                        "target_status": qj_result.target_status,
+                        "signal_kind": qj_result.signal_kind,
+                        "corrective": qj_result.corrective,
+                        "command_scope": qj_result.command_scope,
                         "tests_targeted": qj_result.tests_targeted,
                         "tests_passed": qj_result.tests_passed,
                         "tests_failed": qj_result.tests_failed,

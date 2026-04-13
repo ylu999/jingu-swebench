@@ -1262,16 +1262,23 @@ class JinguAgent:
                     jingu_body["quick_judge_directions"] = [
                         qj.get("direction", "unknown") for qj in _monitor.quick_judge_history
                     ]
+                    jingu_body["quick_judge_target_statuses"] = [
+                        qj.get("target_status", "unknown") for qj in _monitor.quick_judge_history
+                    ]
+                    jingu_body["quick_judge_signal_kinds"] = [
+                        qj.get("signal_kind", "non_corrective_noise") for qj in _monitor.quick_judge_history
+                    ]
                     # L3 effectiveness detection
                     try:
                         from quick_judge import detect_effective
                         jingu_body["quick_judge_effective"] = detect_effective(_monitor.quick_judge_history)
                     except Exception:
                         jingu_body["quick_judge_effective"] = None
-                    # Log quick judge summary
-                    _qj_dirs = [qj.get("direction", "?") for qj in _monitor.quick_judge_history]
+                    # Log quick judge summary (target-aware)
+                    _qj_targets = [qj.get("target_status", "?") for qj in _monitor.quick_judge_history]
+                    _qj_signals = [qj.get("signal_kind", "?") for qj in _monitor.quick_judge_history]
                     print(f"    [quick_judge] invoked={len(_monitor.quick_judge_history)} "
-                          f"directions={_qj_dirs} "
+                          f"target_statuses={_qj_targets} signals={_qj_signals} "
                           f"effective={jingu_body.get('quick_judge_effective')}",
                           flush=True)
                 else:

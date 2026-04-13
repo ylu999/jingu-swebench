@@ -334,11 +334,17 @@ class StepMonitorState:
             self.last_quick_judge_time = time.monotonic()
             if "patch_hash" in result:
                 self.last_quick_judge_patch = str(result["patch_hash"])
+            _target = result.get('target_test_id', '?')
+            _tstatus = result.get('target_status', '?')
+            _signal = result.get('signal_kind', '?')
+            _scope = result.get('command_scope', '?')
             print(
                 f"    [quick-judge] step={step} "
-                f"direction={result.get('direction', '?')} "
+                f"target_status={_tstatus} signal={_signal} "
+                f"scope={_scope} "
                 f"passed={result.get('tests_passed', '?')}/{result.get('tests_targeted', '?')} "
-                f"elapsed={result.get('elapsed_ms', 0):.0f}ms",
+                f"elapsed={result.get('elapsed_ms', 0):.0f}ms "
+                f"target={_target}",
                 flush=True,
             )
 
