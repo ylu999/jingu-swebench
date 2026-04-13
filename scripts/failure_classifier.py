@@ -1,43 +1,20 @@
 """Failure Classification Engine for jingu-swebench.
 
-Classifies controlled_verify results into 4 failure types
-to enable phase-specific retry routing.
+Two layers of failure classification:
+  1. FailureType (routing-level): WHAT happened — 4 categories for phase-specific retry routing.
+  2. FailureRecord (semantic rootcause): WHY it happened — structured record with phase_of_failure,
+     signal_quality, confidence, and recommended_actions for the control plane.
 
-Classification operates on the structured cv_result dict returned by
-run_controlled_verify — never on raw text. This is a rule-based engine
-(no LLM) that maps f2p/p2p signals to typed failure categories.
-
-This module is SEPARATE from retry_controller.classify_outcome (outcome engine).
-- outcome engine: agent-visible signal for the agent
-- failure classifier: system-level routing for the control loop
+FailureType is consumed by repair_prompts.py for retry routing.
+FailureRecord is consumed by the control plane for failure-aware cognition control.
 """
+from dataclasses import dataclass, field, asdict
 from typing import Literal, Optional
+
+# ── FailureType (routing-level, unchanged) ────────────────────────────────────
 
 FailureType = Literal["wrong_direction", "incomplete_fix", "verify_gap", "execution_error"]
 
-# ── Failure Layer (semantic rootcause) ────────────────────────────────────────
-# FailureType answers "what happened" (routing-level).
-# FailureLayer answers "why it happened" (semantic rootcause).
-#
-# These two are orthogonal:
-#   incomplete_fix + near_miss_semantic_insufficiency → almost right, edge cases uncovered
-#   incomplete_fix + multi_site_fix_incomplete → right direction, didn't hit all change sites
-#   verify_gap + target_only_success_with_regression → target passed but P2P broke
-#   wrong_direction + insufficient_design_depth → jumped to patch without understanding
-#
-FailureLayer = Literal[
-    "near_miss_semantic_insufficiency",      # patch almost correct, local F2P coverage gap
-    "insufficient_design_depth",             # problem requires deeper analysis/design than attempted
-    "multi_site_fix_incomplete",             # correct direction but only materialized partial change sites
-    "target_only_success_with_regression",   # target F2P pass but P2P regression introduced
-    "target_missing_due_to_test_resolution", # quick judge couldn't resolve target test name
-    "wrong_direction",                       # fundamentally wrong approach
-    "execution_error",                       # patch format / apply / docker failure
-    "unknown",                               # insufficient signal to classify
-]
-
-# Routing rules: each failure type maps to a next_phase + repair_goal + required_principals.
-# p209 will consume these for retry routing; this plan (p208) only classifies and logs.
 FAILURE_ROUTING_RULES: dict = {
     "wrong_direction": {
         "next_phase": "analysis",
@@ -83,131 +60,474 @@ def classify_failure(cv_result: dict) -> Optional[FailureType]:
     if not cv_result or not isinstance(cv_result, dict):
         return None
 
-    # Rule 1: execution error (patch apply failure, docker error, etc.)
     vk = cv_result.get("verification_kind", "")
     if vk == "controlled_error":
         return "execution_error"
 
-    # No tests available — cannot classify
     if vk == "controlled_no_tests":
         return None
 
-    # Extract f2p counts (default to 0 for missing/None values)
     f2p_passed = cv_result.get("f2p_passed") or 0
     f2p_failed = cv_result.get("f2p_failed") or 0
 
-    # Rule 2: partial fix — some f2p pass, some fail
     if f2p_passed > 0 and f2p_failed > 0:
         return "incomplete_fix"
 
-    # Rule 3: wrong direction — no f2p tests pass
     if f2p_passed == 0 and f2p_failed > 0:
         return "wrong_direction"
 
-    # Rule 4: verify gap — all f2p pass but not marked resolved
-    # (p2p regression or other eval criteria not met)
     if f2p_passed > 0 and f2p_failed == 0:
         if cv_result.get("eval_resolved") is True:
-            return None  # success
+            return None
         return "verify_gap"
 
-    # Rule 5: all zeros or no f2p data — check eval_resolved
     if cv_result.get("eval_resolved") is True:
         return None
 
-    # Fallback: unknown state -> treat as wrong_direction
     return "wrong_direction"
 
 
 def get_routing(failure_type: FailureType) -> dict:
-    """Get the routing rule for a failure type.
-
-    Args:
-        failure_type: one of the 4 FailureType values.
-
-    Returns:
-        dict with next_phase, repair_goal, required_principals.
-
-    Raises:
-        KeyError: if failure_type is not a valid FailureType.
-    """
+    """Get the routing rule for a failure type."""
     return FAILURE_ROUTING_RULES[failure_type]
 
 
-# ── Failure Layer Classification ──────────────────────────────────────────────
+# ── FailureLayer (semantic rootcause) ─────────────────────────────────────────
+
+FailureLayer = Literal[
+    "near_miss_semantic_insufficiency",
+    "insufficient_design_depth",
+    "multi_site_fix_incomplete",
+    "target_only_success_with_regression",
+    "target_missing_due_to_test_resolution",
+    "wrong_direction",
+    "execution_error",
+    "unknown",
+]
+
+PhaseOfFailure = Literal["analysis", "decision", "design", "execution", "judge"]
+
+SignalQuality = Literal[
+    "true_positive",   # signal correctly indicated success
+    "true_negative",   # signal correctly indicated failure
+    "false_positive",  # signal indicated success but actually failed
+    "false_negative",  # signal indicated failure but actually succeeded
+    "no_signal",       # signal not available
+]
+
+ActionType = Literal[
+    "retry_phase",
+    "enforce_principals",
+    "require_design_expansion",
+    "require_affected_surface_enumeration",
+    "require_regression_sentinel",
+    "require_test_resolution_fix",
+    "block_submission",
+    "increase_analysis_budget",
+]
+
+
+@dataclass
+class GateAction:
+    """A recommended action the control plane should take."""
+    type: ActionType
+    phase: Optional[str] = None          # for retry_phase
+    principals: list[str] = field(default_factory=list)  # for enforce_principals
+    reason: str = ""
+
+    def to_dict(self) -> dict:
+        d: dict = {"type": self.type}
+        if self.phase:
+            d["phase"] = self.phase
+        if self.principals:
+            d["principals"] = self.principals
+        if self.reason:
+            d["reason"] = self.reason
+        return d
+
+
+@dataclass
+class SignalQualityRecord:
+    """Quality assessment of each signal source for this instance."""
+    quick_judge_target: SignalQuality = "no_signal"
+    quick_judge_overall: SignalQuality = "no_signal"
+    controlled_verify: SignalQuality = "no_signal"
+
+    def to_dict(self) -> dict:
+        return {
+            "quick_judge_target": self.quick_judge_target,
+            "quick_judge_overall": self.quick_judge_overall,
+            "controlled_verify": self.controlled_verify,
+        }
+
+
+@dataclass
+class FailureRecord:
+    """Full semantic rootcause record for an unresolved instance.
+
+    This is the structured object that enters the control plane —
+    not just a label, but a complete diagnostic with routing instructions.
+    """
+    instance_id: str
+    failure_layer: FailureLayer
+    phase_of_failure: PhaseOfFailure
+    signal_quality: SignalQualityRecord
+    confidence: float
+    reasoning: str
+    recommended_actions: list[GateAction]
+
+    # Raw signals that drove the classification
+    signals: dict = field(default_factory=dict)
+
+    def to_dict(self) -> dict:
+        return {
+            "instance_id": self.instance_id,
+            "failure_layer": self.failure_layer,
+            "phase_of_failure": self.phase_of_failure,
+            "signal_quality": self.signal_quality.to_dict(),
+            "confidence": self.confidence,
+            "reasoning": self.reasoning,
+            "recommended_actions": [a.to_dict() for a in self.recommended_actions],
+            "signals": self.signals,
+        }
+
+
+# ── FailureRecord Classification ─────────────────────────────────────────────
 
 def classify_failure_layer(
     cv_result: dict,
     quick_judge_history: list[dict] | None = None,
     failure_type: Optional[FailureType] = None,
-) -> FailureLayer:
-    """Classify the semantic rootcause layer for an unresolved instance.
+    instance_id: str = "",
+) -> FailureRecord:
+    """Classify the full semantic rootcause for an unresolved instance.
 
     Combines controlled_verify signals with quick_judge target-aware signals
-    to determine WHY the patch failed, not just WHAT happened.
+    to produce a FailureRecord with phase, signal quality, and recommended actions.
 
     Args:
         cv_result: dict from controlled_verify with f2p/p2p counts.
-        quick_judge_history: list of quick judge result dicts (target_status, signal_kind).
+        quick_judge_history: list of quick judge result dicts.
         failure_type: pre-classified FailureType from classify_failure().
+        instance_id: instance identifier for the record.
 
     Returns:
-        One of the FailureLayer values.
-
-    Classification rules (evaluated in order of specificity):
-        1. execution_error → "execution_error"
-        2. F2P all pass + P2P regression → "target_only_success_with_regression"
-        3. F2P partial pass (high ratio) + QJ target_passed → "near_miss_semantic_insufficiency"
-        4. F2P partial pass (low ratio) + multi-file F2P → "multi_site_fix_incomplete"
-        5. F2P zero pass + QJ target_missing → "target_missing_due_to_test_resolution"
-        6. F2P zero pass + agent had patch → "insufficient_design_depth" or "wrong_direction"
-        7. fallback → "unknown"
+        FailureRecord with full diagnostic.
     """
     if not cv_result or not isinstance(cv_result, dict):
-        return "unknown"
-
-    # Shortcut: execution error
-    if failure_type == "execution_error":
-        return "execution_error"
+        return FailureRecord(
+            instance_id=instance_id,
+            failure_layer="unknown",
+            phase_of_failure="analysis",
+            signal_quality=SignalQualityRecord(),
+            confidence=0.0,
+            reasoning="No controlled_verify data available",
+            recommended_actions=[],
+        )
 
     f2p_passed = cv_result.get("f2p_passed") or 0
     f2p_failed = cv_result.get("f2p_failed") or 0
     f2p_total = f2p_passed + f2p_failed
     p2p_passed = cv_result.get("p2p_passed") or 0
     p2p_failed = cv_result.get("p2p_failed") or 0
+    p2p_total = p2p_passed + p2p_failed
 
     # Collect quick judge signals
     qj_target_statuses = []
     qj_has_target_missing = False
+    qj_has_target_passed = False
+    qj_has_target_error = False
     if quick_judge_history:
         qj_target_statuses = [qj.get("target_status", "unknown") for qj in quick_judge_history]
         qj_has_target_missing = "missing" in qj_target_statuses
+        qj_has_target_passed = "passed" in qj_target_statuses
+        qj_has_target_error = "error" in qj_target_statuses or "failed" in qj_target_statuses
 
-    # Rule 1: All F2P pass but P2P regression → target_only_success_with_regression
+    raw_signals = {
+        "f2p_passed": f2p_passed,
+        "f2p_failed": f2p_failed,
+        "f2p_total": f2p_total,
+        "p2p_passed": p2p_passed,
+        "p2p_failed": p2p_failed,
+        "p2p_total": p2p_total,
+        "qj_target_statuses": qj_target_statuses,
+        "failure_type": failure_type,
+    }
+
+    # ── Rule 0: execution_error ───────────────────────────────────────────
+    if failure_type == "execution_error":
+        return FailureRecord(
+            instance_id=instance_id,
+            failure_layer="execution_error",
+            phase_of_failure="execution",
+            signal_quality=SignalQualityRecord(
+                controlled_verify="true_negative",
+            ),
+            confidence=0.95,
+            reasoning="Patch apply or docker execution failure",
+            recommended_actions=[
+                GateAction(type="retry_phase", phase="execution",
+                           reason="Fix execution issues without changing direction"),
+            ],
+            signals=raw_signals,
+        )
+
+    # ── Rule 1: F2P all pass + P2P regression → regression with false success ─
     if f2p_total > 0 and f2p_failed == 0 and p2p_failed > 0:
-        return "target_only_success_with_regression"
+        sq = SignalQualityRecord(
+            quick_judge_target="true_positive" if qj_has_target_passed else "no_signal",
+            quick_judge_overall="false_positive",  # QJ said "ok" but patch is broken
+            controlled_verify="true_negative",     # CV correctly caught the regression
+        )
+        return FailureRecord(
+            instance_id=instance_id,
+            failure_layer="target_only_success_with_regression",
+            phase_of_failure="judge",
+            signal_quality=sq,
+            confidence=0.95,
+            reasoning=(
+                f"Target F2P all passed ({f2p_passed}/{f2p_total}) but P2P regression "
+                f"detected ({p2p_failed}/{p2p_total} failed). Patch likely weakens a "
+                f"condition or mutates shared state instead of preserving invariants."
+            ),
+            recommended_actions=[
+                GateAction(type="require_regression_sentinel",
+                           reason="Quick judge must check P2P sentinel tests, not just target"),
+                GateAction(type="retry_phase", phase="design",
+                           reason="Redesign fix to preserve invariants (clone vs mutate)"),
+                GateAction(type="enforce_principals",
+                           principals=["invariant_preservation", "minimal_change"],
+                           reason="Enforce that fix does not weaken existing guards"),
+            ],
+            signals=raw_signals,
+        )
 
-    # Rule 2: High F2P pass ratio (>= 50%) → near_miss or multi_site
+    # ── Rule 2: Partial F2P pass, high ratio → near miss ─────────────────
     if f2p_total > 0 and f2p_passed > 0 and f2p_failed > 0:
         pass_ratio = f2p_passed / f2p_total
+
         if pass_ratio >= 0.5:
-            # Most F2P pass — near miss (edge case coverage gap)
-            return "near_miss_semantic_insufficiency"
+            # Near miss — most F2P pass, edge cases uncovered
+            sq = SignalQualityRecord(
+                quick_judge_target="true_positive" if qj_has_target_passed else "no_signal",
+                quick_judge_overall="true_positive" if qj_has_target_passed else "no_signal",
+                controlled_verify="true_negative",
+            )
+            return FailureRecord(
+                instance_id=instance_id,
+                failure_layer="near_miss_semantic_insufficiency",
+                phase_of_failure="execution",
+                signal_quality=sq,
+                confidence=0.85,
+                reasoning=(
+                    f"Patch covers {f2p_passed}/{f2p_total} F2P tests ({pass_ratio:.0%}). "
+                    f"Remaining {f2p_failed} failures are likely edge cases in the same fix family. "
+                    f"No P2P regression."
+                ),
+                recommended_actions=[
+                    GateAction(type="retry_phase", phase="execution",
+                               reason="Patch is close — fix remaining edge cases"),
+                    GateAction(type="require_design_expansion",
+                               reason="Check uncovered F2P cases for missing semantic coverage"),
+                ],
+                signals=raw_signals,
+            )
         else:
-            # Low ratio — likely missing change sites
-            return "multi_site_fix_incomplete"
+            # Low pass ratio — likely missing change sites
+            sq = SignalQualityRecord(
+                quick_judge_target="true_positive" if qj_has_target_passed else
+                                   ("true_negative" if qj_has_target_error else "no_signal"),
+                quick_judge_overall="true_negative" if qj_has_target_error else "no_signal",
+                controlled_verify="true_negative",
+            )
+            return FailureRecord(
+                instance_id=instance_id,
+                failure_layer="multi_site_fix_incomplete",
+                phase_of_failure="design",
+                signal_quality=sq,
+                confidence=0.80,
+                reasoning=(
+                    f"Only {f2p_passed}/{f2p_total} F2P pass ({pass_ratio:.0%}). "
+                    f"Low coverage suggests multiple change sites required but only "
+                    f"partial sites materialized."
+                ),
+                recommended_actions=[
+                    GateAction(type="require_affected_surface_enumeration",
+                               reason="Design must enumerate all affected files/components"),
+                    GateAction(type="retry_phase", phase="design",
+                               reason="Expand design to cover all required change sites"),
+                    GateAction(type="enforce_principals",
+                               principals=["evidence_linkage", "minimal_change"],
+                               reason="Ensure all change sites are evidence-grounded"),
+                ],
+                signals=raw_signals,
+            )
 
-    # Rule 3: Zero F2P pass
+    # ── Rule 3: Zero F2P pass ────────────────────────────────────────────
     if f2p_passed == 0 and f2p_total > 0:
-        # Did quick judge report target_missing? → test resolution problem
+        # Sub-rule: quick judge couldn't resolve target → test resolution issue
         if qj_has_target_missing:
-            return "target_missing_due_to_test_resolution"
-        # Agent wrote a patch but completely wrong direction
-        return "wrong_direction"
+            return FailureRecord(
+                instance_id=instance_id,
+                failure_layer="target_missing_due_to_test_resolution",
+                phase_of_failure="judge",
+                signal_quality=SignalQualityRecord(
+                    quick_judge_target="no_signal",
+                    quick_judge_overall="no_signal",
+                    controlled_verify="true_negative",
+                ),
+                confidence=0.85,
+                reasoning=(
+                    f"All {f2p_total} F2P tests failed. Quick judge reported target_missing — "
+                    f"test name resolution failed (possibly docstring-based test name)."
+                ),
+                recommended_actions=[
+                    GateAction(type="require_test_resolution_fix",
+                               reason="Quick judge cannot resolve target test — fix canonicalization"),
+                    GateAction(type="retry_phase", phase="analysis",
+                               reason="Re-analyze with correct test identity"),
+                ],
+                signals=raw_signals,
+            )
 
-    # Rule 4: verify_gap with all F2P passing but not resolved (no P2P regression detected)
-    # This can happen when eval harness uses different criteria
+        # Sub-rule: QJ saw target error/failed AND zero F2P → insufficient design depth
+        # Agent tried something but fundamentally wrong approach — needs deeper analysis
+        if qj_has_target_error:
+            return FailureRecord(
+                instance_id=instance_id,
+                failure_layer="insufficient_design_depth",
+                phase_of_failure="analysis",
+                signal_quality=SignalQualityRecord(
+                    quick_judge_target="true_negative",
+                    quick_judge_overall="true_negative",
+                    controlled_verify="true_negative",
+                ),
+                confidence=0.75,
+                reasoning=(
+                    f"Zero F2P progress ({f2p_total} tests failed). Quick judge confirmed "
+                    f"target error — patch direction may be correct but implementation "
+                    f"lacks sufficient design depth."
+                ),
+                recommended_actions=[
+                    GateAction(type="increase_analysis_budget",
+                               reason="Problem requires deeper mechanism understanding"),
+                    GateAction(type="require_design_expansion",
+                               reason="Must enumerate internal components and invariants before patching"),
+                    GateAction(type="retry_phase", phase="analysis",
+                               reason="Return to analysis — current design insufficient"),
+                    GateAction(type="enforce_principals",
+                               principals=["causal_grounding", "evidence_linkage"],
+                               reason="Require evidence-grounded root cause before execution"),
+                ],
+                signals=raw_signals,
+            )
+
+        # Fallback: zero F2P, no QJ signal → wrong direction
+        return FailureRecord(
+            instance_id=instance_id,
+            failure_layer="wrong_direction",
+            phase_of_failure="analysis",
+            signal_quality=SignalQualityRecord(
+                controlled_verify="true_negative",
+            ),
+            confidence=0.70,
+            reasoning=f"Zero F2P progress ({f2p_total} tests failed). Fundamentally wrong approach.",
+            recommended_actions=[
+                GateAction(type="retry_phase", phase="analysis",
+                           reason="Completely re-analyze the problem"),
+                GateAction(type="enforce_principals",
+                           principals=["causal_grounding"],
+                           reason="Must identify actual root cause"),
+            ],
+            signals=raw_signals,
+        )
+
+    # ── Rule 4: verify_gap (F2P all pass, no P2P failure detected, but not resolved) ─
     if failure_type == "verify_gap":
-        return "near_miss_semantic_insufficiency"
+        return FailureRecord(
+            instance_id=instance_id,
+            failure_layer="near_miss_semantic_insufficiency",
+            phase_of_failure="judge",
+            signal_quality=SignalQualityRecord(
+                quick_judge_target="true_positive" if qj_has_target_passed else "no_signal",
+                controlled_verify="true_negative",
+            ),
+            confidence=0.65,
+            reasoning="All F2P pass, no P2P regression detected, but eval says not resolved. Verify gap.",
+            recommended_actions=[
+                GateAction(type="retry_phase", phase="judge",
+                           reason="Verification scope may be insufficient"),
+            ],
+            signals=raw_signals,
+        )
 
-    return "unknown"
+    # ── Fallback ─────────────────────────────────────────────────────────
+    return FailureRecord(
+        instance_id=instance_id,
+        failure_layer="unknown",
+        phase_of_failure="analysis",
+        signal_quality=SignalQualityRecord(),
+        confidence=0.0,
+        reasoning="Insufficient signal to classify failure layer",
+        recommended_actions=[],
+        signals=raw_signals,
+    )
+
+
+# ── Routing from FailureRecord ───────────────────────────────────────────────
+
+def route_from_failure(record: FailureRecord) -> dict:
+    """Convert a FailureRecord into a control-plane routing decision.
+
+    Returns dict with:
+        next_phase: str — which phase to retry from
+        instructions: list[str] — specific instructions for the agent
+        enforce_principals: list[str] — principals to enforce on retry
+    """
+    instructions: list[str] = []
+    enforce_principals: list[str] = []
+    next_phase = "analysis"  # default
+
+    for action in record.recommended_actions:
+        if action.type == "retry_phase" and action.phase:
+            next_phase = action.phase
+        elif action.type == "enforce_principals":
+            enforce_principals.extend(action.principals)
+        elif action.type == "require_design_expansion":
+            instructions.append(
+                "Expand design: enumerate ALL affected components, files, and invariants "
+                "before writing any code."
+            )
+        elif action.type == "require_affected_surface_enumeration":
+            instructions.append(
+                "List ALL code locations that need changes. Do not submit until every "
+                "required site has been modified."
+            )
+        elif action.type == "require_regression_sentinel":
+            instructions.append(
+                "Your previous fix broke existing tests. Ensure your fix preserves all "
+                "existing behavior — prefer cloning/isolating over modifying conditions."
+            )
+        elif action.type == "require_test_resolution_fix":
+            instructions.append(
+                "The test runner could not resolve the target test. Verify the exact test "
+                "class and method names before proceeding."
+            )
+        elif action.type == "increase_analysis_budget":
+            instructions.append(
+                "This problem requires deeper analysis. Trace through the full code path, "
+                "understand the internal mechanisms, and form a complete design before "
+                "attempting any fix."
+            )
+        elif action.type == "block_submission":
+            instructions.append(
+                "Submission blocked by control plane. Fix the identified issue first."
+            )
+
+    return {
+        "next_phase": next_phase,
+        "instructions": instructions,
+        "enforce_principals": enforce_principals,
+        "failure_layer": record.failure_layer,
+        "confidence": record.confidence,
+    }

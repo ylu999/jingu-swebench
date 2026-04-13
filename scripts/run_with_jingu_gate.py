@@ -1064,12 +1064,16 @@ def main():
     # ── Failure layer breakdown (semantic rootcause) ──────────────────────────
     failure_layer_breakdown: dict[str, int] = {}
     failure_layer_instances: dict[str, list[str]] = {}
+    failure_records: list[dict] = []
     for r in results:
         if not r or r.get("accepted"):
             continue
         fl = r.get("failure_layer") or "unknown"
         failure_layer_breakdown[fl] = failure_layer_breakdown.get(fl, 0) + 1
         failure_layer_instances.setdefault(fl, []).append(r.get("instance_id", "?"))
+        fr = r.get("failure_record")
+        if fr:
+            failure_records.append(fr)
 
     report = {
         "mode":             args.mode,
@@ -1090,6 +1094,7 @@ def main():
         "failure_breakdown": failure_breakdown,  # jingu mode only; empty for baseline
         "failure_layer_breakdown": failure_layer_breakdown,
         "failure_layer_instances": failure_layer_instances,
+        "failure_records": failure_records,
         "bundle_activation": _get_bundle_activation(args.mode),
         "execution_identity": _identity,
         "model_usage": {

@@ -132,6 +132,7 @@ class InstanceResult:
     attempt_delta: Optional[dict] = None
     # Semantic rootcause layer (from failure_classifier.classify_failure_layer)
     failure_layer: Optional[str] = None
+    failure_record: Optional[dict] = None
     # Rejection-only fields
     status: Optional[str] = None
     failure_type: Optional[str] = None
@@ -157,6 +158,7 @@ class InstanceResult:
             d["attempts_log"] = self.attempts_log
             d["attempt_delta"] = self.attempt_delta
             d["failure_layer"] = self.failure_layer
+            d["failure_record"] = self.failure_record
             return d
         d["accepted"] = True
         d["patch"] = self.patch
@@ -1232,12 +1234,20 @@ class JinguAgent:
                         jingu_body["failure_routing"] = None
                         jingu_body["repair_directive"] = None
                         jingu_body["retry_mode"] = "generic"
-                    # Failure layer: semantic rootcause classification
+                    # Failure layer: semantic rootcause classification (full FailureRecord)
                     _qj_hist = _monitor.quick_judge_history if hasattr(_monitor, 'quick_judge_history') else None
-                    _fl = classify_failure_layer(cv_flat, _qj_hist, _ft)
-                    jingu_body["failure_layer"] = _fl
-                    if _fl and _fl != "unknown":
-                        print(f"    [failure-layer] {_fl}", flush=True)
+                    _fr = classify_failure_layer(cv_flat, _qj_hist, _ft, instance_id=instance_id)
+                    jingu_body["failure_layer"] = _fr.failure_layer
+                    jingu_body["failure_record"] = _fr.to_dict()
+                    # Route from failure record for enhanced retry
+                    _fr_routing = route_from_failure(_fr)
+                    jingu_body["failure_layer_routing"] = _fr_routing
+                    if _fr.failure_layer != "unknown":
+                        print(f"    [failure-layer] {_fr.failure_layer}"
+                              f"  phase={_fr.phase_of_failure}"
+                              f"  confidence={_fr.confidence:.2f}"
+                              f"  actions={[a.type for a in _fr.recommended_actions]}",
+                              flush=True)
                 # p207-P4: store parsed test results as structured data for all consumers.
                 # Calls parse_pytest_output on CV stdout so GovernancePacks, retry_controller,
                 # and any future consumer can access failing_tests/error_excerpts/summary
@@ -1476,7 +1486,10 @@ class JinguAgent:
         )
         from jingu_gate_bridge import evaluate_patch_from_traj
         from retry_controller import build_retry_plan, RetryPlan
-        from failure_classifier import classify_failure, get_routing as get_failure_routing, classify_failure_layer
+        from failure_classifier import (
+            classify_failure, get_routing as get_failure_routing,
+            classify_failure_layer, route_from_failure,
+        )
         from repair_prompts import build_repair_prompt
         from failure_routing import route_failure as route_failure_p216, is_data_driven_routing_enabled
         from strategy_prompts import get_strategy_prompt
@@ -2291,10 +2304,12 @@ class JinguAgent:
                     print(f"    [strategy-log] WARNING: failed to write entry: {_log_err}")
 
         if not candidates:
-            # Grab failure_layer from last attempt's jingu_body
+            # Grab failure_layer + failure_record from last attempt's jingu_body
             _last_fl = None
+            _last_fr = None
             if jingu_body and isinstance(jingu_body, dict):
                 _last_fl = jingu_body.get("failure_layer")
+                _last_fr = jingu_body.get("failure_record")
             return InstanceResult(
                 instance_id=instance_id,
                 accepted=False,
@@ -2305,6 +2320,7 @@ class JinguAgent:
                 attempts_log=attempts_log,
                 attempt_delta=delta,
                 failure_layer=_last_fl,
+                failure_record=_last_fr,
             )
 
         best = max(candidates, key=lambda c: c["score"])
