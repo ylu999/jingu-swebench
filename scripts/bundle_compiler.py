@@ -922,6 +922,10 @@ _cached_bundle: "CompiledBundle | None" = None
 
 def _compile_bundle_uncached(path: "str | None") -> "CompiledBundle":
     """Run all 8 stages and return a CompiledBundle. Raises CompilationError on fatal errors."""
+    # S0: Startup assertion — schema_field_guidance must be importable.
+    # Fail fast at compile time, not when some phase happens to need it.
+    from schema_field_guidance import render_schema_field_guidance, validate_schema_descriptions  # noqa: F401
+
     bundle_path = path or os.environ.get("JINGU_BUNDLE_PATH", DEFAULT_BUNDLE_PATH)
 
     # S1: Parse

@@ -238,3 +238,74 @@ class TestFieldNamingConsistency:
         assert isinstance(record, PhaseRecord)
         # The record should have the content accessible
         assert "Bug in file.py:10" in record.root_cause
+
+
+class TestSSTProjectionChain:
+    """Verify the '1 source → 1 renderer → 2 projections' chain.
+
+    If you change a schema field's description, the tool description and
+    phase prompt must both reflect the change — without touching any
+    hardcoded text. This test verifies that by patching a description
+    and asserting both projections update.
+    """
+
+    def test_schema_description_change_propagates_to_tool_description(self):
+        """Change schema description → tool description changes."""
+        import copy
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "mini-swe-agent"))
+        from jingu_model import _build_phase_record_tool
+
+        contract = _load_bundle_analyze()
+        schema = copy.deepcopy(contract["schema"])
+
+        # Baseline: build tool with original schema
+        tool_original = _build_phase_record_tool("ANALYZE", schema)
+        desc_original = tool_original["function"]["description"]
+        assert "root cause" in desc_original.lower()
+
+        # Mutate: change root_cause description to something unique
+        marker = "UNIQUE_MARKER_FOR_REGRESSION_TEST_12345"
+        schema["properties"]["root_cause"]["description"] = marker
+
+        # Rebuild: tool description must contain the new marker
+        tool_mutated = _build_phase_record_tool("ANALYZE", schema)
+        desc_mutated = tool_mutated["function"]["description"]
+        assert marker in desc_mutated, (
+            f"Changed schema description to '{marker}' but tool description "
+            f"did not update. Tool desc: {desc_mutated[:200]}..."
+        )
+
+    def test_schema_description_change_propagates_to_renderer(self):
+        """Change schema description → renderer output changes."""
+        import copy
+        from schema_field_guidance import render_schema_field_guidance
+
+        contract = _load_bundle_analyze()
+        schema = copy.deepcopy(contract["schema"])
+
+        marker = "UNIQUE_MARKER_FOR_RENDERER_TEST_67890"
+        schema["properties"]["causal_chain"]["description"] = marker
+
+        guidance = render_schema_field_guidance(schema, phase="ANALYZE")
+        assert marker in guidance, (
+            f"Changed schema description to '{marker}' but renderer output "
+            f"did not update. Guidance: {guidance[:200]}..."
+        )
+
+    def test_all_bundle_schema_descriptions_appear_in_tool_description(self):
+        """Every non-trivial schema field description must appear in tool desc."""
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "mini-swe-agent"))
+        from jingu_model import _build_phase_record_tool
+
+        contract = _load_bundle_analyze()
+        schema = contract["schema"]
+        tool = _build_phase_record_tool("ANALYZE", schema)
+        desc = tool["function"]["description"]
+
+        for field_name, field_schema in schema["properties"].items():
+            field_desc = field_schema.get("description", "")
+            if field_desc and len(field_desc) > 10:
+                assert field_desc in desc, (
+                    f"Schema field '{field_name}' has description '{field_desc[:60]}...' "
+                    f"but it does not appear in the tool description."
+                )
