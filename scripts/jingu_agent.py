@@ -1641,6 +1641,25 @@ class JinguAgent:
                     )
                     break  # task_success = instance-terminal
 
+                # WS-3: step governance timeout — phase-specific failure attribution
+                if _esv.reason.startswith("step_governance_timeout_"):
+                    _stalled_phase = _esv.reason.replace("step_governance_timeout_", "").upper()
+                    last_failure = (
+                        f"GOVERNANCE TIMEOUT: You spent too many steps in {_stalled_phase} phase "
+                        f"without submitting a phase record. "
+                        f"On retry, you MUST submit a phase record within the deadline. "
+                        f"Be direct: read the relevant code, form your conclusion, and submit immediately. "
+                        f"Do NOT explore endlessly."
+                    )
+                    print(
+                        f"  [cp] step_governance_timeout phase={_stalled_phase}"
+                        f" attempt={attempt}/{self._max_attempts}"
+                        f" — attempt-terminal, resetting cp_state for next attempt",
+                        flush=True,
+                    )
+                    cp_state_holder[0] = initial_reasoning_state("OBSERVE")
+                    continue
+
                 _scope = early_stop_scope(_esv.reason)
                 if _scope == "attempt_terminal":
                     if patch:

@@ -47,6 +47,9 @@ def early_stop_scope(reason: str) -> str:
         return "instance_terminal"
     if reason in _ATTEMPT_TERMINAL_REASONS:
         return "attempt_terminal"
+    # Step-governance timeouts are attempt-terminal (dynamic reasons with phase suffix)
+    if reason.startswith("step_governance_timeout_"):
+        return "attempt_terminal"
     return "unknown"
 
 
