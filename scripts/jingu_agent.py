@@ -1014,6 +1014,7 @@ class JinguAgent:
             extract_jingu_body, classify_failure, get_failure_routing,
             parse_pytest_output,
         )
+        from failure_classifier import classify_failure_layer, route_from_failure
         from step_monitor_state import StepMonitorState, StopExecution
 
         instance = self._instance
