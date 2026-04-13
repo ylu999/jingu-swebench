@@ -384,10 +384,19 @@ class JinguAgent:
 
         cp_holder = self._cp_state_holder if self._cp_state_holder else None
 
-        # Section 2: verify
+        # Section 2: verify + quick judge
         patch_non_empty = _step_verify_if_needed(
             agent_self, state=self._state, verify_debounce_s=5.0
         )
+
+        # E1: inject quick judge message if pending (system-originated signal)
+        _qj_msg = getattr(self._state, '_pending_quick_judge_message', '')
+        if _qj_msg:
+            agent_self.messages.append({
+                "role": "user",
+                "content": _qj_msg,
+            })
+            self._state._pending_quick_judge_message = ""
 
         # Section 3: cp update + verdict
         try:

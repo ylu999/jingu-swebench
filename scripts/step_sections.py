@@ -26,7 +26,6 @@ if TYPE_CHECKING:
 # Only import what is needed at module level; heavy deps stay inside functions.
 # ---------------------------------------------------------------------------
 from signal_extraction import _msg_has_env_mutation, _msg_has_signal
-from controlled_verify import run_controlled_verify
 from control.reasoning_state import (
     decide_next,
     VerdictStop, VerdictRedirect, VerdictAdvance, VerdictContinue,
@@ -239,12 +238,13 @@ def _step_verify_if_needed(
     verify_debounce_s: float,
 ) -> bool:
     """
-    Section 2: patch signal detection + conditional inner-verify dispatch.
+    Section 2: patch signal detection + conditional quick judge dispatch.
 
     Returns step_patch_non_empty (True if agent has a real, non-empty patch).
-    Side-effects: may launch a background threading.Thread for inner-verify.
+    Side-effects: may run a synchronous quick judge (max 30s) and set
+    state._pending_quick_judge_message for the caller to inject.
     """
-    import threading as _thr
+    import hashlib as _hl
     import subprocess as _sp_iv
 
     step_patch_non_empty = False
@@ -259,12 +259,6 @@ def _step_verify_if_needed(
             cid = state.container_id
             if not cid:
                 break
-            now = time.monotonic()
-            with state._lock:
-                too_soon = (now - state.last_verify_time) < verify_debounce_s
-                in_flight = state.verify_in_flight
-            if too_soon or in_flight:
-                break
             _base_commit = state.instance.get("base_commit", "HEAD")
             _git_diff_result = _sp_iv.run(
                 ["docker", "exec", "-w", "/testbed", cid, "git", "diff", _base_commit],
@@ -275,32 +269,75 @@ def _step_verify_if_needed(
             if not current_patch:
                 step_patch_non_empty = False
                 break
-            with state._lock:
-                state.last_verified_patch = current_patch
-                state.last_verify_time = now
-                state.verify_in_flight = True
 
-            step_n = agent_self.n_calls
-            print(
-                f"    [inner-verify] triggering verify at step={step_n} "
-                f"(patch changed, container={cid[:12]}...)",
-                flush=True,
-            )
-
-            def _run_verify(patch=current_patch, container=cid, step=step_n):
+            # E1: Quick Judge — synchronous targeted test signal
+            patch_hash = _hl.md5(current_patch.encode()).hexdigest()[:16]
+            if state.should_trigger_quick_judge(patch_hash):
                 try:
-                    cv_result = run_controlled_verify(
-                        patch, state.instance, container, timeout_s=None,
-                        apply_test_patch=False,
-                    )
-                    state.record_verify(step, cv_result)
-                except Exception as exc:
-                    print(f"    [inner-verify] ERROR: {exc}", flush=True)
-                finally:
-                    with state._lock:
-                        state.verify_in_flight = False
+                    from quick_judge import run_quick_judge, format_agent_message, QuickJudgeResult
 
-            _thr.Thread(target=_run_verify, daemon=True).start()
+                    # Extract changed files from patch
+                    changed_files = [
+                        line[6:].strip()
+                        for line in current_patch.splitlines()
+                        if line.startswith("+++ b/")
+                    ]
+
+                    # Reconstruct previous result for direction comparison
+                    prev_result = None
+                    if state.quick_judge_history:
+                        prev = state.quick_judge_history[-1]
+                        prev_result = QuickJudgeResult(
+                            step=prev.get("step", 0),
+                            tests_targeted=prev.get("tests_targeted", 0),
+                            tests_passed=prev.get("tests_passed", 0),
+                            tests_failed=prev.get("tests_failed", 0),
+                            tests_error=prev.get("tests_error", 0),
+                            failing_test_names=prev.get("failing_test_names", []),
+                            elapsed_ms=prev.get("elapsed_ms", 0),
+                            direction=prev.get("direction", "first_signal"),
+                        )
+
+                    step_n = agent_self.n_calls
+                    print(
+                        f"    [quick-judge] triggering at step={step_n} "
+                        f"(patch changed, container={cid[:12]}...)",
+                        flush=True,
+                    )
+
+                    qj_result = run_quick_judge(
+                        patch=current_patch,
+                        instance=state.instance,
+                        container_id=cid,
+                        changed_files=changed_files,
+                        previous_result=prev_result,
+                        step=step_n,
+                    )
+
+                    # Record in telemetry
+                    state.record_quick_judge(step_n, {
+                        "step": step_n,
+                        "tier": "quick",
+                        "trigger_source": "automatic_patch_detected",
+                        "tests_targeted": qj_result.tests_targeted,
+                        "tests_passed": qj_result.tests_passed,
+                        "tests_failed": qj_result.tests_failed,
+                        "tests_error": qj_result.tests_error,
+                        "failing_test_names": qj_result.failing_test_names,
+                        "elapsed_ms": qj_result.elapsed_ms,
+                        "direction": qj_result.direction,
+                        "patch_hash": patch_hash,
+                        "invoked": True,
+                        "acknowledged": None,
+                        "effective": None,
+                    })
+
+                    # Format message for agent injection (consumed by jingu_agent.py)
+                    state._pending_quick_judge_message = format_agent_message(qj_result)
+
+                except Exception as _qj_exc:
+                    print(f"    [quick-judge] ERROR (non-fatal): {_qj_exc}", flush=True)
+
             break
 
     return step_patch_non_empty

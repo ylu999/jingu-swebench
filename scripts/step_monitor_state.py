@@ -136,6 +136,7 @@ class StepMonitorState:
         self.last_quick_judge_time: float = 0.0        # monotonic time at last quick judge
         self.last_quick_judge_patch: str = ""          # patch hash at last quick judge
         self._quick_judge_selected_tests: list[str] | None = None  # locked test subset for this attempt
+        self._pending_quick_judge_message: str = ""  # transient: message to inject after quick judge
 
     @classmethod
     def from_checkpoint_dict(cls, d: dict, instance: dict | None = None) -> "StepMonitorState":
