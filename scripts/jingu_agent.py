@@ -1242,6 +1242,31 @@ class JinguAgent:
                               f"partial={_cp > 0 and _cf > 0}")
                 # Store full verify_history for observability
                 jingu_body["verify_history"] = _monitor.verify_history
+                # E1: Quick Judge telemetry
+                if hasattr(_monitor, 'quick_judge_history') and _monitor.quick_judge_history:
+                    jingu_body["quick_judge_history"] = _monitor.quick_judge_history
+                    jingu_body["quick_judge_invoked"] = len(_monitor.quick_judge_history)
+                    jingu_body["quick_judge_acknowledged"] = sum(
+                        1 for qj in _monitor.quick_judge_history if qj.get("acknowledged")
+                    )
+                    jingu_body["quick_judge_directions"] = [
+                        qj.get("direction", "unknown") for qj in _monitor.quick_judge_history
+                    ]
+                    # L3 effectiveness detection
+                    try:
+                        from quick_judge import detect_effective
+                        jingu_body["quick_judge_effective"] = detect_effective(_monitor.quick_judge_history)
+                    except Exception:
+                        jingu_body["quick_judge_effective"] = None
+                    # Log quick judge summary
+                    _qj_dirs = [qj.get("direction", "?") for qj in _monitor.quick_judge_history]
+                    print(f"    [quick_judge] invoked={len(_monitor.quick_judge_history)} "
+                          f"directions={_qj_dirs} "
+                          f"effective={jingu_body.get('quick_judge_effective')}",
+                          flush=True)
+                else:
+                    jingu_body["quick_judge_invoked"] = 0
+                    jingu_body["quick_judge_effective"] = None
                 # p190: per-phase records — one entry per VerdictAdvance during this attempt
                 jingu_body["phase_records"] = [r.as_dict() for r in _monitor.phase_records]
                 # Plan-B strong: extraction metrics — admitted vs diagnostic rates
