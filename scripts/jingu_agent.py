@@ -130,6 +130,8 @@ class InstanceResult:
     model_usage: dict = field(default_factory=dict)
     attempts_log: list = field(default_factory=list)
     attempt_delta: Optional[dict] = None
+    # Semantic rootcause layer (from failure_classifier.classify_failure_layer)
+    failure_layer: Optional[str] = None
     # Rejection-only fields
     status: Optional[str] = None
     failure_type: Optional[str] = None
@@ -154,6 +156,7 @@ class InstanceResult:
             d["model_usage"] = self.model_usage
             d["attempts_log"] = self.attempts_log
             d["attempt_delta"] = self.attempt_delta
+            d["failure_layer"] = self.failure_layer
             return d
         d["accepted"] = True
         d["patch"] = self.patch
@@ -1229,6 +1232,12 @@ class JinguAgent:
                         jingu_body["failure_routing"] = None
                         jingu_body["repair_directive"] = None
                         jingu_body["retry_mode"] = "generic"
+                    # Failure layer: semantic rootcause classification
+                    _qj_hist = _monitor.quick_judge_history if hasattr(_monitor, 'quick_judge_history') else None
+                    _fl = classify_failure_layer(cv_flat, _qj_hist, _ft)
+                    jingu_body["failure_layer"] = _fl
+                    if _fl and _fl != "unknown":
+                        print(f"    [failure-layer] {_fl}", flush=True)
                 # p207-P4: store parsed test results as structured data for all consumers.
                 # Calls parse_pytest_output on CV stdout so GovernancePacks, retry_controller,
                 # and any future consumer can access failing_tests/error_excerpts/summary
@@ -1467,7 +1476,7 @@ class JinguAgent:
         )
         from jingu_gate_bridge import evaluate_patch_from_traj
         from retry_controller import build_retry_plan, RetryPlan
-        from failure_classifier import classify_failure, get_routing as get_failure_routing
+        from failure_classifier import classify_failure, get_routing as get_failure_routing, classify_failure_layer
         from repair_prompts import build_repair_prompt
         from failure_routing import route_failure as route_failure_p216, is_data_driven_routing_enabled
         from strategy_prompts import get_strategy_prompt
@@ -2282,6 +2291,10 @@ class JinguAgent:
                     print(f"    [strategy-log] WARNING: failed to write entry: {_log_err}")
 
         if not candidates:
+            # Grab failure_layer from last attempt's jingu_body
+            _last_fl = None
+            if jingu_body and isinstance(jingu_body, dict):
+                _last_fl = jingu_body.get("failure_layer")
             return InstanceResult(
                 instance_id=instance_id,
                 accepted=False,
@@ -2291,6 +2304,7 @@ class JinguAgent:
                 model_usage=inst_usage,
                 attempts_log=attempts_log,
                 attempt_delta=delta,
+                failure_layer=_last_fl,
             )
 
         best = max(candidates, key=lambda c: c["score"])

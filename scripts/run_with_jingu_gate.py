@@ -1061,6 +1061,16 @@ def main():
         except Exception:
             pass
 
+    # ── Failure layer breakdown (semantic rootcause) ──────────────────────────
+    failure_layer_breakdown: dict[str, int] = {}
+    failure_layer_instances: dict[str, list[str]] = {}
+    for r in results:
+        if not r or r.get("accepted"):
+            continue
+        fl = r.get("failure_layer") or "unknown"
+        failure_layer_breakdown[fl] = failure_layer_breakdown.get(fl, 0) + 1
+        failure_layer_instances.setdefault(fl, []).append(r.get("instance_id", "?"))
+
     report = {
         "mode":             args.mode,
         "run_id":           run_id,
@@ -1078,6 +1088,8 @@ def main():
             "rescued_rate": round(attempt2_rescued / max(1, len(args.instance_ids) - attempt1_accepted), 4),
         },
         "failure_breakdown": failure_breakdown,  # jingu mode only; empty for baseline
+        "failure_layer_breakdown": failure_layer_breakdown,
+        "failure_layer_instances": failure_layer_instances,
         "bundle_activation": _get_bundle_activation(args.mode),
         "execution_identity": _identity,
         "model_usage": {
@@ -1138,6 +1150,12 @@ def main():
         print(f"  ── FAILURE BREAKDOWN (jingu) ──")
         for fc, cnt in sorted(failure_breakdown.items(), key=lambda x: -x[1]):
             print(f"    {fc:30s}: {cnt}")
+    if failure_layer_breakdown:
+        print(f"  ── FAILURE LAYER (semantic rootcause) ──")
+        for fl, cnt in sorted(failure_layer_breakdown.items(), key=lambda x: -x[1]):
+            insts = failure_layer_instances.get(fl, [])
+            insts_str = ", ".join(i.replace("django__django-", "dj-") for i in insts[:5])
+            print(f"    {fl:45s}: {cnt}  [{insts_str}]")
     print()
     print(f"  ── TIMING ──")
     print(f"    dataset prefetch   : {t_ds.elapsed:.1f}s")
