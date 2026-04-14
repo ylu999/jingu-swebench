@@ -188,6 +188,86 @@ def _extract_structured_from_content(phase_record) -> dict[str, str]:
     return result
 
 
+# ── Structural output detection ───────────────────────────────────────────────
+
+def _has_structured_output(phase_record) -> bool:
+    """Detect whether phase_record has populated named fields (structured output).
+
+    Returns True if the phase_record has at least one non-empty structural field
+    beyond the basic content/phase/subtype. This indicates the record came from
+    structured extraction (json_schema response_format) rather than free-text parsing.
+    """
+    structural_fields = (
+        "root_cause", "causal_chain", "evidence_refs", "alternative_hypotheses",
+        "options", "chosen", "rationale", "test_results", "success_criteria_met",
+        "scope_boundary", "files_to_modify", "residual_risks", "invariant_capture",
+    )
+    for field_name in structural_fields:
+        val = getattr(phase_record, field_name, None)
+        if val:  # non-empty string or non-empty list
+            return True
+    return False
+
+
+# ── Structural principal checks (schema-field based, no regex) ────────────────
+
+def _structural_principal_check(rule_principal: str, phase_record) -> float:
+    """Dispatch structural check for a principal based on parsed PhaseRecord fields.
+
+    Returns 1.0 for pass, 0.0 for fail.
+    Only called when ctx.structured_output=True and rule.check_mode="structural".
+    """
+    pr = phase_record
+    checks = {
+        "causal_grounding": lambda: (
+            len(getattr(pr, "evidence_refs", []) or []) >= 1
+            and len(getattr(pr, "root_cause", "") or "") >= 10
+            and len(getattr(pr, "causal_chain", "") or "") >= 20
+        ),
+        "evidence_linkage": lambda: (
+            len(getattr(pr, "evidence_refs", []) or []) >= 1
+        ),
+        "alternative_hypothesis_check": lambda: (
+            len(getattr(pr, "alternative_hypotheses", []) or []) >= 1
+        ),
+        "ontology_alignment": lambda: (
+            (getattr(pr, "phase", "") or "") != ""
+            and (getattr(pr, "subtype", "") or "") != "unknown"
+            and (getattr(pr, "subtype", "") or "") != ""
+        ),
+        "option_comparison": lambda: (
+            len(getattr(pr, "options", []) or []) >= 2
+            and (getattr(pr, "chosen", "") or "") != ""
+            and (getattr(pr, "rationale", "") or "") != ""
+        ),
+        "result_verification": lambda: (
+            bool(getattr(pr, "test_results", None))
+            and len(getattr(pr, "success_criteria_met", []) or []) >= 1
+        ),
+        "evidence_completeness": lambda: (
+            len(getattr(pr, "evidence_refs", []) or []) >= 2
+        ),
+        "scope_minimality": lambda: (
+            (getattr(pr, "scope_boundary", "") or "") != ""
+            and len(getattr(pr, "files_to_modify", []) or []) >= 1
+        ),
+        "residual_risk_detection": lambda: (
+            len(getattr(pr, "residual_risks", []) or []) >= 1
+        ),
+        "invariant_capture": lambda: (
+            len(getattr(pr, "invariant_capture", "") or "") >= 10
+        ),
+    }
+
+    check_fn = checks.get(rule_principal)
+    if check_fn is None:
+        return -1.0  # no structural check available for this principal
+    try:
+        return 1.0 if check_fn() else 0.0
+    except Exception:
+        return -1.0  # structural check failed, fall back to behavioral
+
+
 # ── Rule implementations ──────────────────────────────────────────────────────
 
 def _infer_causal_grounding(phase_record) -> tuple[float, list[str], str]:
@@ -918,16 +998,56 @@ def run_inference(phase_record, subtype: str) -> InferredPrincipalResult:
     absent: list[str] = []
     details: dict[str, InferenceResult] = {}
 
+    # Detect whether phase_record has structured output (parsed named fields)
+    structured_output = _has_structured_output(phase_record)
+
     for rule in _RULE_REGISTRY:
         # applies_to filter: None means all subtypes, list means must match
         if rule.applies_to is not None and subtype not in rule.applies_to:
             continue
 
-        try:
-            score, signals, explanation = rule.infer(phase_record)
-        except Exception:
-            # Exception safety: skip this rule, do not affect others
-            continue
+        score = 0.0
+        signals: list[str] = []
+        explanation = ""
+        used_structural = False
+
+        # Structural-first dispatch: if structured output available and rule is structural,
+        # try the structural check first. Falls back to behavioral if structural returns -1.
+        if structured_output and rule.check_mode in ("structural", "hybrid"):
+            structural_score = _structural_principal_check(rule.principal, phase_record)
+            if structural_score >= 0.0:
+                # Structural check succeeded (returned 0.0 or 1.0)
+                score = structural_score
+                signals = ["structural_check"]
+                explanation = (
+                    f"Structural check {'passed' if score >= rule.threshold else 'failed'} "
+                    f"for {rule.principal}"
+                )
+                used_structural = True
+
+        # Behavioral path: either structural not available, or structural returned -1 (no check)
+        if not used_structural:
+            try:
+                score, signals, explanation = rule.infer(phase_record)
+            except Exception:
+                # Exception safety: skip this rule, do not affect others
+                continue
+
+        # Shadow comparison telemetry: when structural was used, also run behavioral
+        # and log agreement/disagreement for calibration
+        if used_structural:
+            try:
+                beh_score, _beh_signals, _beh_explanation = rule.infer(phase_record)
+                beh_pass = beh_score >= rule.threshold
+                str_pass = score >= rule.threshold
+                agreement = "agree" if beh_pass == str_pass else "disagree"
+                print(
+                    f"[principal_inference] shadow_compare principal={rule.principal} "
+                    f"structural={score:.2f} behavioral={beh_score:.2f} "
+                    f"agreement={agreement}"
+                )
+            except Exception:
+                pass  # shadow comparison is best-effort, never blocks
 
         result = InferenceResult(
             principal=rule.principal,
