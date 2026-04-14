@@ -517,6 +517,39 @@ def _step_cp_update_and_verdict(
 
     _step_verdict = decide_next(_cp_s)
 
+    # ── P1-min: Repeated patch detection (within-attempt) ────────────
+    # If agent writes the same patch content 3+ times in one attempt,
+    # override verdict to VerdictStop(repeated_patch). This prevents
+    # "write same patch → verify fails → write same patch" loops that
+    # burn steps without progress.
+    _REPEATED_PATCH_LIMIT = 3
+    if step_patch_non_empty and hasattr(agent_self, "model"):
+        try:
+            _env = getattr(agent_self, "environment", None)
+            if _env is not None:
+                _diff = _env.communicate("cd /testbed && git diff 2>/dev/null || true")
+                if _diff and _diff.strip():
+                    import hashlib
+                    _ph = hashlib.md5(_diff.strip().encode()).hexdigest()[:12]
+                    state._patch_hash_counts[_ph] = state._patch_hash_counts.get(_ph, 0) + 1
+                    _ph_count = state._patch_hash_counts[_ph]
+                    if _ph_count >= _REPEATED_PATCH_LIMIT:
+                        print(
+                            f"    [p1-min] repeated_patch: hash={_ph}"
+                            f" count={_ph_count} limit={_REPEATED_PATCH_LIMIT}"
+                            f" → VerdictStop(repeated_patch)",
+                            flush=True,
+                        )
+                        _step_verdict = VerdictStop(reason="repeated_patch")
+                    elif _ph_count >= 2:
+                        print(
+                            f"    [p1-min] repeated_patch warning: hash={_ph}"
+                            f" count={_ph_count}/{_REPEATED_PATCH_LIMIT}",
+                            flush=True,
+                        )
+        except Exception:
+            pass  # non-critical — don't crash on hash check failure
+
     # ── RC-1: Fail-closed admission ──────────────────────────────────
     # VerdictAdvance requires an admitted phase record. If agent hasn't
     # submitted one yet, suppress VerdictAdvance → VerdictContinue.

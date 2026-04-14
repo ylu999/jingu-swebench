@@ -128,6 +128,10 @@ class StepMonitorState:
         # _execute_write_seen: True once a write/patch signal is observed in EXECUTE phase
         self._execute_entry_step: int = -1
         self._execute_write_seen: bool = False
+        # P1-min: within-attempt repeated patch detection.
+        # Tracks patch content hashes seen in this attempt. If same hash appears
+        # _REPEATED_PATCH_LIMIT times, triggers typed stop (repeated_patch).
+        self._patch_hash_counts: dict[str, int] = {}   # hash → count
         # Plan-A: extraction retry counts per phase — gates phase advance on extraction failure.
         # Key = phase name (str), value = consecutive extraction failure count.
         # Reset per attempt. After _MAX_EXTRACTION_RETRIES, force advance with no record.
