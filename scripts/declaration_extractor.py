@@ -8,12 +8,52 @@ This is structural extraction — deterministic regex, no LLM.
 """
 
 import re
+from dataclasses import dataclass, field as dataclass_field
 from typing import TypedDict
 
 
 class Declaration(TypedDict, total=False):
     type: str
     principals: list[str]
+
+
+# ── Extraction telemetry types (C-05) ────────────────────────────────────────
+
+
+@dataclass
+class ExtractionMeta:
+    """Metadata about how a PhaseRecord was extracted."""
+    source: str                    # "tool_submitted" | "structured_extract" | "regex_fallback"
+    fields_in_schema: list[str]    # fields defined in bundle schema for this phase
+    fields_extracted: list[str]    # fields successfully extracted (non-empty)
+    fields_missing: list[str]     # fields in schema but not extracted
+    fields_extra: list[str]       # fields extracted but not in schema
+
+
+@dataclass
+class FieldExtractionRecord:
+    """Per-field extraction detail for telemetry."""
+    field: str
+    in_schema: bool
+    prompted: bool
+    present_in_response: bool
+    extracted: bool
+    extraction_source: str
+    value_type: str                # "str" | "list" | "dict" | "empty"
+    missing_reason: str            # "" | "not_in_response" | "no_phaserecord_field" | "extraction_failed"
+
+
+@dataclass
+class ExtractionTelemetry:
+    """Full extraction telemetry for one phase output."""
+    phase: str
+    subtype: str
+    extraction_source: str
+    schema_field_count: int
+    extracted_count: int
+    missing_count: int
+    extra_count: int
+    fields: list[FieldExtractionRecord] = dataclass_field(default_factory=list)
 
 
 _FIX_TYPE_RE = re.compile(r"FIX_TYPE:\s*([a-z_]+)", re.IGNORECASE)
@@ -207,15 +247,15 @@ def _build_content_preview(parsed: dict, phase: str) -> str:
     return "\n".join(parts)[:500]
 
 
-# Valid subtype values for validation (derived from SUBTYPE_CONTRACTS keys)
-_VALID_SUBTYPES: set[str] = {
-    "observation.fact_gathering",
-    "analysis.root_cause",
-    "decision.fix_direction",
-    "design.solution_shape",
-    "execution.code_patch",
-    "judge.verification",
-}
+# Valid subtype values for validation — derived from SUBTYPE_CONTRACTS (SST2).
+# Never hardcode; always derive from the canonical source.
+def _get_valid_subtypes() -> set[str]:
+    """Derive valid subtypes from canonical source (subtype_contracts)."""
+    try:
+        from subtype_contracts import SUBTYPE_CONTRACTS
+        return set(SUBTYPE_CONTRACTS.keys())
+    except ImportError:
+        return set()  # SST2: fallback returns empty, not a stale copy
 
 
 def build_phase_record_from_structured(
@@ -243,10 +283,12 @@ def build_phase_record_from_structured(
 
     # Subtype: prefer parsed value, validate against known subtypes, fallback to map
     raw_subtype = (parsed.get("subtype") or "").strip()
-    if raw_subtype and raw_subtype in _VALID_SUBTYPES:
+    if raw_subtype and raw_subtype in _get_valid_subtypes():
         subtype = raw_subtype
     else:
         subtype = _PHASE_SUBTYPE_MAP.get(phase_upper, "unknown")
+        if subtype == "unknown":
+            print(f"[declaration_extractor] WARNING: unknown subtype for phase={phase_upper}")
 
     principals = [p.strip().lower() for p in (parsed.get("principals") or []) if p.strip()]
 
@@ -329,16 +371,11 @@ _EVIDENCE_REF_RE = _re.compile(
 # Load subtype names from canonical source (subtype_contracts._PHASE_TO_SUBTYPE).
 # This ensures declaration_extractor and evaluate_admission use the same subtype strings,
 # so PhaseRecord.subtype matches the keys in SUBTYPE_CONTRACTS.
-# Fallback: static map if subtype_contracts is unavailable (no crash).
+# SST2 fallback: empty dict (returns "unknown" via .get default), not a stale copy.
 try:
     from subtype_contracts import _PHASE_TO_SUBTYPE as _PHASE_SUBTYPE_MAP  # type: ignore[assignment]
 except Exception:
-    _PHASE_SUBTYPE_MAP: dict[str, str] = {
-        "OBSERVE":  "observation",
-        "ANALYZE":  "analysis.root_cause",
-        "EXECUTE":  "execution.code_patch",
-        "JUDGE":    "judge.verification",
-    }
+    _PHASE_SUBTYPE_MAP: dict[str, str] = {}  # SST2: no hardcoded copy; all lookups yield "unknown"
 
 # Agent-declared phase names may use gerund/noun variants (e.g. "execution", "observation").
 # Normalize to canonical Phase enum values before _PHASE_SUBTYPE_MAP lookup.
@@ -430,6 +467,8 @@ def extract_phase_record(agent_message: str, phase: str, from_steps: list[int] |
     phase_upper = declared if declared else (phase or "").upper()
     phase_upper = _PHASE_NORM.get(phase_upper, phase_upper)
     subtype = _PHASE_SUBTYPE_MAP.get(phase_upper, "unknown")
+    if subtype == "unknown":
+        print(f"[declaration_extractor] WARNING: unknown subtype for phase={phase_upper}")
     principals = _extract_principals_from_message(agent_message)
     evidence_refs = _extract_evidence_refs(agent_message)
 
@@ -493,6 +532,8 @@ def extract_record_for_phase(
     # Step 2: target_phase is authoritative for this record — never let agent override it
     target_upper = _PHASE_NORM.get(target_phase.upper(), target_phase.upper())
     subtype = _PHASE_SUBTYPE_MAP.get(target_upper, "unknown")
+    if subtype == "unknown":
+        print(f"[declaration_extractor] WARNING: unknown subtype for phase={target_upper}")
 
     # Step 3: extract content signals (principals, evidence_refs apply to this record
     # only if the agent was addressing target_phase, else they belong to another phase)
@@ -552,3 +593,118 @@ def extract_record_for_phase(
         plan=structured.get("plan", ""),
     )
     return record, declared_phase, foreign_phase_declared
+
+
+# ── Unified extraction entry point (C-05) ────────────────────────────────────
+
+
+def _classify_value(val) -> str:
+    """Classify a PhaseRecord field value type for telemetry."""
+    if isinstance(val, str):
+        return "str" if val else "empty"
+    if isinstance(val, list):
+        return "list" if val else "empty"
+    if isinstance(val, dict):
+        return "dict" if val else "empty"
+    return "empty"
+
+
+def _is_non_empty(val) -> bool:
+    """Check if a PhaseRecord field value is non-empty."""
+    if isinstance(val, str):
+        return bool(val.strip())
+    if isinstance(val, (list, dict)):
+        return bool(val)
+    return False
+
+
+def _compute_extraction_meta(
+    record,
+    schema_fields: list[str],
+    source: str,
+) -> ExtractionMeta:
+    """Compute ExtractionMeta by comparing PhaseRecord fields against schema_fields.
+
+    Args:
+        record: PhaseRecord instance.
+        schema_fields: Field names defined in the bundle schema for this phase.
+        source: Extraction source identifier.
+
+    Returns:
+        ExtractionMeta with fields_extracted, fields_missing, fields_extra populated.
+    """
+    # Fields that are PhaseRecord metadata, not phase content fields
+    _META_FIELDS = {"phase", "subtype", "principals", "claims", "evidence_refs", "from_steps", "content"}
+
+    fields_extracted: list[str] = []
+    fields_missing: list[str] = []
+
+    for f in schema_fields:
+        val = getattr(record, f, None)
+        if val is not None and _is_non_empty(val):
+            fields_extracted.append(f)
+        else:
+            fields_missing.append(f)
+
+    # fields_extra: populated PhaseRecord content fields NOT in schema_fields
+    schema_set = set(schema_fields)
+    fields_extra: list[str] = []
+    for f in vars(record):
+        if f.startswith("_") or f in _META_FIELDS:
+            continue
+        if f in schema_set:
+            continue
+        val = getattr(record, f, None)
+        if val is not None and _is_non_empty(val):
+            fields_extra.append(f)
+
+    return ExtractionMeta(
+        source=source,
+        fields_in_schema=list(schema_fields),
+        fields_extracted=fields_extracted,
+        fields_missing=fields_missing,
+        fields_extra=fields_extra,
+    )
+
+
+def extract_phase_output(
+    *,
+    tool_submitted: dict | None,
+    structured_parsed: dict | None,
+    agent_message: str,
+    phase: str,
+    schema_fields: list[str],
+    from_steps: list[int] | None = None,
+) -> tuple:
+    """Unified extraction entry point: try tool_submitted > structured_parsed > regex fallback.
+
+    Priority:
+    1. tool_submitted (agent used a tool to submit structured data)
+    2. structured_parsed (structured_extract API call result)
+    3. agent_message regex fallback
+
+    Args:
+        tool_submitted: Dict from agent tool submission, or None.
+        structured_parsed: Dict from structured extraction API, or None.
+        agent_message: Raw agent message text (for regex fallback).
+        phase: Phase name (e.g. 'ANALYZE').
+        schema_fields: Field names from bundle schema for this phase.
+        from_steps: Step indices for provenance.
+
+    Returns:
+        Tuple of (PhaseRecord, ExtractionMeta).
+    """
+    if tool_submitted is not None:
+        record = build_phase_record_from_structured(tool_submitted, phase, from_steps)
+        source = "tool_submitted"
+    elif structured_parsed is not None:
+        record = build_phase_record_from_structured(structured_parsed, phase, from_steps)
+        source = "structured_extract"
+    else:
+        record, _declared, _foreign = extract_record_for_phase(
+            agent_message, phase, from_steps
+        )
+        source = "regex_fallback"
+
+    meta = _compute_extraction_meta(record, schema_fields, source)
+    return record, meta
