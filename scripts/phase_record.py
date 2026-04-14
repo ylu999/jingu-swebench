@@ -37,6 +37,26 @@ class PhaseRecord:
     expected_tests_to_pass: list[str] = field(default_factory=list)  # DECIDE: predicted passing tests
     expected_files_to_change: list[str] = field(default_factory=list)  # DECIDE: predicted changed files
     risk_level: str = ""                    # DECIDE: "low"/"medium"/"high"
+    # OBSERVE
+    observations: list[str] = field(default_factory=list)
+    # ANALYZE
+    alternative_hypotheses: list[dict] = field(default_factory=list)  # [{hypothesis, ruled_out_reason}]
+    # DECIDE
+    options: list[dict] = field(default_factory=list)  # [{name, pros: str[], cons: str[]}]
+    chosen: str = ""
+    rationale: str = ""
+    # DESIGN
+    files_to_modify: list[str] = field(default_factory=list)
+    scope_boundary: str = ""
+    invariants: list[str] = field(default_factory=list)
+    design_comparison: dict = field(default_factory=dict)  # {options, chosen, reason}
+    # EXECUTE
+    patch_description: str = ""
+    files_modified: list[str] = field(default_factory=list)
+    # JUDGE
+    test_results: dict = field(default_factory=dict)  # {passed: bool, details?: str}
+    success_criteria_met: list[dict] = field(default_factory=list)  # [{criterion, met, evidence?}]
+    residual_risks: list[str] = field(default_factory=list)
 
     def as_dict(self) -> dict:
         """Serialise to a plain dict for JSON output."""
@@ -63,4 +83,38 @@ class PhaseRecord:
             d["expected_files_to_change"] = self.expected_files_to_change
         if self.risk_level:
             d["risk_level"] = self.risk_level
+        # OBSERVE
+        if self.observations:
+            d["observations"] = self.observations
+        # ANALYZE
+        if self.alternative_hypotheses:
+            d["alternative_hypotheses"] = self.alternative_hypotheses
+        # DECIDE
+        if self.options:
+            d["options"] = self.options
+        if self.chosen:
+            d["chosen"] = self.chosen
+        if self.rationale:
+            d["rationale"] = self.rationale
+        # DESIGN
+        if self.files_to_modify:
+            d["files_to_modify"] = self.files_to_modify
+        if self.scope_boundary:
+            d["scope_boundary"] = self.scope_boundary
+        if self.invariants:
+            d["invariants"] = self.invariants
+        if self.design_comparison:
+            d["design_comparison"] = self.design_comparison
+        # EXECUTE
+        if self.patch_description:
+            d["patch_description"] = self.patch_description
+        if self.files_modified:
+            d["files_modified"] = self.files_modified
+        # JUDGE
+        if self.test_results:
+            d["test_results"] = self.test_results
+        if self.success_criteria_met:
+            d["success_criteria_met"] = self.success_criteria_met
+        if self.residual_risks:
+            d["residual_risks"] = self.residual_risks
         return d
