@@ -13,9 +13,18 @@ GateRejection carries:
 Consumer: retry_controller.py, repair_prompts.py, run_with_jingu_gate.py
 """
 
+from __future__ import annotations
+
+import logging
 import os
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from bundle_compiler import CompiledValidator
+
+logger = logging.getLogger(__name__)
 
 
 # Feature flag: toggle SDG feedback on/off
@@ -36,6 +45,35 @@ class ContractView:
     """What the gate expects -- the full contract for a phase/subtype."""
     required_fields: list[str]
     field_specs: dict[str, FieldSpec] = field(default_factory=dict)
+    required_principals: list[str] = field(default_factory=list)
+    forbidden_principals: list[str] = field(default_factory=list)
+
+    @classmethod
+    def from_compiled_validator(cls, cv: CompiledValidator) -> ContractView:
+        """Construct a ContractView from a CompiledValidator (bundle-derived).
+
+        Maps each required_field to a FieldSpec with required=True.
+        Unknown fields are logged as warnings but do not crash.
+        """
+        field_specs: dict[str, FieldSpec] = {}
+        for fname in cv.required_fields:
+            if not isinstance(fname, str) or not fname:
+                logger.warning(
+                    "[ContractView.from_compiled_validator] skipping non-string or empty field: %r",
+                    fname,
+                )
+                continue
+            field_specs[fname] = FieldSpec(
+                description=f"Required field '{fname}' (from bundle)",
+                required=True,
+            )
+
+        return cls(
+            required_fields=list(cv.required_fields),
+            field_specs=field_specs,
+            required_principals=list(cv.required_principals),
+            forbidden_principals=list(cv.forbidden_principals),
+        )
 
 
 @dataclass
