@@ -231,9 +231,13 @@ class JinguModel(LitellmModel):
                 "type": "function",
                 "function": {"name": "submit_phase_record"},
             }
+            # Disable extended thinking for forced calls — LiteLLM silently
+            # downgrades tool_choice to 'auto' when reasoning is enabled on
+            # Claude Sonnet 4.5, making the force a no-op.
+            extra_kwargs["thinking"] = {"type": "disabled"}
             logger.info(
                 "phase_submission_enforcement: FORCING tool_choice=submit_phase_record"
-                " phase=%s", self._current_phase,
+                " phase=%s (thinking disabled for forced call)", self._current_phase,
             )
             self._force_phase_record_next = False  # One-shot reset
 
