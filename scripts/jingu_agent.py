@@ -805,7 +805,7 @@ class JinguAgent:
                 f"Every step matters — go straight to submission as soon as the required tests pass."
             )
         if previous_failure:
-            extra_parts.append(f"Previous attempt failed: {previous_failure[:300]}")
+            extra_parts.append(f"Previous attempt failed: {previous_failure[:800]}")
 
         # p229: prompt assembly snapshot — persist assembled prompt for offline analysis.
         try:
