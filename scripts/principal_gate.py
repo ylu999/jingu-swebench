@@ -89,15 +89,6 @@ _FEEDBACK: dict[str, str] = {
         "EVIDENCE:\n- file.py:line - what this shows\n\n"
         "CAUSAL_CHAIN:\n<reasoning from evidence to root cause>"
     ),
-    "missing_plan": (
-        "Your EXECUTE output must include a PLAN: section.\n"
-        "Format:\nPLAN:\n<how you will fix the root cause from ANALYZE>\n\n"
-        "CHANGE_SCOPE:\n<which files/functions will change>"
-    ),
-    "plan_not_grounded_in_root_cause": (
-        "Your PLAN must explicitly reference the ROOT_CAUSE from your ANALYZE phase. "
-        "State the root cause in your PLAN before describing the fix."
-    ),
 }
 
 
@@ -431,18 +422,6 @@ def evaluate_admission(phase_record, phase: str, next_phase: str = "", observe_t
                 _rc = getattr(phase_record, "root_cause", None) or ""
                 if not _rc:
                     retryable.append("missing_root_cause")
-
-            if phase.upper() == "EXECUTE":
-                _plan = getattr(phase_record, "plan", None) or ""
-                if not _plan:
-                    retryable.append("missing_plan")
-                elif last_analyze_root_cause:
-                    # Causal binding: PLAN must reference (contain a substring of) the root cause.
-                    # Use first 60 chars of root_cause as anchor — avoids false negatives from
-                    # minor paraphrase while still catching completely ungrounded plans.
-                    _rc_anchor = last_analyze_root_cause[:60].strip().lower()
-                    if _rc_anchor and _rc_anchor not in _plan.lower():
-                        retryable.append("plan_not_grounded_in_root_cause")
 
             # 3b. has_evidence_basis check (RETRYABLE) — for phases that require evidence basis
             # but NOT specifically file.py:line regex matches (e.g. ANALYZE, OBSERVE).
