@@ -33,6 +33,23 @@ from dataclasses import dataclass
 from typing import Literal, Optional
 
 # ── Phase ─────────────────────────────────────────────────────────────────────
+#
+# Canonical runtime phase model = 7 phases.  This is the single source of truth.
+#   UNDERSTAND → OBSERVE → ANALYZE → DECIDE → DESIGN → EXECUTE → JUDGE
+#
+# UNDERSTAND: bootstrap phase — task intake / intent normalization / handoff to OBSERVE.
+#   No subtype contract by design (exempt via bundle_compiler._ALLOWED_MISSING_PHASES).
+#   Not a "missing contract" — it is a pre-governed phase that exists to seed the loop.
+#
+# Alias policy (compatibility layers only — never in core state machine):
+#   "PLAN" / "planning"    → DESIGN   (cognition_schema._PHASE_NORM)
+#   "UNDERSTANDING"        → not valid; canonical name is UNDERSTAND
+#   "OBSERVATION"          → OBSERVE  (declaration_extractor._PHASE_NORM)
+#   "EXECUTION"            → EXECUTE  (declaration_extractor._PHASE_NORM)
+#   "ANALYSIS"             → ANALYZE  (declaration_extractor._PHASE_NORM)
+#
+# All runtime consumers (Phase type, _ADVANCE_TABLE, PHASE_STEP_BUDGET, decide_next,
+# telemetry, prompt injection) must use only these 7 canonical names.
 
 Phase = Literal["UNDERSTAND", "OBSERVE", "ANALYZE", "DECIDE", "DESIGN", "EXECUTE", "JUDGE"]
 
