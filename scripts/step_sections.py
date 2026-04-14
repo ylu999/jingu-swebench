@@ -1464,6 +1464,7 @@ def _step_cp_update_and_verdict(
                 observe_tool_signal=_obs_tool_sig,
                 last_analyze_root_cause=state.last_analyze_root_cause if _eval_phase == "EXECUTE" else "",
                 structured_output=(_pr_source == "tool_submitted"),
+                loop_counts=state._retryable_loop_counts,
             )
             if _pr_foreign_phase:
                 _phase_order = ["UNDERSTAND", "OBSERVE", "ANALYZE", "DECIDE", "EXECUTE", "JUDGE"]
@@ -1495,6 +1496,34 @@ def _step_cp_update_and_verdict(
             # Phase Submission Enforcement telemetry
             if _admission.status == "ADMITTED":
                 state._phase_record_admit_total += 1
+            elif _admission.status == "ESCALATED":
+                # EF-6: formal escalation — force-admit with structured telemetry
+                state._phase_record_admit_total += 1
+                _esc = _admission.escalation
+                if _esc:
+                    print(
+                        f"    [principal_gate] ESCALATED:"
+                        f" reason={_esc.reason.value} loop_key={_esc.loop_key}"
+                        f" count={_esc.loop_count} action={_esc.action}"
+                        f" bypassed={_esc.bypassed_principals}",
+                        flush=True,
+                    )
+                    _emit_limit_triggered(
+                        state, step_n=_cp_s.step_index,
+                        limit_name=f"escalation_{_esc.reason.value}",
+                        configured_value=_esc.loop_count, actual_value=_esc.loop_count,
+                        action_taken=_esc.action, source_file="principal_gate.py", source_line=0,
+                        reason=f"phase={_esc.loop_key[0]} violation={_esc.loop_key[1]}",
+                    )
+                    # Reset loop counter for this key after escalation
+                    if _esc.loop_key in state._retryable_loop_counts:
+                        state._retryable_loop_counts[_esc.loop_key] = 0
+                else:
+                    print(
+                        f"    [principal_gate] ESCALATED (no escalation info)",
+                        flush=True,
+                    )
+                # ESCALATED with action=bypass → treat as ADMITTED, skip redirect
             elif _admission.status in ("RETRYABLE", "REJECTED"):
                 state._phase_record_reject_total += 1
             if _admission.status in ("RETRYABLE", "REJECTED"):
@@ -1567,6 +1596,7 @@ def _step_cp_update_and_verdict(
                     )
                     raise StopExecution("no_signal")
                 else:
+                    # RETRYABLE: track loop count for next evaluate_admission call (EF-6)
                     state.phase_records = [
                         r for r in state.phase_records
                         if r.phase.upper() != _eval_phase
@@ -1578,39 +1608,8 @@ def _step_cp_update_and_verdict(
                     for _k in list(state._retryable_loop_counts):
                         if _k != _loop_key:
                             state._retryable_loop_counts[_k] = 0
-                    _loop_count = state._retryable_loop_counts[_loop_key]
-                    _RETRYABLE_LOOP_LIMIT = 3
-                    _contract_bypass = False
-                    _STRUCTURED_BYPASS_EXEMPT = {
-                        "missing_root_cause",
-                        "missing_plan",
-                        "plan_not_grounded_in_root_cause",
-                    }
-                    _has_structured_violation = any(
-                        r in _STRUCTURED_BYPASS_EXEMPT
-                        for r in (_admission.reasons_legacy or [])
-                    )
-                    if _loop_count >= _RETRYABLE_LOOP_LIMIT and not _has_structured_violation:
-                        print(
-                            f"    [principal_gate] ESCALATE_CONTRACT_BUG:"
-                            f" phase={_loop_key[0]} reason={_loop_key[1]}"
-                            f" count={_loop_count} >= {_RETRYABLE_LOOP_LIMIT}"
-                            f" → contract_bypass ADMITTED (agent continues without principal check)",
-                            flush=True,
-                        )
-                        _emit_limit_triggered(
-                            state, step_n=_cp_s.step_index,
-                            limit_name="retryable_loop_force_pass",
-                            configured_value=_RETRYABLE_LOOP_LIMIT, actual_value=_loop_count,
-                            action_taken="bypass", source_file="step_sections.py", source_line=936,
-                            reason=f"phase={_loop_key[0]} violation={_loop_key[1]}",
-                        )
-                        _admission.status = "ADMITTED"
-                        _admission.reasons = [f"contract_bypass:{_loop_key[1]}"]  # legacy string for bypass
-                        state._retryable_loop_counts[_loop_key] = 0
-                        _contract_bypass = True
 
-                    if not _contract_bypass and not state.early_stop_verdict:
+                    if not state.early_stop_verdict:
                         _pg_retryable_no_bypass = True  # Plan-A: principal gate handled phase
                         _pv_verdict = decide_next(_cp_s)
                         print(
@@ -1734,7 +1733,8 @@ def _step_cp_update_and_verdict(
                     if _k != _fi_loop_key:
                         state._retryable_loop_counts[_k] = 0
                 _fi_loop_count = state._retryable_loop_counts[_fi_loop_key]
-                _FAKE_LOOP_LIMIT = 3
+                # EF-6: use _FAKE_LOOP_LIMIT from principal_gate
+                from principal_gate import _FAKE_LOOP_LIMIT
                 if _fi_loop_count >= _FAKE_LOOP_LIMIT:
                     _fake_principals = []
                     if ":" in _inf_violation:
@@ -1744,18 +1744,27 @@ def _step_cp_update_and_verdict(
                         ]
                     state._bypassed_principals.update(_fake_principals)
                     state._retryable_loop_counts[_fi_loop_key] = 0
+                    # EF-6: structured escalation telemetry
+                    from routing_decision import EscalationReason, EscalationInfo
+                    _fi_esc = EscalationInfo(
+                        reason=EscalationReason.FAKE_LOOP,
+                        loop_key=_fi_loop_key,
+                        loop_count=_fi_loop_count,
+                        action="selective_bypass",
+                        bypassed_principals=sorted(state._bypassed_principals),
+                    )
                     _emit_limit_triggered(
                         state, step_n=_cp_s.step_index,
-                        limit_name="fake_loop_force_pass",
+                        limit_name=f"escalation_{_fi_esc.reason.value}",
                         configured_value=_FAKE_LOOP_LIMIT, actual_value=_fi_loop_count,
-                        action_taken="bypass", source_file="step_sections.py", source_line=1074,
-                        reason=f"phase={_eval_phase} violation={_inf_violation} bypassed={sorted(state._bypassed_principals)}",
+                        action_taken=_fi_esc.action, source_file="principal_gate.py", source_line=0,
+                        reason=f"phase={_eval_phase} violation={_inf_violation} bypassed={_fi_esc.bypassed_principals}",
                     )
                     print(
-                        f"    [principal_inference] FAKE_LOOP_SELECTIVE_BYPASS:"
+                        f"    [principal_inference] ESCALATED(fake_loop):"
                         f" phase={_eval_phase} violation={_inf_violation}"
                         f" count={_fi_loop_count} >= {_FAKE_LOOP_LIMIT}"
-                        f" → bypassed_principals={sorted(state._bypassed_principals)}"
+                        f" → bypassed_principals={_fi_esc.bypassed_principals}"
                         f" (selective bypass, other principals still enforced)",
                         flush=True,
                     )

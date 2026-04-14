@@ -16,6 +16,29 @@ class AdmissionStatus(str, Enum):
     ESCALATED = "ESCALATED"
 
 
+class EscalationReason(str, Enum):
+    CONTRACT_BUG = "contract_bug"       # same (phase, reason) N times
+    FAKE_LOOP = "fake_loop"             # same fake principal N times
+
+
+@dataclass(frozen=True)
+class EscalationInfo:
+    """Structured escalation metadata returned when admission status is ESCALATED.
+
+    Attributes:
+        reason: Why escalation was triggered (contract bug or fake loop).
+        loop_key: The (phase, violation_code) tuple that exceeded the threshold.
+        loop_count: How many times this loop_key was seen consecutively.
+        action: What the system should do — "bypass" (force admit) or "selective_bypass".
+        bypassed_principals: Principals bypassed (populated for FAKE_LOOP).
+    """
+    reason: EscalationReason
+    loop_key: tuple                     # (phase, violation_code)
+    loop_count: int
+    action: str                         # "bypass" | "selective_bypass"
+    bypassed_principals: list = field(default_factory=list)
+
+
 @dataclass(frozen=True)
 class RoutingDecision:
     """Where to redirect on admission failure or between-attempt failure routing.

@@ -579,11 +579,22 @@ def evaluate_admission(phase_record, phase: str, next_phase: str = "", observe_t
             )
         if retryable_codes:
             # 5. Escalation detection (EF-6): check if this RETRYABLE has looped too many times
+            # loop_counts keys use reasons_legacy format (GateFailureCode.code), e.g.
+            # "MISSING_PRINCIPAL:causal_grounding" — must match what step_sections stores.
             if loop_counts:
-                _first_reason = retryable[0] if retryable else "unknown"
-                _esc_key = (phase.upper(), _first_reason)
+                # Build reasons_legacy to match step_sections key format
+                _esc_reasons_legacy = []
+                for _rc in retryable_codes:
+                    if isinstance(_rc, GateFailureCode):
+                        _esc_reasons_legacy.append(_rc.code)
+                    else:
+                        _esc_reasons_legacy.append(str(_rc))
+                _first_reason_legacy = _esc_reasons_legacy[0] if _esc_reasons_legacy else "unknown"
+                _esc_key = (phase.upper(), _first_reason_legacy)
                 _esc_count = loop_counts.get(_esc_key, 0)
-                _has_structured = any(r in _STRUCTURED_BYPASS_EXEMPT for r in retryable)
+                # Check structured violations using both legacy string and code format
+                _all_reason_strs = set(retryable) | set(_esc_reasons_legacy)
+                _has_structured = any(r in _STRUCTURED_BYPASS_EXEMPT for r in _all_reason_strs)
                 if _esc_count >= _RETRYABLE_LOOP_LIMIT and not _has_structured:
                     _esc_info = EscalationInfo(
                         reason=EscalationReason.CONTRACT_BUG,
@@ -594,7 +605,7 @@ def evaluate_admission(phase_record, phase: str, next_phase: str = "", observe_t
                     )
                     return AdmissionResult(
                         AdmissionStatus.ESCALATED,
-                        [f"contract_bypass:{_first_reason}"],
+                        [f"contract_bypass:{_first_reason_legacy}"],
                         escalation=_esc_info,
                     )
 
