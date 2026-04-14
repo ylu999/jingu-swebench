@@ -8,8 +8,8 @@ so the agent knows which phase it is in and adjusts its behavior accordingly.
 Phase guidance is injected as a user message prefix (Option B — safer than
 modifying system prompt since mini-SWE-agent may not support dynamic system prompts).
 
-ANALYZE/EXECUTE/JUDGE guidance is derived from subtype_contracts.py (p193)
-so prompt vocabulary stays in sync with principal_gate.py enforcement.
+Phase guidance is derived from cognition_contracts/*.py PROMPT_GUIDANCE (single source
+of truth) so prompt vocabulary stays in sync with gate enforcement.
 """
 
 # ── Principal Guidance Source ─────────────────────────────────────────────────
@@ -52,65 +52,47 @@ _UNDERSTAND_GUIDANCE = (
     "Rules: Do NOT start fixing yet. Do NOT read code yet. First understand the problem.\n"
 )
 
-_OBSERVE_GUIDANCE = (
-    "Gather evidence by reading files and running tests.\n\n"
-    "You MUST produce your observations in this exact format:\n\n"
-    "PHASE: observe\n"
-    "PRINCIPALS: evidence_completeness\n\n"
-    "EVIDENCE:\n"
-    "- file/path.py:line — what this shows\n"
-    "- file/path.py:line — what this shows\n\n"
-    "MISSING_EVIDENCE:\n"
-    "- what you still need to check\n\n"
-    "Rules: Every observation MUST reference a real file:line. "
-    "Do NOT hypothesize yet. Gather facts only.\n"
-    + _OBSERVE_PRINCIPAL
-)
+# Derived from cognition_contracts/observation_fact_gathering.py (single source of truth).
+try:
+    from cognition_contracts import observation_fact_gathering as _ofg
+    _OBSERVE_GUIDANCE = _ofg.PROMPT_GUIDANCE + _OBSERVE_PRINCIPAL
+except Exception:
+    _OBSERVE_GUIDANCE = "" + _OBSERVE_PRINCIPAL
 
 # Derived from cognition_contracts/analysis_root_cause.py (single source of truth).
-from cognition_contracts import analysis_root_cause as _arc
-_ANALYZE_GUIDANCE = _arc.PROMPT_GUIDANCE + _ANALYZE_PRINCIPAL
+try:
+    from cognition_contracts import analysis_root_cause as _arc
+    _ANALYZE_GUIDANCE = _arc.PROMPT_GUIDANCE + _ANALYZE_PRINCIPAL
+except Exception:
+    _ANALYZE_GUIDANCE = "" + _ANALYZE_PRINCIPAL
 
-_DECIDE_GUIDANCE = (
-    "Choose the best fix strategy based on your analysis.\n\n"
-    "Rules:\n"
-    "1. List at least 2 options with tradeoffs before choosing.\n"
-    "2. Your selected option must reference a specific option by name.\n"
-    "3. Do NOT start coding yet.\n"
-    + _DECIDE_PRINCIPAL
-)
+# Derived from cognition_contracts/decision_fix_direction.py (single source of truth).
+try:
+    from cognition_contracts import decision_fix_direction as _dfd
+    _DECIDE_GUIDANCE = _dfd.PROMPT_GUIDANCE + _DECIDE_PRINCIPAL
+except Exception:
+    _DECIDE_GUIDANCE = "" + _DECIDE_PRINCIPAL
 
-_EXECUTE_GUIDANCE = (
-    "ACTION REQUIRED NOW. Write the patch. Follow the root cause from ANALYZE.\n\n"
-    "Rules:\n"
-    "1. Write the minimal patch to the location identified in ANALYZE.\n"
-    "2. Do NOT re-analyze. Do NOT re-read files. You already know the root cause.\n"
-    "3. If no code change is produced this step, the step counts as FAILED.\n"
-    "4. Before editing, grep for ALL callers/importers of any function you change.\n"
-    "   If you change a signature, decorator, or return type, check every call site.\n"
-    "5. Do NOT add backward-compatibility shims unless the issue explicitly requires it.\n"
-    + _EXECUTE_PRINCIPAL
-)
+# Derived from cognition_contracts/execution_code_patch.py (single source of truth).
+try:
+    from cognition_contracts import execution_code_patch as _ecp
+    _EXECUTE_GUIDANCE = _ecp.PROMPT_GUIDANCE + _EXECUTE_PRINCIPAL
+except Exception:
+    _EXECUTE_GUIDANCE = "" + _EXECUTE_PRINCIPAL
 
-_JUDGE_GUIDANCE = (
-    "Verify your fix. Run tests. Check that invariants are preserved.\n\n"
-    "Rules:\n"
-    "1. You MUST run at least the failing test.\n"
-    "2. Your verdict must be based on test results, not on reading code.\n"
-    "3. If uncertain, say so.\n"
-    "4. Check scope_completeness: were ALL callers of modified functions checked?\n"
-    + _JUDGE_PRINCIPAL
-)
+# Derived from cognition_contracts/judge_verification.py (single source of truth).
+try:
+    from cognition_contracts import judge_verification as _jv
+    _JUDGE_GUIDANCE = _jv.PROMPT_GUIDANCE + _JUDGE_PRINCIPAL
+except Exception:
+    _JUDGE_GUIDANCE = "" + _JUDGE_PRINCIPAL
 
-_DESIGN_GUIDANCE = (
-    "Define the solution shape before writing code.\n\n"
-    "Rules:\n"
-    "1. Identify which files will be modified and bound the scope.\n"
-    "2. List invariants that the fix must preserve.\n"
-    "3. If you choose an allowlist approach, justify its completeness.\n"
-    "4. Do NOT write production code yet.\n"
-    + _DESIGN_PRINCIPAL
-)
+# Derived from cognition_contracts/design_solution_shape.py (single source of truth).
+try:
+    from cognition_contracts import design_solution_shape as _dss
+    _DESIGN_GUIDANCE = _dss.PROMPT_GUIDANCE + _DESIGN_PRINCIPAL
+except Exception:
+    _DESIGN_GUIDANCE = "" + _DESIGN_PRINCIPAL
 
 # Phase guidance — one entry per phase in control/reasoning_state.py Phase Literal.
 # Each value is the guidance text appended after "[Phase: X]".
@@ -124,6 +106,15 @@ PHASE_GUIDANCE: dict[str, str] = {
     "EXECUTE": _EXECUTE_GUIDANCE,
     "JUDGE": _JUDGE_GUIDANCE,
 }
+
+
+def get_phase_guidance(phase: str) -> str:
+    """Return the behavioral guidance text for a phase.
+
+    Looks up from PHASE_GUIDANCE dict (which derives from contract PROMPT_GUIDANCE).
+    Returns "" for unknown phases (SST fallback).
+    """
+    return PHASE_GUIDANCE.get(phase.upper(), "")
 
 
 def _get_schema_field_guidance(phase: str) -> str:
