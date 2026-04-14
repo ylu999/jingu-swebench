@@ -1210,6 +1210,11 @@ class JinguAgent:
                                 break
                 _cv_source = _final_cv or _fallback_cv
                 if _cv_source:
+                    # P2-fix: include output_tail so build_repair_prompt can
+                    # inject concrete test failure output into retry hints.
+                    # verify_history stores stdout (up to 10KB); we take the
+                    # last 500 chars as output_tail for prompt injection.
+                    _cv_stdout = _cv_source.get("stdout", "") or ""
                     cv_flat = {
                         "verification_kind": _cv_source["kind"],
                         "tests_passed": _cv_source["tests_passed"],
@@ -1223,6 +1228,7 @@ class JinguAgent:
                         "p2p_passed": _cv_source.get("p2p_passed"),
                         "p2p_failed": _cv_source.get("p2p_failed"),
                         "eval_resolved": _cv_source.get("eval_resolved"),
+                        "output_tail": _cv_stdout[-500:] if _cv_stdout else "",
                     }
                     jingu_body["controlled_verify"] = cv_flat
                     jingu_body["test_results"]["ran_tests"] = True
