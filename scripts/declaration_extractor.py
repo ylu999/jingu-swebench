@@ -167,83 +167,25 @@ def extract_from_structured(parsed: dict) -> Declaration:
     return {"type": fix_type.strip().lower(), "principals": principals}
 
 
-def _build_content_preview(parsed: dict, phase: str) -> str:
-    """Build a human-readable content preview from structured parsed output.
-
-    Each phase has different key fields worth surfacing.  Truncated to 500 chars.
-
-    Args:
-        parsed: Parsed JSON dict from structured LLM output.
-        phase:  Canonical phase name (uppercase, e.g. 'ANALYZE').
-
-    Returns:
-        Content preview string (max 500 chars).
-    """
-    parts: list[str] = []
-    phase = phase.upper()
-
-    if phase == "ANALYZE":
-        if parsed.get("root_cause"):
-            parts.append(f"ROOT_CAUSE: {parsed['root_cause']}")
-        if parsed.get("causal_chain"):
-            parts.append(f"CAUSAL_CHAIN: {parsed['causal_chain']}")
-        for h in (parsed.get("alternatives_considered") or parsed.get("alternative_hypotheses") or []):
-            if isinstance(h, dict):
-                hyp = h.get("hypothesis", "")
-                rej = h.get("why_rejected", "")
-                parts.append(f"HYPOTHESIS: {hyp} — RULED_OUT: {rej}")
-            elif isinstance(h, str):
-                parts.append(f"HYPOTHESIS: {h}")
-
-    elif phase == "EXECUTE":
-        if parsed.get("plan") or parsed.get("patch_description"):
-            parts.append(f"PATCH: {parsed.get('patch_description') or parsed.get('plan', '')}")
-        if parsed.get("change_scope"):
-            parts.append(f"FILES: {', '.join(parsed['change_scope'])}")
-
-    elif phase == "JUDGE":
-        if parsed.get("verification_result"):
-            passed = parsed["verification_result"]
-            conf = parsed.get("confidence", "")
-            parts.append(f"TESTS_PASSED: {passed}")
-            if conf:
-                parts.append(f"DETAILS: confidence={conf}")
-        for crit in (parsed.get("criteria") or parsed.get("remaining_risks") or []):
-            if isinstance(crit, dict):
-                parts.append(f"CRITERION: {crit.get('name', '')} MET: {crit.get('met', '')}")
-            elif isinstance(crit, str):
-                parts.append(f"CRITERION: {crit}")
-
-    elif phase == "DECIDE":
-        if parsed.get("chosen") or parsed.get("content"):
-            parts.append(f"CHOSEN: {parsed.get('chosen', parsed.get('content', ''))}")
-        if parsed.get("rationale"):
-            parts.append(f"RATIONALE: {parsed['rationale']}")
-        if parsed.get("testable_hypothesis"):
-            parts.append(f"HYPOTHESIS: {parsed['testable_hypothesis']}")
-        if parsed.get("expected_tests_to_pass"):
-            parts.append(f"EXPECTED_TESTS: {', '.join(parsed['expected_tests_to_pass'][:5])}")
-
-    elif phase == "DESIGN":
-        if parsed.get("scope") or parsed.get("content"):
-            parts.append(f"SCOPE: {parsed.get('scope', parsed.get('content', ''))}")
-        if parsed.get("files") or parsed.get("change_scope"):
-            files = parsed.get("files") or parsed.get("change_scope") or []
-            if isinstance(files, list):
-                parts.append(f"FILES: {', '.join(str(f) for f in files)}")
-
-    elif phase == "OBSERVE":
-        observations = parsed.get("observations") or parsed.get("content", "")
-        if isinstance(observations, list):
-            for obs in observations[:3]:
-                parts.append(f"OBS: {obs}")
-        elif isinstance(observations, str) and observations:
-            parts.append(f"OBS: {observations}")
-
-    # Fallback: use 'content' field if no phase-specific parts were assembled
+def _build_content_preview(parsed: dict, schema_fields: list[str] | None = None) -> str:
+    """Build content preview by iterating over schema fields, not hardcoded names."""
+    if schema_fields is None:
+        schema_fields = list(parsed.keys())
+    parts = []
+    for field_name in schema_fields:
+        val = parsed.get(field_name)
+        if val is None or field_name in ("phase", "subtype", "principals"):
+            continue
+        if isinstance(val, str) and val.strip():
+            parts.append(f"{field_name.upper()}: {val}")
+        elif isinstance(val, list) and val:
+            items = [str(v) for v in val[:3]]
+            parts.append(f"{field_name.upper()}: {', '.join(items)}")
+        elif isinstance(val, dict) and val:
+            import json
+            parts.append(f"{field_name.upper()}: {json.dumps(val, ensure_ascii=False)[:200]}")
     if not parts and parsed.get("content"):
         parts.append(str(parsed["content"]))
-
     return "\n".join(parts)[:500]
 
 
@@ -307,7 +249,7 @@ def build_phase_record_from_structured(
 
     claims = [c for c in (parsed.get("claims") or []) if isinstance(c, str) and c.strip()]
 
-    content = _build_content_preview(parsed, phase_upper)
+    content = _build_content_preview(parsed)
 
     # P2 fix: synthesize testable_hypothesis from chosen/rationale if missing.
     # Agent often submits DECIDE with {chosen, rationale, options} but omits
