@@ -37,73 +37,50 @@ class AnalysisVerdict:
 
 # ── Code reference detection (structural) ────────────────────────────────────
 
-# Pattern: file paths with extensions (e.g. django/db/models.py, src/utils.ts)
-_CODE_REF_PATH = re.compile(r'[\w/\\]+\.\w{1,4}')
-# Pattern: file:line references (e.g. models.py:45, utils.ts:120)
-_CODE_REF_LINE = re.compile(r'[\w./\\]+:\d+')
-# Pattern: function/method references (e.g. def foo, class Bar, self.method())
-_CODE_REF_FUNC = re.compile(r'(?:def |class |self\.\w+|__\w+__|\.(?:get|set|save|delete|create|update|filter|exclude)\()')
+_KNOWN_CODE_EXTENSIONS = ('.py', '.ts', '.js', '.go', '.rs', '.java', '.c', '.cpp', '.h', '.rb')
 
 
-def _has_code_reference(text: str) -> bool:
-    """Check if text contains at least one code-level reference (structural)."""
-    if not text:
-        return False
-    return bool(_CODE_REF_LINE.search(text) or _CODE_REF_PATH.search(text) or _CODE_REF_FUNC.search(text))
+def _has_file_extension(ref: str) -> bool:
+    """Check if ref ends with a known code file extension (or has ext: pattern)."""
+    return any(ref.rstrip().endswith(ext) or ext + ':' in ref for ext in _KNOWN_CODE_EXTENSIONS)
 
 
-def _count_code_references(text: str) -> int:
-    """Count distinct code references in text."""
-    if not text:
-        return 0
-    refs = set()
-    refs.update(_CODE_REF_LINE.findall(text))
-    refs.update(_CODE_REF_PATH.findall(text))
-    refs.update(_CODE_REF_FUNC.findall(text))
-    return len(refs)
+def _has_line_number(ref: str) -> bool:
+    """Check if ref contains a file:line pattern (e.g. models.py:45)."""
+    parts = ref.split(':')
+    return len(parts) >= 2 and parts[-1].strip().isdigit()
 
 
-def _is_code_evidence_ref(ref: str) -> bool:
-    """Check if an evidence_ref looks like a code reference (contains path-like pattern)."""
+def _is_structured_code_ref(ref: str) -> bool:
+    """Check if a reference string points to a specific code location."""
     if not ref:
         return False
-    # Code refs contain / or .py or .ts or .js or :line_number
-    return bool(
-        '/' in ref
-        or _CODE_REF_LINE.search(ref)
-        or re.search(r'\.\w{1,4}$', ref)
-    )
+    return '/' in ref or _has_file_extension(ref) or _has_line_number(ref)
 
 
 # ── Rule 1: Code Grounding ───────────────────────────────────────────────────
 
 def _check_code_grounding(pr: PhaseRecord) -> float:
-    """
-    Check that analysis references specific code locations.
+    """Check that analysis references specific code locations.
 
-    Primary signal: pr.evidence_refs (structured field from declaration extractor)
-    Secondary signal: pr.root_cause (structured field for ANALYZE phase)
+    Structural-only: reads pr.evidence_refs and pr.root_cause.
+    NO content fallback. NO regex on root_cause text.
 
     Score:
-      0.0 = no code references anywhere
-      0.5 = code refs in evidence_refs but not in root_cause, or vice versa
-      1.0 = code refs in both evidence_refs and root_cause
+      0.0 = no code references in evidence_refs and no root_cause
+      0.5 = code refs in evidence_refs OR root_cause (not both)
+      1.0 = code refs in evidence_refs AND root_cause present
     """
-    has_code_in_evidence = any(_is_code_evidence_ref(ref) for ref in (pr.evidence_refs or []))
-    has_code_in_root_cause = _has_code_reference(pr.root_cause)
+    has_code_in_evidence = any(
+        _is_structured_code_ref(ref) for ref in (getattr(pr, 'evidence_refs', None) or [])
+    )
+    has_root_cause = bool(getattr(pr, 'root_cause', None) and len(pr.root_cause.strip()) > 10)
 
-    if has_code_in_evidence and has_code_in_root_cause:
+    if has_code_in_evidence and has_root_cause:
         return 1.0
-    elif has_code_in_evidence or has_code_in_root_cause:
+    elif has_code_in_evidence or has_root_cause:
         return 0.5
-    else:
-        # Fallback: check content field (less reliable, but captures cases
-        # where structured extraction missed the reference)
-        # This is a TEMPORARY fallback — documented per structure-over-surface rules
-        code_ref_count = _count_code_references(pr.content)
-        if code_ref_count >= 2:
-            return 0.5
-        return 0.0
+    return 0.0
 
 
 # ── Rule 2: Alternative Hypothesis ───────────────────────────────────────────
@@ -129,43 +106,27 @@ def _check_alternative_hypothesis(pr: PhaseRecord) -> float:
 # ── Rule 3: Causal Chain ─────────────────────────────────────────────────────
 
 def _check_causal_chain(pr: PhaseRecord) -> float:
-    """
-    Check that analysis contains a causal chain connecting
-    test failure -> condition -> code -> why it fails.
+    """Check that a causal chain connecting evidence to root cause is present.
 
-    Primary signal: pr.causal_chain (structured field — if non-empty, agent
-    produced structured output explicitly labeled as causal chain)
-
-    Secondary signal: pr.root_cause + pr.evidence_refs — if root_cause contains
-    causal reasoning AND evidence_refs has test + code references, the chain
-    is implicitly present.
+    Structural-only: reads pr.causal_chain field length.
+    NO secondary reconstruction from root_cause + evidence_refs regex.
 
     Score:
-      0.0 = no causal chain
-      0.5 = partial chain (root_cause has reasoning but missing test link or code link)
-      1.0 = complete chain (causal_chain field present, or root_cause + evidence covers all links)
+      0.0 = causal_chain missing or <= 5 chars
+      0.3 = present but too short (5 < len <= 20)
+      1.0 = substantive causal chain (> 20 chars)
     """
-    # Primary: structured causal_chain field
-    if pr.causal_chain and len(pr.causal_chain.strip()) > 20:
-        return 1.0
-
-    # Secondary: reconstruct chain from root_cause + evidence_refs
-    has_root_cause = bool(pr.root_cause and len(pr.root_cause.strip()) > 10)
-    has_code_ref = _has_code_reference(pr.root_cause) if has_root_cause else False
-    has_test_ref = any(
-        'test' in ref.lower() or '::' in ref
-        for ref in (pr.evidence_refs or [])
-    )
-
-    if has_root_cause and has_code_ref and has_test_ref:
-        return 1.0
-    elif has_root_cause and (has_code_ref or has_test_ref):
-        return 0.5
-    elif has_root_cause:
-        # root_cause exists but lacks specific links
-        return 0.3
+    causal_chain = getattr(pr, 'causal_chain', None) or ''
+    if isinstance(causal_chain, str):
+        chain_text = causal_chain.strip()
     else:
-        return 0.0
+        chain_text = str(causal_chain).strip()
+
+    if len(chain_text) > 20:
+        return 1.0
+    if len(chain_text) > 5:
+        return 0.3  # present but too short
+    return 0.0
 
 
 # ── Rule 4: Invariant Capture (v2 — generalized with applicability) ────────
