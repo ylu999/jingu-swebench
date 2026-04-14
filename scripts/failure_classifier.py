@@ -563,5 +563,5 @@ def route_from_failure(record: FailureRecord) -> dict:
         "enforce_principals": enforce_principals,
         "failure_layer": record.failure_layer,
         "confidence": record.confidence,
-        "routing": routing,
+        "routing": routing.to_dict() if routing else None,
     }

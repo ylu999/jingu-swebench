@@ -510,7 +510,7 @@ class JinguAgent:
         cp = self._cp_state_holder[0] if self._cp_state_holder else None
         cp_snapshot = {
             "phase": str(getattr(cp, "phase", None)),
-            "step": getattr(cp, "step", 0),
+            "step": getattr(cp, "phase_steps", 0),
             "no_progress_steps": getattr(cp, "no_progress_steps", 0),
             "patch_first_write": getattr(cp, "patch_first_write", False),
             "phase_records_count": len(getattr(self._state, "phase_records", [])) if self._state else len(getattr(cp, "phase_records", [])),
@@ -1446,7 +1446,7 @@ class JinguAgent:
                     jingu_body["controlled_verify_result"] = "skipped"
                 # Write jingu_body back into traj.json so gate_runner.js can read it
                 traj["jingu_body"] = jingu_body
-                traj_path.write_text(json.dumps(traj, indent=2))
+                traj_path.write_text(json.dumps(traj, indent=2, default=str))
                 cv_summary = ""
                 if _final_cv:
                     cv_summary = (f" cv_kind={_final_cv['kind']}"

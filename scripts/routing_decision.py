@@ -38,6 +38,16 @@ class EscalationInfo:
     action: str                         # "bypass" | "selective_bypass"
     bypassed_principals: list = field(default_factory=list)
 
+    def to_dict(self) -> dict:
+        """JSON-safe dict representation."""
+        return {
+            "reason": str(self.reason.value) if isinstance(self.reason, EscalationReason) else str(self.reason),
+            "loop_key": list(self.loop_key),
+            "loop_count": self.loop_count,
+            "action": self.action,
+            "bypassed_principals": list(self.bypassed_principals),
+        }
+
 
 @dataclass(frozen=True)
 class RoutingDecision:
@@ -57,3 +67,12 @@ class RoutingDecision:
     strategy: str               # from bundle routing or failure classifier
     repair_hints: list[str] = field(default_factory=list)  # from bundle repair_templates
     source: str = "default_route"  # "principal_route" | "default_route" | "failure_type_route" | "failure_layer_route"
+
+    def to_dict(self) -> dict:
+        """JSON-safe dict representation."""
+        return {
+            "next_phase": self.next_phase,
+            "strategy": self.strategy,
+            "repair_hints": list(self.repair_hints),
+            "source": self.source,
+        }
