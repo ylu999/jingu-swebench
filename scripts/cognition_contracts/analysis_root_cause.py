@@ -155,8 +155,7 @@ PROMPT_REQUIRED_SECTIONS: list[str] = [
 PROMPT_GUIDANCE = (
     "Identify the root cause with causal evidence. Do NOT write any fix yet.\n\n"
     "Investigate the code, then call submit_phase_record with your findings.\n\n"
-    "Rules: root_cause must reference a specific file:line. "
-    "causal_chain must connect evidence to the root cause. Do NOT propose fixes here.\n\n"
+    "Rules: Do NOT propose fixes here. Focus on understanding why the test fails.\n\n"
     "If any required field is missing or empty, you will be returned to ANALYZE.\n"
 )
 # NOTE: Field descriptions are NO LONGER listed here. They are rendered at

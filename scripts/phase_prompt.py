@@ -73,68 +73,43 @@ _ANALYZE_GUIDANCE = _arc.PROMPT_GUIDANCE + _ANALYZE_PRINCIPAL
 
 _DECIDE_GUIDANCE = (
     "Choose the best fix strategy based on your analysis.\n\n"
-    "You MUST produce your decision in this exact format:\n\n"
-    "PHASE: decide\n"
-    "PRINCIPALS: option_comparison, constraint_satisfaction\n\n"
-    "OPTIONS:\n"
-    "- Option 1: <approach> — pros: ... cons: ...\n"
-    "- Option 2: <approach> — pros: ... cons: ...\n\n"
-    "SELECTED:\n<which option and why>\n\n"
-    "CONSTRAINTS:\n<what must NOT break — existing tests, API contracts, etc.>\n\n"
-    "PREDICTION (MANDATORY):\n"
-    "- testable_hypothesis: If we <do X>, then <tests Y> will pass because <Z>\n"
-    "- expected_tests_to_pass: <up to 5 test names from FAIL_TO_PASS>\n"
-    "- expected_files_to_change: <file paths your fix will modify>\n"
-    "- risk_level: low | medium | high\n\n"
-    "Rules: You MUST list at least 2 options with tradeoffs. "
-    "SELECTED must reference a specific option. Do NOT start coding yet.\n"
-    "Your predictions will be compared against actual test results.\n"
+    "Rules:\n"
+    "1. List at least 2 options with tradeoffs before choosing.\n"
+    "2. Your selected option must reference a specific option by name.\n"
+    "3. Do NOT start coding yet.\n"
     + _DECIDE_PRINCIPAL
 )
 
 _EXECUTE_GUIDANCE = (
-    "ACTION REQUIRED NOW. Write the patch. You MUST follow the root cause from ANALYZE.\n\n"
-    "You MUST produce your execution plan in this exact format BEFORE writing code:\n\n"
-    "PHASE: execute\n"
-    "PRINCIPALS: minimal_change\n\n"
-    "PLAN:\n<how you will fix it — MUST reference the ROOT_CAUSE from ANALYZE>\n\n"
-    "CHANGE_SCOPE:\n<which files/functions will change>\n\n"
-    "Then write the patch immediately.\n\n"
-    "PLAN is MANDATORY. If you do not produce a PLAN: field listing specific files and changes, "
-    "this execution step is incomplete and you will be redirected back to planning.\n\n"
+    "ACTION REQUIRED NOW. Write the patch. Follow the root cause from ANALYZE.\n\n"
     "Rules:\n"
-    "1. PLAN must explicitly reference the root cause identified in ANALYZE.\n"
+    "1. Write the minimal patch to the location identified in ANALYZE.\n"
     "2. Do NOT re-analyze. Do NOT re-read files. You already know the root cause.\n"
-    "3. Write the minimal patch to the specific location identified in ANALYZE.\n"
-    "4. If no code change is produced this step, this step counts as FAILED.\n"
-    "5. If this entire attempt ends without editing any file, the attempt is DISCARDED\n"
-    "   and you will be asked to redo it with a stronger penalty. Execute NOW.\n"
-    "6. Before editing, grep for ALL callers/importers of any function you change.\n"
+    "3. If no code change is produced this step, the step counts as FAILED.\n"
+    "4. Before editing, grep for ALL callers/importers of any function you change.\n"
     "   If you change a signature, decorator, or return type, check every call site.\n"
-    "   Missing a call site = incomplete fix (scope_completeness).\n"
-    "7. Do NOT add backward-compatibility shims (.replace fallbacks, try/except compat,\n"
-    "   deprecation wrappers) UNLESS the issue explicitly requires it.\n"
-    "   Follow the spec's intent. Extra compat code causes test failures (no_unnecessary_compat).\n"
+    "5. Do NOT add backward-compatibility shims unless the issue explicitly requires it.\n"
     + _EXECUTE_PRINCIPAL
-    + "\nSuccess condition: a file is edited with a concrete, minimal code change."
 )
 
 _JUDGE_GUIDANCE = (
     "Verify your fix. Run tests. Check that invariants are preserved.\n\n"
-    "You MUST produce your judgment in this exact format:\n\n"
-    "PHASE: judge\n"
-    "PRINCIPALS: invariant_preservation, result_verification\n\n"
-    "VERDICT: pass | fail | uncertain\n\n"
-    "TEST_RESULTS:\n<which tests you ran and their results>\n\n"
-    "CONFIDENCE: high | medium | low\n<why this level>\n\n"
-    "SIDE_EFFECTS:\n<what else could break — be honest>\n\n"
-    "FIX_TYPE: <fix_type>\n"
-    "PRINCIPALS: <principals>\n\n"
-    "Rules: You MUST run at least the failing test. VERDICT must be based on test results, "
-    "not on reading code. If uncertain, say so.\n"
-    "Verify scope_completeness: were ALL callers of modified functions checked?\n"
-    "If a function signature or decorator changed, grep for all call sites and confirm each works.\n"
+    "Rules:\n"
+    "1. You MUST run at least the failing test.\n"
+    "2. Your verdict must be based on test results, not on reading code.\n"
+    "3. If uncertain, say so.\n"
+    "4. Check scope_completeness: were ALL callers of modified functions checked?\n"
     + _JUDGE_PRINCIPAL
+)
+
+_DESIGN_GUIDANCE = (
+    "Define the solution shape before writing code.\n\n"
+    "Rules:\n"
+    "1. Identify which files will be modified and bound the scope.\n"
+    "2. List invariants that the fix must preserve.\n"
+    "3. If you choose an allowlist approach, justify its completeness.\n"
+    "4. Do NOT write production code yet.\n"
+    + _DESIGN_PRINCIPAL
 )
 
 # Phase guidance — one entry per phase in control/reasoning_state.py Phase Literal.
@@ -145,6 +120,7 @@ PHASE_GUIDANCE: dict[str, str] = {
     "OBSERVE": _OBSERVE_GUIDANCE,
     "ANALYZE": _ANALYZE_GUIDANCE,
     "DECIDE": _DECIDE_GUIDANCE,
+    "DESIGN": _DESIGN_GUIDANCE,
     "EXECUTE": _EXECUTE_GUIDANCE,
     "JUDGE": _JUDGE_GUIDANCE,
 }
