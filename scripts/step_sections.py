@@ -35,6 +35,7 @@ from control.swe_signal_adapter import extract_weak_progress
 from gate_rejection import SDG_ENABLED as _SDG_ENABLED, build_repair_from_rejection as _build_sdg_repair
 from failure_routing import route_failure as route_failure_p216, is_data_driven_routing_enabled
 from strategy_prompts import get_strategy_prompt
+from routing_decision import RoutingDecision
 from step_monitor_state import StopExecution
 from declaration_extractor import build_phase_record_from_structured, extract_phase_output
 
@@ -48,7 +49,12 @@ from declaration_extractor import build_phase_record_from_structured, extract_ph
 
 @dataclass
 class TransitionEvaluation:
-    """Result of evaluate_transition() — the sole transition authority."""
+    """Result of evaluate_transition() — the sole transition authority.
+
+    Phase 4: every blocked result carries a typed routing decision that
+    tells the handler WHERE to go and WHY. The handler applies routing
+    via cp_mutations (phase redirect) or stays in current phase (retry).
+    """
     # Whether transition is authorized (all gates passed)
     authorized: bool = False
     # Whether the attempt should stop immediately
@@ -68,6 +74,78 @@ class TransitionEvaluation:
     # Verdict source attribution
     source: str = "default"
     reason: str = ""
+    # Phase 4: typed routing for blocked transitions
+    # None when authorized=True or stop=True
+    routing: "RoutingDecision | None" = None
+
+
+# ── Phase 4: Gate-level routing table ─────────────────────────────────────
+# Maps blocked reasons to routing decisions.
+# Format: reason_prefix -> (next_phase_fn, strategy, repair_hint)
+# next_phase_fn: callable(eval_phase) -> target phase, or None for "same phase"
+
+_GATE_ROUTING_TABLE: dict[str, dict] = {
+    "missing_phase_record_retry": {
+        "next_phase": None,  # stay in current phase
+        "strategy": "submit_phase_record",
+        "repair_hint": "Call submit_phase_record with your findings before phase can advance.",
+    },
+    "cognition_validation_failed": {
+        "next_phase": None,  # retry same phase
+        "strategy": "fix_cognition_errors",
+        "repair_hint": "Fix the validation errors reported and resubmit.",
+    },
+    "analysis_gate_rejected": {
+        "next_phase": None,  # retry ANALYZE
+        "strategy": "complete_causal_chain",
+        "repair_hint": "Strengthen root cause, causal chain, or alternatives as indicated.",
+    },
+    "design_gate_rejected": {
+        "next_phase": None,  # retry DESIGN
+        "strategy": "compare_alternatives",
+        "repair_hint": "Improve design comparison or constraint encoding as indicated.",
+    },
+    "decide_gate_rejected": {
+        "next_phase": None,  # retry DECIDE
+        "strategy": "rethink_root_cause",
+        "repair_hint": "Strengthen decision rationale as indicated.",
+    },
+    "execute_gate_rejected": {
+        "next_phase": None,  # retry EXECUTE
+        "strategy": "fix_execution_errors",
+        "repair_hint": "Fix the execution issues reported.",
+    },
+    "judge_gate_rejected": {
+        "next_phase": None,  # retry JUDGE
+        "strategy": "verify_test_coverage",
+        "repair_hint": "Improve verification coverage as indicated.",
+    },
+}
+
+
+def _route_blocked(eval_phase: str, reason: str) -> RoutingDecision:
+    """Phase 4: produce a typed RoutingDecision for a blocked transition.
+
+    Looks up the gate routing table. Falls back to retry-same-phase.
+    """
+    # Strip suffix for parametric reasons (e.g. "principal_gate_retryable:missing_required")
+    _reason_key = reason.split(":")[0] if ":" in reason else reason
+    entry = _GATE_ROUTING_TABLE.get(_reason_key)
+    if entry:
+        _target = entry["next_phase"] or eval_phase
+        return RoutingDecision(
+            next_phase=_target,
+            strategy=entry["strategy"],
+            repair_hints=[entry["repair_hint"]],
+            source="gate_route",
+        )
+    # Default: retry same phase
+    return RoutingDecision(
+        next_phase=eval_phase,
+        strategy="rethink_root_cause",
+        repair_hints=[],
+        source="gate_route_default",
+    )
 
 
 def evaluate_transition(
@@ -373,6 +451,7 @@ def evaluate_transition(
             result.authorized = False
             result.source = "gate_rejection"
             result.reason = "missing_phase_record_retry"
+            result.routing = _route_blocked(eval_phase, result.reason)
             return result
         else:
             _emit_limit_triggered(
@@ -455,6 +534,7 @@ def evaluate_transition(
                 result.authorized = False
                 result.source = "gate_rejection"
                 result.reason = "cognition_validation_failed"
+                result.routing = _route_blocked(eval_phase, result.reason)
                 return result
             else:
                 if old_phase and str(old_phase).upper() != "":
@@ -592,6 +672,7 @@ def evaluate_transition(
             result.authorized = False
             result.source = "gate_rejection"
             result.reason = "analysis_gate_rejected"
+            result.routing = _route_blocked(eval_phase, result.reason)
             return result
 
     # ── Design Gate ──
@@ -613,6 +694,7 @@ def evaluate_transition(
             result.authorized = False
             result.source = "gate_rejection"
             result.reason = "design_gate_rejected"
+            result.routing = _route_blocked(eval_phase, result.reason)
             return result
 
     # ── Decide Gate ──
@@ -634,6 +716,7 @@ def evaluate_transition(
             result.authorized = False
             result.source = "gate_rejection"
             result.reason = "decide_gate_rejected"
+            result.routing = _route_blocked(eval_phase, result.reason)
             return result
 
     # ── Execute Gate ──
@@ -655,6 +738,7 @@ def evaluate_transition(
             result.authorized = False
             result.source = "gate_rejection"
             result.reason = "execute_gate_rejected"
+            result.routing = _route_blocked(eval_phase, result.reason)
             return result
 
     # ── Judge Gate ──
@@ -676,6 +760,7 @@ def evaluate_transition(
             result.authorized = False
             result.source = "gate_rejection"
             result.reason = "judge_gate_rejected"
+            result.routing = _route_blocked(eval_phase, result.reason)
             return result
 
     # ══════════════════════════════════════════════════════════════════
@@ -878,6 +963,16 @@ def evaluate_transition(
                 result.authorized = False
                 result.source = "gate_rejection"
                 result.reason = f"principal_gate_retryable:{_pg_violation}"
+                # Phase 4: use existing principal_gate routing if available
+                if getattr(_admission, "routing", None):
+                    result.routing = _admission.routing
+                else:
+                    result.routing = RoutingDecision(
+                        next_phase=_repair_phase or eval_phase,
+                        strategy="rethink_root_cause",
+                        repair_hints=[_pg_guidance] if _pg_guidance else [],
+                        source="principal_route",
+                    )
                 return result
     except Exception as _pg_exc:
         print(f"    [principal_gate] error={_pg_exc}", flush=True)
@@ -1007,6 +1102,12 @@ def evaluate_transition(
                 result.authorized = False
                 result.source = "gate_rejection"
                 result.reason = f"fake_principal:{_inf_violation}"
+                result.routing = RoutingDecision(
+                    next_phase=eval_phase,
+                    strategy="gather_code_evidence",
+                    repair_hints=["Provide concrete evidence for declared principals."],
+                    source="inference_route",
+                )
                 return result
         elif _inf_violation and "missing_required" in _inf_violation:
             pass
@@ -1760,16 +1861,21 @@ def _step_cp_update_and_verdict(
                     state.cp_state = _dc_mut.replace(
                         state.cp_state, **_transition.cp_mutations
                     )
+                _rt = _transition.routing
                 print(
                     f"    [Plan-A] phase_advance BLOCKED + REDIRECT:"
                     f" {_old_phase} → {_transition.cp_mutations.get('phase', '?')}"
-                    f" source={_transition.source} reason={_transition.reason}",
+                    f" source={_transition.source} reason={_transition.reason}"
+                    f" routing={_rt.strategy if _rt else 'none'}",
                     flush=True,
                 )
             else:
+                _rt = _transition.routing
                 print(
                     f"    [Plan-A] phase_advance BLOCKED: {_old_phase} → {_new_phase}"
-                    f" source={_transition.source} reason={_transition.reason}",
+                    f" source={_transition.source} reason={_transition.reason}"
+                    f" routing={_rt.strategy if _rt else 'none'}"
+                    f" route_to={_rt.next_phase if _rt else _eval_phase}",
                     flush=True,
                 )
 
