@@ -263,8 +263,11 @@ def decide_next(state: ReasoningState) -> ControlVerdict:
     if state.phase == "OBSERVE" and state.hypothesis_narrowing > 0:
         return VerdictAdvance(to="ANALYZE")
 
+    # P2: ANALYZE → DECIDE (not EXECUTE). DECIDE phase is mandatory —
+    # agent must declare expected_outcome + testable_hypothesis before executing.
+    # DECIDE → EXECUTE transition handled by stagnation path (_ADVANCE_TABLE).
     if state.phase == "ANALYZE" and state.actionability > 0:
-        return VerdictAdvance(to="EXECUTE")
+        return VerdictAdvance(to="DECIDE")
 
     # 5. default
     return VerdictContinue()

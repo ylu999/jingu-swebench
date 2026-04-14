@@ -257,13 +257,13 @@ class TestDecideNext:
         assert verdict.to == "ANALYZE"
 
     def test_analyze_actionability_advances_to_execute(self):
-        """CORR2: actionability = patch_non_empty (pre-execution). Advances ANALYZE→EXECUTE."""
+        """CORR2: actionability = patch_non_empty (pre-execution). Advances ANALYZE→DECIDE (P2)."""
         s = initial_reasoning_state("ANALYZE")
         signals = normalize_signals({"actionability": 1})
         s = update_reasoning_state(s, signals)
         verdict = decide_next(s)
         assert isinstance(verdict, VerdictAdvance)
-        assert verdict.to == "EXECUTE"
+        assert verdict.to == "DECIDE"
 
     def test_continue_when_no_signal(self):
         # no_progress=0, one step → no_progress_steps=1, still below threshold (2)

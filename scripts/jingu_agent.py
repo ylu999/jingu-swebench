@@ -1267,6 +1267,24 @@ class JinguAgent:
                     # Route from failure record for enhanced retry
                     _fr_routing = route_from_failure(_fr)
                     jingu_body["failure_layer_routing"] = _fr_routing
+                    # P2: Prediction error — compare DECIDE predictions vs actual
+                    try:
+                        from prediction_error import compute_prediction_error
+                        _pred_err = compute_prediction_error(
+                            _monitor.phase_records, cv_flat,
+                        )
+                        jingu_body["prediction_error"] = _pred_err.to_dict()
+                        if _pred_err.error_type != "prediction_no_data":
+                            print(
+                                f"    [prediction-error] type={_pred_err.error_type}"
+                                f" severity={_pred_err.severity}"
+                                f" f2p={_pred_err.actual_f2p_passed}/{_pred_err.actual_f2p_passed + _pred_err.actual_f2p_failed}"
+                                f" repair_target={_pred_err.repair_target}",
+                                flush=True,
+                            )
+                    except Exception as _pe_exc:
+                        jingu_body["prediction_error"] = {"error_type": "computation_error", "detail": str(_pe_exc)[:200]}
+                        logger.warning("prediction_error computation failed: %s", _pe_exc)
                     if _fr.failure_layer != "unknown":
                         print(f"    [failure-layer] {_fr.failure_layer}"
                               f"  phase={_fr.phase_of_failure}"
@@ -2022,6 +2040,32 @@ class JinguAgent:
                             _pack_decision = run_governance_packs(_gov_ctx)
                             if _pack_decision and _pack_decision.action == "REROUTE":
                                 retry_plan = override_retry_plan_from_pack(retry_plan, _pack_decision)
+                            # P2: Enrich retry_plan with prediction error feedback
+                            _pred_err_data = (jingu_body or {}).get("prediction_error", {})
+                            _pred_err_type = _pred_err_data.get("error_type", "")
+                            _pred_feedback = _pred_err_data.get("feedback", "")
+                            if _pred_err_type in ("prediction_wrong_direction", "prediction_partial") and _pred_feedback:
+                                _pred_repair = _pred_err_data.get("repair_target", "")
+                                retry_plan = RetryPlan(
+                                    root_causes=retry_plan.root_causes + [f"prediction_error={_pred_err_type}"],
+                                    must_do=retry_plan.must_do,
+                                    must_not_do=retry_plan.must_not_do,
+                                    validation_requirement=retry_plan.validation_requirement,
+                                    next_attempt_prompt=(
+                                        f"[PREDICTION ERROR — {_pred_err_type.upper()}]\n"
+                                        f"{_pred_feedback}\n\n"
+                                        + retry_plan.next_attempt_prompt
+                                    )[:600],
+                                    control_action=retry_plan.control_action,
+                                    principal_violations=retry_plan.principal_violations,
+                                )
+                                print(
+                                    f"    [p2-prediction] enriched retry_plan:"
+                                    f" error={_pred_err_type}"
+                                    f" repair_target={_pred_repair}"
+                                    f" severity={_pred_err_data.get('severity', '?')}",
+                                    flush=True,
+                                )
                             print(f"    [retry-ctrl] action={retry_plan.control_action}  "
                                   f"root_causes={retry_plan.root_causes}")
                             print(f"    [retry-ctrl] must_not_do={retry_plan.must_not_do}")
