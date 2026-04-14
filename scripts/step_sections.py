@@ -516,6 +516,22 @@ def _step_cp_update_and_verdict(
             )
 
     _step_verdict = decide_next(_cp_s)
+
+    # ── RC-1: Fail-closed admission ──────────────────────────────────
+    # VerdictAdvance requires an admitted phase record. If agent hasn't
+    # submitted one yet, suppress VerdictAdvance → VerdictContinue.
+    # This prevents the "advance attempted → no record → retry loop"
+    # pattern that caused phase_records_count=0 across all unresolved cases.
+    if isinstance(_step_verdict, VerdictAdvance) and not _has_pending_submission:
+        print(
+            f"    [rc1-admission] VerdictAdvance suppressed:"
+            f" phase={_current_phase_str} to={_step_verdict.to}"
+            f" reason=no_pending_phase_record"
+            f" steps_without_submission={state._steps_without_submission}",
+            flush=True,
+        )
+        _step_verdict = VerdictContinue()
+
     _verdict_to_log = f"step={_cp_s.step_index} verdict={_step_verdict.type}"
     if hasattr(_step_verdict, "to") and _step_verdict.to is not None:
         _verdict_to_log += f" to={_step_verdict.to}"
@@ -841,6 +857,12 @@ def _step_cp_update_and_verdict(
             _ext_retries = state.extraction_retry_counts.get(_ext_key, 0)
             state.extraction_retry_counts[_ext_key] = _ext_retries + 1
 
+            # RC-1: Check for typed submission failure (parse error vs not called)
+            _sub_failure = None
+            _model_ref = getattr(agent_self, "model", None)
+            if _model_ref is not None and hasattr(_model_ref, "pop_submission_failure"):
+                _sub_failure = _model_ref.pop_submission_failure()
+
             # Track missing submissions for telemetry
             if hasattr(state, "_missing_submission_count"):
                 state._missing_submission_count += 1
@@ -854,17 +876,29 @@ def _step_cp_update_and_verdict(
                     action_taken="block_transition_retry",
                     source_file="step_sections.py",
                     source_line=640,
-                    reason=f"protocol_violation: no submit_phase_record for {_eval_phase} ({_ext_retries + 1}/{_MAX_SUBMISSION_RETRIES})",
+                    reason=f"protocol_violation: no submit_phase_record for {_eval_phase} ({_ext_retries + 1}/{_MAX_SUBMISSION_RETRIES})"
+                           + (f" submission_failure={_sub_failure}" if _sub_failure else ""),
                 )
-                agent_self.messages.append({
-                    "role": "user",
-                    "content": (
+                # RC-1: Typed feedback — distinguish parse error from missing call
+                if _sub_failure:
+                    _failure_hint = (
+                        f"[SUBMISSION PARSE FAILURE]\n"
+                        f"You called submit_phase_record but the JSON was invalid.\n"
+                        f"Error: {_sub_failure.get('detail', 'unknown')}\n"
+                        f"Fix the JSON and call submit_phase_record again.\n"
+                        f"Retry {_ext_retries + 1}/{_MAX_SUBMISSION_RETRIES}."
+                    )
+                else:
+                    _failure_hint = (
                         f"[PROTOCOL VIOLATION: PHASE RECORD REQUIRED]\n"
                         f"Phase {_eval_phase} cannot be completed without calling submit_phase_record.\n"
                         f"This is not optional. The system CANNOT proceed to the next phase.\n"
                         f"Call submit_phase_record now with your {_eval_phase} findings.\n"
                         f"Retry {_ext_retries + 1}/{_MAX_SUBMISSION_RETRIES}."
-                    ),
+                    )
+                agent_self.messages.append({
+                    "role": "user",
+                    "content": _failure_hint,
                 })
                 # Phase Submission Enforcement: force tool_choice on retry
                 _model_force = getattr(agent_self, "model", None)
@@ -879,6 +913,7 @@ def _step_cp_update_and_verdict(
                 print(
                     f"    [phase_gate] BLOCKED: no admitted record for {_eval_phase}"
                     f" retry={_ext_retries + 1}/{_MAX_SUBMISSION_RETRIES}"
+                    f" failure_type={'parse_error' if _sub_failure else 'not_called'}"
                     f" — transition DENIED, staying in current phase",
                     flush=True,
                 )
@@ -999,70 +1034,29 @@ def _step_cp_update_and_verdict(
                     flush=True,
                 )
                 if not _analysis_verdict.passed and _ag_reject_count >= _AG_MAX_REJECTS:
-                    # Phase Submission Enforcement (p14): redirect to OBSERVE
-                    # instead of force_pass. Agent must gather more evidence.
-                    _AG_OBSERVE_REDIRECT_MAX = 2
-                    _ag_obs_redirects = state._analysis_observe_redirects
-                    if _ag_obs_redirects < _AG_OBSERVE_REDIRECT_MAX:
-                        state._analysis_observe_redirects = _ag_obs_redirects + 1
-                        _missing_rules = _analysis_verdict.failed_rules or []
-                        _missing_str = ", ".join(_missing_rules) if _missing_rules else "quality checks"
-                        agent_self.messages.append({
-                            "role": "user",
-                            "content": (
-                                f"[ANALYSIS INCOMPLETE — REDIRECT TO OBSERVE]\n"
-                                f"Your analysis has been rejected {_ag_reject_count} times. "
-                                f"Failed checks: {_missing_str}.\n"
-                                f"Return to OBSERVE and gather more evidence. Specifically:\n"
-                                + "\n".join(f"- Investigate: {r}" for r in _missing_rules)
-                                + f"\n\nThen re-enter ANALYZE with stronger evidence."
-                            ),
-                        })
-                        # Reset phase to OBSERVE
-                        import dataclasses as _dc_ag
-                        _cp_ref_ag = cp_state_holder[0] if cp_state_holder else state.cp_state
-                        _cp_new_ag = _dc_ag.replace(
-                            _cp_ref_ag, phase="OBSERVE", no_progress_steps=0
-                        )
-                        if cp_state_holder:
-                            cp_state_holder[0] = _cp_new_ag
-                        else:
-                            state.cp_state = _cp_new_ag
-                        state._execute_entry_step = -1
-                        state.phase_records = [
-                            r for r in state.phase_records
-                            if r.phase.upper() != _eval_phase
-                        ]
-                        _analysis_gate_rejected = True
-                        _emit_limit_triggered(
-                            state, step_n=_cp_s.step_index,
-                            limit_name="analysis_gate_redirect_observe",
-                            configured_value=_AG_OBSERVE_REDIRECT_MAX, actual_value=_ag_obs_redirects + 1,
-                            action_taken="redirect_observe", source_file="step_sections.py", source_line=653,
-                            reason=f"failed_rules={_analysis_verdict.failed_rules} scores={_analysis_verdict.scores}",
-                        )
-                        print(
-                            f"    [analysis_gate] REDIRECT TO OBSERVE"
-                            f" ({_ag_obs_redirects + 1}/{_AG_OBSERVE_REDIRECT_MAX})"
-                            f" — failed_rules={_missing_rules}",
-                            flush=True,
-                        )
-                    else:
-                        # Max observe redirects exhausted — force_pass with warning
-                        print(
-                            f"    [analysis_gate] FORCE_PASS — max_observe_redirects="
-                            f"{_AG_OBSERVE_REDIRECT_MAX} exhausted, allowing advance with warning",
-                            flush=True,
-                        )
-                        _emit_limit_triggered(
-                            state, step_n=_cp_s.step_index,
-                            limit_name="analysis_gate_force_pass",
-                            configured_value=_AG_MAX_REJECTS, actual_value=_ag_reject_count,
-                            action_taken="force_pass_after_observe_redirects",
-                            source_file="step_sections.py", source_line=653,
-                            reason=f"failed_rules={_analysis_verdict.failed_rules} scores={_analysis_verdict.scores} observe_redirects={_ag_obs_redirects}",
-                        )
-                        _analysis_gate_force_passed = True
+                    # RC-1: Fail-closed. After max analysis gate rejections,
+                    # STOP instead of redirecting to OBSERVE (which creates
+                    # exploration loops — see django__django-10999 RCA).
+                    _missing_rules = _analysis_verdict.failed_rules or []
+                    _emit_limit_triggered(
+                        state, step_n=_cp_s.step_index,
+                        limit_name="analysis_gate_exhausted",
+                        configured_value=_AG_MAX_REJECTS, actual_value=_ag_reject_count,
+                        action_taken="admission_gate_stop",
+                        source_file="step_sections.py", source_line=1001,
+                        reason=f"failed_rules={_analysis_verdict.failed_rules} scores={_analysis_verdict.scores}",
+                    )
+                    print(
+                        f"    [analysis_gate] ADMISSION EXHAUSTED:"
+                        f" rejects={_ag_reject_count}/{_AG_MAX_REJECTS}"
+                        f" failed_rules={_missing_rules}"
+                        f" → fail-closed STOP",
+                        flush=True,
+                    )
+                    state.early_stop_verdict = VerdictStop(
+                        reason=f"admission_gate_exhausted_analyze",
+                    )
+                    raise StopExecution("admission_gate_exhausted_analyze")
                 elif not _analysis_verdict.passed:
                     _analysis_gate_rejected = True
                     # Plan-A: no rollback needed — phase was never advanced

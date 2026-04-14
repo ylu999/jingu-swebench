@@ -72,6 +72,8 @@ def _make_model(submitted_record=None) -> MagicMock:
     # structured_extract returns None (no diagnostic) by default
     model.structured_extract.return_value = None
     model._last_extract_record = None
+    # RC-1: pop_submission_failure returns None by default (no parse error)
+    model.pop_submission_failure.return_value = None
     return model
 
 

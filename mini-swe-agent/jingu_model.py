@@ -152,6 +152,8 @@ class JinguModel(LitellmModel):
         # Last submitted phase record from tool call (consumed by step_sections)
         self._submitted_phase_record: dict[str, Any] | None = None
         self._submitted_phase_record_phase: str | None = None
+        # RC-1: Typed submission failure (not silent drop)
+        self._submission_failure: dict[str, str] | None = None
         # Phase Submission Enforcement (p14 governance activation)
         # When True, next _query forces tool_choice to submit_phase_record.
         # One-shot: resets to False after the forced query.
@@ -201,6 +203,19 @@ class JinguModel(LitellmModel):
             logger.info("pop_submitted_phase_record: phase=%s fields=%s",
                         phase, list(record.keys()))
         return record
+
+    def pop_submission_failure(self) -> dict[str, str] | None:
+        """Pop and return the last submission failure, or None.
+
+        RC-1: Distinguishes 'agent didn't call submit_phase_record' from
+        'agent called but JSON parse failed'. Consumed by extraction gate.
+        """
+        failure = self._submission_failure
+        self._submission_failure = None
+        if failure is not None:
+            logger.info("pop_submission_failure: type=%s detail=%s",
+                        failure.get("type"), failure.get("detail", "")[:80])
+        return failure
 
     # -- Override _query to inject submit_phase_record tool --
 
@@ -301,8 +316,13 @@ class JinguModel(LitellmModel):
                         self._phase_record_submit_total,
                     )
                 except Exception as e:
+                    # RC-1: Store typed failure instead of silent drop
+                    self._submission_failure = {
+                        "type": "parse_error",
+                        "detail": str(e)[:200],
+                    }
                     logger.error(
-                        "submit_phase_record parse error: %s", e
+                        "submit_phase_record parse error (typed): %s", e
                     )
                 continue
 
