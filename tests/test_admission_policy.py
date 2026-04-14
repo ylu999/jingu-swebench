@@ -69,7 +69,7 @@ def test_bugB_analyze_foreign_phase_delta1_is_admitted():
     # After fix:  when all reasons are stripped by foreign_phase logic → ADMITTED
 
     # Test the post-processing logic that run_with_jingu_gate.py applies:
-    _phase_order = ["UNDERSTAND", "OBSERVE", "ANALYZE", "DECIDE", "EXECUTE", "JUDGE"]
+    _phase_order = ["UNDERSTAND", "OBSERVE", "ANALYZE", "DECIDE", "DESIGN", "EXECUTE", "JUDGE"]
     declared = "OBSERVE"
     eval_phase = "ANALYZE"
     delta = abs(_phase_order.index(declared) - _phase_order.index(eval_phase))

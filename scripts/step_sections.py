@@ -548,6 +548,26 @@ def _step_cp_update_and_verdict(
         except Exception:
             pass  # non-critical — don't crash on hash check failure
 
+    # ── Phase 2: Submission-triggered advance ─────────────────────────
+    # If decide_next() returned CONTINUE but agent submitted a phase record,
+    # upgrade to VerdictAdvance. This makes admission the authority for
+    # phase advance — agent demonstrates readiness via submitted record,
+    # gates validate, control plane commits.
+    # EXECUTE excluded: EXECUTE→JUDGE driven by verify signal (task_success),
+    # not by submission. UNDERSTAND excluded: no contract, no submission expected.
+    if (isinstance(_step_verdict, VerdictContinue)
+            and _has_pending_submission
+            and _current_phase_str not in ("EXECUTE", "UNDERSTAND")):
+        from control.reasoning_state import _ADVANCE_TABLE as _adv_tbl
+        _submission_next = _adv_tbl.get(_current_phase_str)
+        if _submission_next is not None:
+            _step_verdict = VerdictAdvance(to=_submission_next)
+            print(
+                f"    [admission-advance] submission-triggered:"
+                f" phase={_current_phase_str} to={_submission_next}",
+                flush=True,
+            )
+
     # ── RC-1: Fail-closed admission ──────────────────────────────────
     # VerdictAdvance requires an admitted phase record. If agent hasn't
     # submitted one yet, suppress VerdictAdvance → VerdictContinue.
