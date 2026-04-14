@@ -433,6 +433,22 @@
               ]
             },
             "description": "Alternative hypotheses considered and why they were ruled out. At least 1 alternative."
+          },
+          "invariant_capture": {
+            "type": "object",
+            "properties": {
+              "identified_invariants": {
+                "type": "array",
+                "items": { "type": "string" },
+                "description": "Behavioral invariants the fix must preserve (e.g. 'colon in URL password field must be rejected by userinfo regex')."
+              },
+              "risk_if_violated": {
+                "type": "string",
+                "description": "What breaks if these invariants are not preserved (e.g. 'URLs with special chars in userinfo would be accepted, breaking RFC compliance')."
+              }
+            },
+            "required": ["identified_invariants", "risk_if_violated"],
+            "description": "Behavioral constraints the fix must preserve. What must remain true after the fix? What invalid behavior must still be rejected? What valid behavior must remain accepted?"
           }
         },
         "required": [

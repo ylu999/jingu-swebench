@@ -272,48 +272,40 @@ def _check_invariant_capture(pr: PhaseRecord) -> float:
     """
     Check that analysis identifies the behavioral constraint being violated.
 
-    v2 (p237): Two modes based on domain applicability:
-    - Parsing domain: strict signals (delimiter, forbidden char, structural role)
-    - General domain: generalized signals (preserved behavior, forbidden behavior,
-      boundary constraint, code structural)
+    v3: Structure-first evaluation.
+    Reads pr.invariant_capture (structured field from bundle schema), NOT
+    free-text regex on root_cause/content/causal_chain.
 
-    The key change: non-parsing bugs (forms, URL routing, queryset, duration, etc.)
-    are no longer penalized for not discussing "delimiter/boundary" — they just need
-    to identify ANY behavioral constraint the fix must preserve.
+    CONTRACT OWNERSHIP RULE: Any hard gate check MUST have a corresponding
+    schema field that the agent was explicitly asked to produce. Gate checks
+    that depend on regex-matching free text violate this rule.
 
     Score:
-      0.0 = no invariant/constraint mention
-      0.5 = mentions constraints vaguely (1 signal)
-      1.0 = explicit constraint identification (2+ signals)
+      0.0 = invariant_capture missing or empty
+      0.5 = has identified_invariants but no risk_if_violated (partial)
+      1.0 = has both identified_invariants and risk_if_violated
     """
-    text = (pr.root_cause or "") + " " + (pr.content or "")
-    if not text.strip():
+    ic = pr.invariant_capture
+    if not isinstance(ic, dict) or not ic:
         return 0.0
 
-    # Also include causal_chain
-    if pr.causal_chain:
-        text = text + " " + pr.causal_chain
+    invariants = ic.get("identified_invariants", [])
+    risk = (ic.get("risk_if_violated") or "").strip()
 
-    is_parsing = _is_parsing_domain(pr)
+    if not invariants:
+        return 0.0
 
-    if is_parsing:
-        # Strict mode: use parsing-specific signals
-        matched = sum(1 for p in _INVARIANT_SIGNALS_PARSING.values() if p.search(text))
-        if matched >= 3:
-            return 1.0
-        elif matched >= 1:
-            return 0.5
-        else:
-            return 0.0
-    else:
-        # General mode: use generalized behavioral signals
-        matched = sum(1 for p in _INVARIANT_SIGNALS_GENERAL.values() if p.search(text))
-        if matched >= 2:
-            return 1.0
-        elif matched >= 1:
-            return 0.5
-        else:
-            return 0.0
+    # Has invariants listed
+    has_substantive_invariants = any(
+        isinstance(inv, str) and len(inv.strip()) > 5
+        for inv in invariants
+    )
+    if not has_substantive_invariants:
+        return 0.0
+
+    if risk and len(risk) > 5:
+        return 1.0  # both fields present and substantive
+    return 0.5  # invariants present but risk missing/thin
 
 
 # ── ANALYZE contract (SDG p217) ──────────────────────────────────────────────
@@ -425,30 +417,27 @@ def evaluate_analysis(pr: PhaseRecord, *, structured_output: bool = False) -> An
                 "Consider at least 2 hypotheses and explain why non-chosen ones were rejected."
             )
 
-    # Rule 4 enforcement
+    # Rule 4 enforcement — structure-first (v3)
+    # invariant_capture is now a structured field in the schema. The gate reads
+    # the structure, not regex on free text.
+    # - Parsing domain: hard gate (invariant_capture required)
+    # - Non-parsing domain + core_pass: soft warning (invariant_capture optional)
     if score4 < _THRESHOLD:
         if not is_parsing and core_pass:
             scores["invariant_capture_note"] = (
-                "fail_open: non-parsing domain, core rules pass — downgraded to warning"
+                "soft: non-parsing domain, core rules pass — invariant_capture optional"
             )
         else:
             failed.append("invariant_capture")
-            if is_parsing:
-                reasons.append(
-                    "Analysis identifies the general area but not the structural invariant. "
-                    "What delimiter or boundary character must NOT appear in this position? "
-                    "Why does allowing it break the parser's structural assumptions?"
-                )
-            else:
-                reasons.append(
-                    "Analysis identifies the root cause but not the behavioral constraint. "
-                    "What property, contract, or boundary must remain unchanged after the fix? "
-                    "What invalid behavior must still be rejected? What valid behavior must remain accepted?"
-                )
+            reasons.append(
+                "Fill in the invariant_capture field: what behavioral constraints "
+                "must the fix preserve? List identified_invariants and risk_if_violated."
+            )
 
     extracted = {
         "root_cause": pr.root_cause[:100] if pr.root_cause else "",
         "causal_chain": pr.causal_chain[:100] if pr.causal_chain else "",
+        "invariant_capture": pr.invariant_capture if pr.invariant_capture else {},
     }
 
     # p217: Build structured GateRejection on failure (when SDG enabled)

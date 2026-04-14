@@ -291,6 +291,7 @@ def build_phase_record_from_structured(
         content=content,
         root_cause=parsed.get("root_cause", ""),
         causal_chain=parsed.get("causal_chain", ""),
+        invariant_capture=parsed.get("invariant_capture", {}),
         plan=parsed.get("plan", ""),
         testable_hypothesis=testable_hypothesis,
         expected_tests_to_pass=expected_tests,
@@ -456,6 +457,7 @@ def extract_phase_record(agent_message: str, phase: str, from_steps: list[int] |
         content=content,
         root_cause=structured.get("root_cause", ""),
         causal_chain=structured.get("causal_chain", ""),
+        invariant_capture=structured.get("invariant_capture", {}),
         plan=structured.get("plan", ""),
     )
 
@@ -546,6 +548,7 @@ def extract_record_for_phase(
         content=content,
         root_cause=structured.get("root_cause", ""),
         causal_chain=structured.get("causal_chain", ""),
+        invariant_capture=structured.get("invariant_capture", {}),
         plan=structured.get("plan", ""),
     )
     return record, declared_phase, foreign_phase_declared

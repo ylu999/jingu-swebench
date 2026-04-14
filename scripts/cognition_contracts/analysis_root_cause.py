@@ -216,22 +216,39 @@ SCHEMA_PROPERTIES: dict = {
         "minItems": 1,
         "description": "List of evidence references (file:line, test name, etc.).",
     },
-    "alternatives_considered": {
+    "alternative_hypotheses": {
         "type": "array",
         "items": {
             "type": "object",
             "properties": {
                 "hypothesis": {"type": "string"},
-                "why_rejected": {"type": "string"},
+                "ruled_out_reason": {"type": "string"},
             },
-            "required": ["hypothesis", "why_rejected"],
+            "required": ["hypothesis", "ruled_out_reason"],
         },
         "minItems": 1,
         "description": FIELD_SPEC_MAP["alternatives_considered"].description,
     },
-    "uncertainty": {
-        "type": "string",
-        "description": "What you are NOT sure about — be honest.",
+    "invariant_capture": {
+        "type": "object",
+        "properties": {
+            "identified_invariants": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Behavioral invariants the fix must preserve.",
+            },
+            "risk_if_violated": {
+                "type": "string",
+                "description": "What breaks if these invariants are not preserved.",
+            },
+        },
+        "required": ["identified_invariants", "risk_if_violated"],
+        "description": (
+            "Behavioral constraints the fix must preserve. "
+            "What must remain true after the fix? "
+            "What invalid behavior must still be rejected? "
+            "What valid behavior must remain accepted?"
+        ),
     },
     "principals": {
         "type": "array",

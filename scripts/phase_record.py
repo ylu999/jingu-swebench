@@ -30,6 +30,7 @@ class PhaseRecord:
     # Structured output fields (p23: causal binding)
     root_cause: str = ""                # ANALYZE: ROOT_CAUSE: section (required for analysis.root_cause)
     causal_chain: str = ""              # ANALYZE: CAUSAL_CHAIN: section
+    invariant_capture: dict = field(default_factory=dict)  # ANALYZE: structured invariant capture
     plan: str = ""                      # EXECUTE: PLAN: section (must reference root_cause)
     # DECIDE: prediction fields (decision quality upgrade)
     testable_hypothesis: str = ""           # DECIDE: "If X then Y because Z"
@@ -50,6 +51,8 @@ class PhaseRecord:
         }
         if self.root_cause:
             d["root_cause"] = self.root_cause[:200]
+        if self.invariant_capture:
+            d["invariant_capture"] = self.invariant_capture
         if self.plan:
             d["plan"] = self.plan[:200]
         if self.testable_hypothesis:
