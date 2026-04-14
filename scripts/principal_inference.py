@@ -58,11 +58,13 @@ class InferenceRule:
     applies_to: subtype strings this rule applies to (None = all subtypes)
     infer:      (phase_record) -> (score: float, signals: list[str], explanation: str)
     threshold:  score must exceed this to count as inferred (default 0.7)
+    check_mode: "structural" | "behavioral" | "hybrid" — how this rule checks the principal
     """
     principal: str
     infer: Callable  # (phase_record) -> tuple[float, list[str], str]
     applies_to: list[str] | None = None   # subtype strings e.g. ["analysis.root_cause"]
     threshold: float = 0.7
+    check_mode: str = "behavioral"  # default behavioral; Wave 1 rules override to "structural"
 
 
 @dataclass
@@ -782,6 +784,7 @@ register_rule(InferenceRule(
     infer=_infer_causal_grounding,
     applies_to=["analysis.root_cause"],
     threshold=0.5,  # P1 fix: evidence_refs alone is sufficient (was 0.7, required from_steps)
+    check_mode="structural",
 ))
 
 register_rule(InferenceRule(
@@ -789,6 +792,7 @@ register_rule(InferenceRule(
     infer=_infer_evidence_linkage,
     applies_to=None,  # all subtypes
     threshold=0.5,  # P1 fix: evidence_refs OR from_steps sufficient (was 0.7, required both AND)
+    check_mode="structural",
 ))
 
 register_rule(InferenceRule(
@@ -796,6 +800,7 @@ register_rule(InferenceRule(
     infer=_infer_minimal_change,
     applies_to=["execution.code_patch"],
     threshold=0.7,
+    check_mode="behavioral",  # requires git diff line count — runtime signal
 ))
 
 register_rule(InferenceRule(
@@ -803,6 +808,7 @@ register_rule(InferenceRule(
     infer=_infer_alternative_hypothesis_check,
     applies_to=["analysis.root_cause"],
     threshold=0.7,
+    check_mode="structural",
 ))
 
 register_rule(InferenceRule(
@@ -810,6 +816,7 @@ register_rule(InferenceRule(
     infer=_infer_invariant_preservation,
     applies_to=["judge.verification"],
     threshold=0.7,
+    check_mode="structural",
 ))
 
 # ── Register the 7 stage-2 principal rules (p207-P5) ─────────────────────────
@@ -819,6 +826,7 @@ register_rule(InferenceRule(
     infer=_infer_ontology_alignment,
     applies_to=None,  # all subtypes — ontology alignment is universal
     threshold=0.7,
+    check_mode="structural",
 ))
 
 register_rule(InferenceRule(
@@ -826,6 +834,7 @@ register_rule(InferenceRule(
     infer=_infer_phase_boundary_discipline,
     applies_to=None,  # all subtypes — boundary discipline is universal
     threshold=0.7,
+    check_mode="structural",
 ))
 
 register_rule(InferenceRule(
@@ -833,6 +842,7 @@ register_rule(InferenceRule(
     infer=_infer_action_grounding,
     applies_to=["execution.code_patch"],
     threshold=0.7,
+    check_mode="behavioral",  # cross-phase: PLAN references ROOT_CAUSE from ANALYZE
 ))
 
 register_rule(InferenceRule(
@@ -840,6 +850,7 @@ register_rule(InferenceRule(
     infer=_infer_option_comparison,
     applies_to=["decision.fix_direction"],
     threshold=0.7,
+    check_mode="structural",
 ))
 
 register_rule(InferenceRule(
@@ -847,6 +858,7 @@ register_rule(InferenceRule(
     infer=_infer_constraint_satisfaction,
     applies_to=["decision.fix_direction"],
     threshold=0.7,
+    check_mode="structural",
 ))
 
 register_rule(InferenceRule(
@@ -854,6 +866,7 @@ register_rule(InferenceRule(
     infer=_infer_result_verification,
     applies_to=["judge.verification"],
     threshold=0.7,
+    check_mode="structural",
 ))
 
 register_rule(InferenceRule(
@@ -861,6 +874,7 @@ register_rule(InferenceRule(
     infer=_infer_uncertainty_honesty,
     applies_to=["analysis.root_cause"],
     threshold=0.7,
+    check_mode="structural",
 ))
 
 # ── Register the 2 p237 principals ───────────────────────────────────────────
@@ -870,6 +884,7 @@ register_rule(InferenceRule(
     infer=_infer_scope_completeness,
     applies_to=["execution.code_patch", "judge.verification"],
     threshold=0.7,
+    check_mode="behavioral",  # requires tool usage history (grep/search commands)
 ))
 
 register_rule(InferenceRule(
@@ -877,6 +892,7 @@ register_rule(InferenceRule(
     infer=_infer_no_unnecessary_compat,
     applies_to=["execution.code_patch"],
     threshold=0.7,
+    check_mode="behavioral",  # requires patch content analysis
 ))
 
 
