@@ -109,3 +109,34 @@ class TestPredictionError:
         }]
         result = compute_prediction_error(records, {"f2p_passed": 0, "f2p_failed": 1})
         assert len(result.predicted_tests) == 3
+
+    def test_analyze_fallback_when_no_decide(self):
+        """Fall back to ANALYZE root_cause when DECIDE record missing."""
+        records = [{
+            "phase": "ANALYZE",
+            "root_cause": "The regex does not handle negative offsets",
+        }]
+        result = compute_prediction_error(records, {"f2p_passed": 2, "f2p_failed": 0})
+        assert result.error_type == "prediction_correct"
+        assert "[from ANALYZE]" in result.hypothesis
+
+    def test_analyze_fallback_wrong_direction(self):
+        """ANALYZE fallback still classifies wrong_direction correctly."""
+        records = [{
+            "phase": "ANALYZE",
+            "root_cause": "Missing null check in validator",
+        }]
+        result = compute_prediction_error(records, {"f2p_passed": 0, "f2p_failed": 3})
+        assert result.error_type == "prediction_wrong_direction"
+        assert result.severity == 1.0
+
+    def test_analyze_fallback_ignored_when_decide_exists(self):
+        """DECIDE record takes priority over ANALYZE even when both exist."""
+        records = [
+            {"phase": "ANALYZE", "root_cause": "Old analysis"},
+            {"phase": "DECIDE", "testable_hypothesis": "Fix the parser"},
+        ]
+        result = compute_prediction_error(records, {"f2p_passed": 1, "f2p_failed": 0})
+        assert result.error_type == "prediction_correct"
+        assert "Fix the parser" in result.hypothesis
+        assert "[from ANALYZE]" not in result.hypothesis

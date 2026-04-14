@@ -179,6 +179,10 @@ def _build_content_preview(parsed: dict, phase: str) -> str:
             parts.append(f"CHOSEN: {parsed.get('chosen', parsed.get('content', ''))}")
         if parsed.get("rationale"):
             parts.append(f"RATIONALE: {parsed['rationale']}")
+        if parsed.get("testable_hypothesis"):
+            parts.append(f"HYPOTHESIS: {parsed['testable_hypothesis']}")
+        if parsed.get("expected_tests_to_pass"):
+            parts.append(f"EXPECTED_TESTS: {', '.join(parsed['expected_tests_to_pass'][:5])}")
 
     elif phase == "DESIGN":
         if parsed.get("scope") or parsed.get("content"):
@@ -263,6 +267,20 @@ def build_phase_record_from_structured(
 
     content = _build_content_preview(parsed, phase_upper)
 
+    # P2 fix: synthesize testable_hypothesis from chosen/rationale if missing.
+    # Agent often submits DECIDE with {chosen, rationale, options} but omits
+    # testable_hypothesis — making prediction_error always return prediction_no_data.
+    testable_hypothesis = parsed.get("testable_hypothesis", "")
+    if not testable_hypothesis and phase_upper == "DECIDE":
+        chosen = parsed.get("chosen", "")
+        rationale = parsed.get("rationale", "")
+        if chosen and rationale:
+            testable_hypothesis = f"If we {chosen}, then tests will pass because {rationale}"[:500]
+        elif chosen:
+            testable_hypothesis = f"If we {chosen}, then the failing tests will pass"[:500]
+
+    expected_tests = parsed.get("expected_tests_to_pass", [])[:5]
+
     return PhaseRecord(
         phase=phase_upper,
         subtype=subtype,
@@ -274,8 +292,8 @@ def build_phase_record_from_structured(
         root_cause=parsed.get("root_cause", ""),
         causal_chain=parsed.get("causal_chain", ""),
         plan=parsed.get("plan", ""),
-        testable_hypothesis=parsed.get("testable_hypothesis", ""),
-        expected_tests_to_pass=parsed.get("expected_tests_to_pass", [])[:5],
+        testable_hypothesis=testable_hypothesis,
+        expected_tests_to_pass=expected_tests,
         expected_files_to_change=parsed.get("expected_files_to_change", []),
         risk_level=parsed.get("risk_level", ""),
     )

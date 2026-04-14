@@ -56,17 +56,34 @@ def compute_prediction_error(
     Returns:
         PredictionError with typed error and routing suggestion.
     """
-    # Find the DECIDE phase record
+    # Find the DECIDE phase record; fall back to ANALYZE if DECIDE not available
     decide_record = None
+    analyze_record = None
     for pr in reversed(phase_records):
         phase = ""
         if hasattr(pr, "phase"):
             phase = str(pr.phase).upper()
         elif isinstance(pr, dict):
             phase = str(pr.get("phase", "")).upper()
-        if phase == "DECIDE":
+        if phase == "DECIDE" and decide_record is None:
             decide_record = pr
+        elif phase == "ANALYZE" and analyze_record is None:
+            analyze_record = pr
+        if decide_record:
             break
+
+    if decide_record is None and analyze_record is not None:
+        # Fallback: synthesize prediction from ANALYZE record's root_cause.
+        # This gives P2 some data while DECIDE submission rate improves.
+        if hasattr(analyze_record, "as_dict"):
+            ar = analyze_record.as_dict()
+        elif isinstance(analyze_record, dict):
+            ar = analyze_record
+        else:
+            ar = vars(analyze_record) if hasattr(analyze_record, "__dict__") else {}
+        root_cause = ar.get("root_cause", "") or ""
+        if root_cause:
+            decide_record = {"phase": "DECIDE", "testable_hypothesis": f"[from ANALYZE] {root_cause[:300]}"}
 
     if decide_record is None:
         return PredictionError(
