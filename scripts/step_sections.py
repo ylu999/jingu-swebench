@@ -121,9 +121,7 @@ PHASE_REQUIRED_FIELDS: dict[str, list[str]] = {
     # sections. The analysis_gate checks the tool call fields (root_cause,
     # causal_chain). Checking for text markers here actively conflicts with the
     # tool-call path by injecting "write ROOT_CAUSE:" hints.
-    "DECIDE":     ["OPTIONS", "SELECTED", "CONSTRAINTS"],
-    "EXECUTE":    ["PLAN", "CHANGE_SCOPE"],
-    "JUDGE":      ["VERDICT", "TEST_RESULTS", "CONFIDENCE"],
+    # DECIDE/EXECUTE/JUDGE: removed — structural gates check these phases
 }
 
 
