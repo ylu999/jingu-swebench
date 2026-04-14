@@ -541,7 +541,22 @@ def run_controlled_verify(
             capture_output=True, text=True, timeout=timeout_s,
         )
         output = (test_result.stdout or "") + (test_result.stderr or "")
-        output_tail = output[-500:]
+        # Extract FAIL/ERROR lines for meaningful output_tail instead of
+        # raw tail (which is often just Django DB creation messages).
+        _fail_lines = []
+        _summary_line = ""
+        for _line in output.split("\n"):
+            _ls = _line.strip()
+            if re.match(r"^\w+\s+\([^)]+\)\s+\.\.\.\s+(FAIL|ERROR)", _ls):
+                _fail_lines.append(_ls)
+            elif _ls.startswith("FAILED (") or _ls.startswith("Ran "):
+                _summary_line = _ls
+        if _fail_lines:
+            output_tail = "\n".join(_fail_lines[-10:])  # up to 10 FAIL lines
+            if _summary_line:
+                output_tail = output_tail + "\n" + _summary_line
+        else:
+            output_tail = output[-500:]
 
         # Step 5: parse results from output
         passed, failed = _parse_test_output_counts(output)

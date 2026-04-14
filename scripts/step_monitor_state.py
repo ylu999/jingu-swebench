@@ -332,6 +332,7 @@ class StepMonitorState:
                 "p2p_passed": result.get("p2p_passed"),
                 "p2p_failed": result.get("p2p_failed"),
                 "eval_resolved": result.get("eval_resolved"),
+                "output_tail": result.get("output_tail", "")[:500],
             }
             self.verify_history.append(entry)
             delta_str = f"  delta={delta:+d}" if delta is not None else ""
