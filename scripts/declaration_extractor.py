@@ -323,6 +323,48 @@ def build_phase_record_from_structured(
 
     expected_tests = parsed.get("expected_tests_to_pass", [])[:5]
 
+    # ── Extract all named fields with type-appropriate defaults (C-06) ────────
+
+    # OBSERVE
+    raw_observations = parsed.get("observations", [])
+    observations = raw_observations if isinstance(raw_observations, list) else []
+
+    # ANALYZE
+    raw_alt_hyp = parsed.get("alternative_hypotheses", [])
+    alternative_hypotheses = raw_alt_hyp if isinstance(raw_alt_hyp, list) else []
+
+    # DECIDE
+    raw_options = parsed.get("options", [])
+    options = raw_options if isinstance(raw_options, list) else []
+    raw_chosen = parsed.get("chosen", "")
+    chosen = raw_chosen.strip() if isinstance(raw_chosen, str) else ""
+    raw_rationale = parsed.get("rationale", "")
+    rationale = raw_rationale.strip() if isinstance(raw_rationale, str) else ""
+
+    # DESIGN
+    raw_files_to_modify = parsed.get("files_to_modify", [])
+    files_to_modify = raw_files_to_modify if isinstance(raw_files_to_modify, list) else []
+    raw_scope_boundary = parsed.get("scope_boundary", "")
+    scope_boundary = raw_scope_boundary.strip() if isinstance(raw_scope_boundary, str) else ""
+    raw_invariants = parsed.get("invariants", [])
+    invariants = raw_invariants if isinstance(raw_invariants, list) else []
+    raw_design_comparison = parsed.get("design_comparison", {})
+    design_comparison = raw_design_comparison if isinstance(raw_design_comparison, dict) else {}
+
+    # EXECUTE
+    raw_patch_description = parsed.get("patch_description", "")
+    patch_description = raw_patch_description.strip() if isinstance(raw_patch_description, str) else ""
+    raw_files_modified = parsed.get("files_modified", [])
+    files_modified = raw_files_modified if isinstance(raw_files_modified, list) else []
+
+    # JUDGE
+    raw_test_results = parsed.get("test_results", {})
+    test_results = raw_test_results if isinstance(raw_test_results, dict) else {}
+    raw_success_criteria = parsed.get("success_criteria_met", [])
+    success_criteria_met = raw_success_criteria if isinstance(raw_success_criteria, list) else []
+    raw_residual_risks = parsed.get("residual_risks", [])
+    residual_risks = raw_residual_risks if isinstance(raw_residual_risks, list) else []
+
     return PhaseRecord(
         phase=phase_upper,
         subtype=subtype,
@@ -339,6 +381,21 @@ def build_phase_record_from_structured(
         expected_tests_to_pass=expected_tests,
         expected_files_to_change=parsed.get("expected_files_to_change", []),
         risk_level=parsed.get("risk_level", ""),
+        # C-06: all named fields
+        observations=observations,
+        alternative_hypotheses=alternative_hypotheses,
+        options=options,
+        chosen=chosen,
+        rationale=rationale,
+        files_to_modify=files_to_modify,
+        scope_boundary=scope_boundary,
+        invariants=invariants,
+        design_comparison=design_comparison,
+        patch_description=patch_description,
+        files_modified=files_modified,
+        test_results=test_results,
+        success_criteria_met=success_criteria_met,
+        residual_risks=residual_risks,
     )
 
 
