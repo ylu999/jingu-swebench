@@ -12,8 +12,12 @@ Every field must be derived from system state, not from LLM output.
 """
 
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 from phase_record import PhaseRecord
-from gate_rejection import GateRejection
+from gate_rejection import GateRejection, ContractView
+
+if TYPE_CHECKING:
+    from bundle_compiler import CompiledBundle
 
 # ── Contract-derived references ──────────────────────────────────────────────
 # Gate rules and repair hints originate from the canonical contract.
@@ -128,6 +132,8 @@ def _check_constraint_encoding(pr: PhaseRecord) -> float:
 def evaluate_design(
     pr: PhaseRecord,
     analysis_records: list[PhaseRecord] | None = None,
+    *,
+    compiled_bundle: "CompiledBundle | None" = None,
 ) -> DesignVerdict:
     """
     Evaluate design quality as soft telemetry signal.
@@ -140,6 +146,24 @@ def evaluate_design(
         analysis_records: Previous analysis PhaseRecords (for invariant cross-check).
     """
     scores: dict = {}
+
+    # C-04: Resolve contract from CompiledBundle when available.
+    # design_gate is soft-only (no rejection), but we record the contract
+    # source for observability and future SDG integration.
+    _contract_source = "cognition_contracts"
+    if compiled_bundle is not None:
+        try:
+            _cv = compiled_bundle.validators.get("DESIGN")
+            if _cv is not None:
+                _contract = ContractView.from_compiled_validator(_cv)
+                _contract_source = "compiled_bundle"
+            else:
+                _contract = None
+        except Exception:
+            _contract = None
+    else:
+        _contract = None
+    scores["contract_source"] = _contract_source
 
     # Rule 1: Invariant preservation (score only)
     scores["invariant_preservation"] = _check_invariant_preservation(pr, analysis_records)

@@ -10,16 +10,21 @@ The main flow is always wrapped in try/except to ensure robustness.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
 from gate_rejection import (
     GateRejection, ContractView, FieldSpec, FieldFailure,
     build_gate_rejection, SDG_ENABLED,
 )
+
+if TYPE_CHECKING:
+    from bundle_compiler import CompiledBundle
+
 from gate_failure_code import (
     GateFailureCode, GateFailureCategory, GateFailureSeverity,
     missing_principal, forbidden_principal, missing_field,
     semantic_fail, forbidden_transition, get_repair_hint,
 )
-from routing_decision import AdmissionStatus, RoutingDecision
+from routing_decision import AdmissionStatus, RoutingDecision, EscalationReason, EscalationInfo
 
 # Load required principals from canonical source (subtype_contracts, p193).
 # Exception-safe: if import fails, fallback to static dict (no crash).
@@ -184,7 +189,19 @@ def get_principal_feedback(violation: str, bundle: dict | None = None) -> str:
     return f"Principal violation: {violation}. Declare required principals for this phase."
 
 
-# ── AdmissionResult (v2 — EF-5) ──────────────────────────────────────────────
+# ── Escalation thresholds (EF-6) ─────────────────────────────────────────────
+_RETRYABLE_LOOP_LIMIT = 3   # same (phase, reason) this many times → CONTRACT_BUG escalation
+_FAKE_LOOP_LIMIT = 3         # same fake principal this many times → FAKE_LOOP escalation
+
+# Structured violations that should NOT be bypassed by contract-bug escalation
+_STRUCTURED_BYPASS_EXEMPT = frozenset({
+    "missing_root_cause",
+    "missing_plan",
+    "plan_not_grounded_in_root_cause",
+})
+
+
+# ── AdmissionResult (v3 — EF-6) ──────────────────────────────────────────────
 
 class AdmissionResult:
     """
@@ -206,8 +223,11 @@ class AdmissionResult:
       - reasons: list[GateFailureCode] (typed failure codes)
       - reasons_legacy: property returning list[str] for backward compat
       - routing: RoutingDecision | None — where to redirect on failure
+
+    v3 changes (EF-6):
+      - escalation: EscalationInfo | None — populated when status=ESCALATED
     """
-    __slots__ = ("status", "reasons", "rejection", "routing")
+    __slots__ = ("status", "reasons", "rejection", "routing", "escalation")
 
     def __init__(
         self,
@@ -215,6 +235,7 @@ class AdmissionResult:
         reasons: list[str] | list[GateFailureCode],
         rejection: GateRejection | None = None,
         routing: RoutingDecision | None = None,
+        escalation: EscalationInfo | None = None,
     ) -> None:
         # Accept both str and AdmissionStatus for backward compat
         if isinstance(status, str) and not isinstance(status, AdmissionStatus):
@@ -227,6 +248,7 @@ class AdmissionResult:
         self.reasons: list = reasons  # GateFailureCode list (or legacy str list)
         self.rejection = rejection
         self.routing = routing
+        self.escalation = escalation
 
     @property
     def reasons_legacy(self) -> list[str]:
@@ -247,8 +269,23 @@ class AdmissionResult:
         return f"AdmissionResult({self.status}, {self.reasons_legacy})"
 
 
-def _build_principal_contract(phase: str) -> ContractView:
-    """Build a ContractView for the principal/admission gate of a given phase."""
+def _build_principal_contract(phase: str, compiled_bundle: CompiledBundle | None = None) -> ContractView:
+    """Build a ContractView for the principal/admission gate of a given phase.
+
+    C-04: When compiled_bundle is provided, prefer ContractView.from_compiled_validator()
+    which derives required_fields, required_principals, and forbidden_principals
+    from the CompiledValidator. Falls back to subtype_contracts-based construction.
+    """
+    # C-04: Try CompiledBundle-derived ContractView first
+    if compiled_bundle is not None:
+        try:
+            _cv = compiled_bundle.validators.get(phase.upper())
+            if _cv is not None:
+                return ContractView.from_compiled_validator(_cv)
+        except Exception:
+            pass  # fall through to legacy construction
+
+    # Legacy: build from PHASE_REQUIRED_PRINCIPALS + subtype_contracts
     required = PHASE_REQUIRED_PRINCIPALS.get(phase.upper(), [])
     field_specs = {}
     for p in required:
@@ -278,12 +315,13 @@ def _build_principal_contract(phase: str) -> ContractView:
 
 def _build_admission_rejection(
     phase: str, reasons: list[str], phase_record, status: str,
+    compiled_bundle: CompiledBundle | None = None,
 ) -> GateRejection | None:
     """Build GateRejection from admission check reasons (p217 SDG)."""
     if not SDG_ENABLED or not reasons:
         return None
 
-    contract = _build_principal_contract(phase)
+    contract = _build_principal_contract(phase, compiled_bundle=compiled_bundle)
     failures = []
     extracted = {}
 
@@ -372,7 +410,7 @@ def _build_admission_rejection(
     )
 
 
-def evaluate_admission(phase_record, phase: str, next_phase: str = "", observe_tool_signal: bool = False, last_analyze_root_cause: str = "", structured_output: bool = False) -> AdmissionResult:
+def evaluate_admission(phase_record, phase: str, next_phase: str = "", observe_tool_signal: bool = False, last_analyze_root_cause: str = "", structured_output: bool = False, compiled_bundle: CompiledBundle | None = None, loop_counts: dict | None = None) -> AdmissionResult:
     """
     Full admission check for a PhaseRecord at phase boundary.
 
@@ -381,8 +419,9 @@ def evaluate_admission(phase_record, phase: str, next_phase: str = "", observe_t
       2. forbidden principals — declared → REJECTED (fake principal / phase boundary violation)
       3. required fields      — missing → RETRYABLE (skipped when structured_output=True)
       4. allowed_next         — forbidden transition → REJECTED (only if next_phase provided)
+      5. escalation detection — RETRYABLE loop exceeded → ESCALATED (EF-6)
 
-    Returns AdmissionResult(ADMITTED / RETRYABLE / REJECTED, reasons).
+    Returns AdmissionResult(ADMITTED / RETRYABLE / REJECTED / ESCALATED, reasons).
     Exception-safe: any error returns ADMITTED (no crash, no false stop).
 
     Args:
@@ -392,6 +431,9 @@ def evaluate_admission(phase_record, phase: str, next_phase: str = "", observe_t
         structured_output: When True (p221), skip structural field presence checks
             (steps 3, 3a, 3b) — JSON schema already enforces them.
             Principal checks (steps 1, 2) and transition checks (step 4) still apply.
+        loop_counts:  dict mapping (phase, violation_code) → count.
+            When provided and result would be RETRYABLE, checks if the loop_key
+            exceeds _RETRYABLE_LOOP_LIMIT and returns ESCALATED instead.
     """
     try:
         # Resolve subtype for typed failure codes
@@ -529,14 +571,34 @@ def evaluate_admission(phase_record, phase: str, next_phase: str = "", observe_t
         if rejected_codes:
             all_codes = rejected_codes + retryable_codes
             all_reasons = rejected + retryable
-            rejection_obj = _build_admission_rejection(phase, all_reasons, phase_record, "REJECTED")
+            rejection_obj = _build_admission_rejection(phase, all_reasons, phase_record, "REJECTED", compiled_bundle=compiled_bundle)
             _routing = _build_routing(all_codes, AdmissionStatus.REJECTED)
             return AdmissionResult(
                 AdmissionStatus.REJECTED, all_codes,
                 rejection=rejection_obj, routing=_routing,
             )
         if retryable_codes:
-            rejection_obj = _build_admission_rejection(phase, retryable, phase_record, "RETRYABLE")
+            # 5. Escalation detection (EF-6): check if this RETRYABLE has looped too many times
+            if loop_counts:
+                _first_reason = retryable[0] if retryable else "unknown"
+                _esc_key = (phase.upper(), _first_reason)
+                _esc_count = loop_counts.get(_esc_key, 0)
+                _has_structured = any(r in _STRUCTURED_BYPASS_EXEMPT for r in retryable)
+                if _esc_count >= _RETRYABLE_LOOP_LIMIT and not _has_structured:
+                    _esc_info = EscalationInfo(
+                        reason=EscalationReason.CONTRACT_BUG,
+                        loop_key=_esc_key,
+                        loop_count=_esc_count,
+                        action="bypass",
+                        bypassed_principals=[],
+                    )
+                    return AdmissionResult(
+                        AdmissionStatus.ESCALATED,
+                        [f"contract_bypass:{_first_reason}"],
+                        escalation=_esc_info,
+                    )
+
+            rejection_obj = _build_admission_rejection(phase, retryable, phase_record, "RETRYABLE", compiled_bundle=compiled_bundle)
             _routing = _build_routing(retryable_codes, AdmissionStatus.RETRYABLE)
             return AdmissionResult(
                 AdmissionStatus.RETRYABLE, retryable_codes,

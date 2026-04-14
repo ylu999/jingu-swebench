@@ -23,6 +23,10 @@ from gate_rejection import (
 )
 from cognition_contracts import analysis_root_cause as _arc
 
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from bundle_compiler import CompiledBundle
+
 
 @dataclass
 class AnalysisVerdict:
@@ -218,7 +222,7 @@ _RULE_TO_FIELD: dict[str, tuple[str, str]] = {
 _THRESHOLD = _arc.GATE_THRESHOLD  # From contract (single source of truth)
 
 
-def evaluate_analysis(pr: PhaseRecord, *, structured_output: bool = False) -> AnalysisVerdict:
+def evaluate_analysis(pr: PhaseRecord, *, structured_output: bool = False, compiled_bundle: "CompiledBundle | None" = None) -> AnalysisVerdict:
     """
     Evaluate analysis phase quality. Returns verdict with pass/fail + reasons.
 
@@ -325,6 +329,20 @@ def evaluate_analysis(pr: PhaseRecord, *, structured_output: bool = False) -> An
     # p217: Build structured GateRejection on failure (when SDG enabled)
     rejection = None
     if failed and SDG_ENABLED:
+        # Resolve contract: prefer CompiledBundle-derived ContractView (C-04),
+        # fall back to module-level _ANALYZE_CONTRACT from cognition_contracts.
+        if compiled_bundle is not None:
+            try:
+                _cv = compiled_bundle.validators.get("ANALYZE")
+                if _cv is not None:
+                    _contract = ContractView.from_compiled_validator(_cv)
+                else:
+                    _contract = _ANALYZE_CONTRACT
+            except Exception:
+                _contract = _ANALYZE_CONTRACT
+        else:
+            _contract = _ANALYZE_CONTRACT
+
         field_failures = []
         for rule_name in failed:
             field_name, hint = _RULE_TO_FIELD.get(
@@ -339,7 +357,7 @@ def evaluate_analysis(pr: PhaseRecord, *, structured_output: bool = False) -> An
             else:
                 reason = "semantic_fail"
 
-            field_spec = _ANALYZE_CONTRACT.field_specs.get(field_name)
+            field_spec = _contract.field_specs.get(field_name)
             expected = field_spec.description if field_spec else f"{field_name} required"
             actual_val = extracted.get(field_name)
 
@@ -353,7 +371,7 @@ def evaluate_analysis(pr: PhaseRecord, *, structured_output: bool = False) -> An
 
         rejection = build_gate_rejection(
             gate_name="analysis_gate",
-            contract=_ANALYZE_CONTRACT,
+            contract=_contract,
             extracted=extracted,
             failures=field_failures,
         )
