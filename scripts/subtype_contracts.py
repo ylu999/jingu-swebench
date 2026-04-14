@@ -29,6 +29,11 @@ from __future__ import annotations
 from typing import TypedDict
 
 from cognition_contracts import analysis_root_cause as _arc
+from cognition_contracts import observation_fact_gathering as _ofg
+from cognition_contracts import decision_fix_direction as _dfd
+from cognition_contracts import design_solution_shape as _dss
+from cognition_contracts import execution_code_patch as _ecp
+from cognition_contracts import judge_verification as _jv
 
 
 class SubtypeContract(TypedDict, total=False):
@@ -75,26 +80,15 @@ class SubtypeContract(TypedDict, total=False):
 
 SUBTYPE_CONTRACTS: dict[str, SubtypeContract] = {
     "observation.fact_gathering": {
-        "phase": "OBSERVE",
-        # No principals are fake_checkable for OBSERVE subtype.
-        # evidence_linkage rule applies to all subtypes but requires evidence_refs +
-        # from_steps — agent output at OBSERVE rarely has from_steps, so treat as expected.
-        "required_principals": [],
-        "expected_principals": [
-            "ontology_alignment",         # stage=required_enforced, no inference rule
-            "phase_boundary_discipline",  # stage=required_enforced, no inference rule
-            "evidence_completeness",      # stage=required_enforced, no inference rule
-        ],
-        "forbidden_principals": ["action_grounding", "minimal_change"],
-        # Y-lite fix: evidence_refs regex match is too strict for OBSERVE.
-        # Agent uses Read/Grep/Search tools (implicit evidence basis) but may not
-        # write explicit EVIDENCE: file.py:N text → evidence_refs=[] → RETRYABLE loop.
-        # Solution: require has_evidence_basis (evidence_refs OR from_steps OR observe_tool_signal),
-        # where observe_tool_signal=True when agent used any observation-class tool in this step.
-        "required_fields": [],
-        "has_evidence_basis_required": True,  # evaluated by principal_gate (not field-presence)
-        "allowed_next": ["ANALYZE", "OBSERVE"],
-        "repair_target": "OBSERVE",
+        # Derived from cognition_contracts/observation_fact_gathering.py (single source of truth).
+        "phase": _ofg.PHASE,
+        "required_principals": list(_ofg.REQUIRED_PRINCIPALS),
+        "expected_principals": list(_ofg.EXPECTED_PRINCIPALS),
+        "forbidden_principals": list(_ofg.FORBIDDEN_PRINCIPALS),
+        "required_fields": list(getattr(_ofg, 'REQUIRED_RECORD_FIELDS', [])),
+        "has_evidence_basis_required": getattr(_ofg, 'HAS_EVIDENCE_BASIS_REQUIRED', False),
+        "allowed_next": list(_ofg.ALLOWED_NEXT),
+        "repair_target": getattr(_ofg, 'REPAIR_TARGET', _ofg.PHASE),
     },
     "analysis.root_cause": {
         # Derived from cognition_contracts/analysis_root_cause.py (single source of truth).
@@ -108,80 +102,48 @@ SUBTYPE_CONTRACTS: dict[str, SubtypeContract] = {
         "repair_target": _arc.REPAIR_TARGET,
     },
     "decision.fix_direction": {
-        "phase": "DECIDE",
-        # No principals are fake_checkable for decision.fix_direction subtype.
-        "required_principals": [],
-        "expected_principals": [
-            "ontology_alignment",         # stage=required_enforced, no inference rule
-            "phase_boundary_discipline",  # stage=required_enforced, no inference rule
-            "option_comparison",          # stage=required_enforced, no inference rule
-            "constraint_satisfaction",    # stage=required_enforced, no inference rule
-            "uncertainty_honesty",
-        ],
-        "forbidden_principals": [],
-        "required_fields": [],
-        "allowed_next": ["DESIGN", "DECIDE", "ANALYZE"],
-        "repair_target": "ANALYZE",
+        # Derived from cognition_contracts/decision_fix_direction.py (single source of truth).
+        "phase": _dfd.PHASE,
+        "required_principals": list(_dfd.REQUIRED_PRINCIPALS),
+        "expected_principals": list(_dfd.EXPECTED_PRINCIPALS),
+        "forbidden_principals": list(_dfd.FORBIDDEN_PRINCIPALS),
+        "required_fields": list(getattr(_dfd, 'REQUIRED_RECORD_FIELDS', [])),
+        "has_evidence_basis_required": getattr(_dfd, 'HAS_EVIDENCE_BASIS_REQUIRED', False),
+        "allowed_next": list(_dfd.ALLOWED_NEXT),
+        "repair_target": getattr(_dfd, 'REPAIR_TARGET', _dfd.PHASE),
     },
     "design.solution_shape": {
-        "phase": "DESIGN",
-        # invariant_preservation has an inference rule (applies_to: judge.verification),
-        # but NOT for design.solution_shape — so not fake_checkable here either.
-        "required_principals": [],
-        "expected_principals": [
-            "ontology_alignment",         # stage=required_enforced, no inference rule
-            "phase_boundary_discipline",  # stage=required_enforced, no inference rule
-            "invariant_preservation",     # inference rule exists but applies_to=judge.verification only
-            "scope_minimality",           # stage=required_enforced, no inference rule
-            "design_comparison",          # stage=required_enforced, no inference rule — constraint encoding
-            "constraint_encoding_justification",  # stage=required_enforced, no inference rule — constraint encoding
-        ],
-        "forbidden_principals": ["minimal_change"],
-        "required_fields": [],
-        "allowed_next": ["EXECUTE", "DESIGN", "DECIDE"],
-        "repair_target": "DECIDE",
+        # Derived from cognition_contracts/design_solution_shape.py (single source of truth).
+        "phase": _dss.PHASE,
+        "required_principals": list(_dss.REQUIRED_PRINCIPALS),
+        "expected_principals": list(_dss.EXPECTED_PRINCIPALS),
+        "forbidden_principals": list(_dss.FORBIDDEN_PRINCIPALS),
+        "required_fields": list(getattr(_dss, 'REQUIRED_RECORD_FIELDS', [])),
+        "has_evidence_basis_required": getattr(_dss, 'HAS_EVIDENCE_BASIS_REQUIRED', False),
+        "allowed_next": list(_dss.ALLOWED_NEXT),
+        "repair_target": getattr(_dss, 'REPAIR_TARGET', _dss.PHASE),
     },
     "execution.code_patch": {
-        "phase": "EXECUTE",
-        # minimal_change is fake_checkable for execution.code_patch.
-        # action_grounding has no inference rule → expected only.
-        # ontology_alignment + phase_boundary_discipline have no inference rule → expected only.
-        # scope_completeness + no_unnecessary_compat: p237 principals with inference rules.
-        "required_principals": [
-            "minimal_change",
-        ],
-        "expected_principals": [
-            "ontology_alignment",         # stage=required_enforced, no inference rule
-            "phase_boundary_discipline",  # stage=required_enforced, no inference rule
-            "action_grounding",           # stage=required_enforced, no inference rule
-            "invariant_preservation",
-            "scope_completeness",         # p237: check all call sites before multi-file changes
-            "no_unnecessary_compat",      # p237: don't add backward-compat shims unless required
-        ],
-        "forbidden_principals": [],
-        "required_fields": [],
-        "allowed_next": ["JUDGE", "EXECUTE", "ANALYZE"],
-        "repair_target": "ANALYZE",
+        # Derived from cognition_contracts/execution_code_patch.py (single source of truth).
+        "phase": _ecp.PHASE,
+        "required_principals": list(_ecp.REQUIRED_PRINCIPALS),
+        "expected_principals": list(_ecp.EXPECTED_PRINCIPALS),
+        "forbidden_principals": list(_ecp.FORBIDDEN_PRINCIPALS),
+        "required_fields": list(getattr(_ecp, 'REQUIRED_RECORD_FIELDS', [])),
+        "has_evidence_basis_required": getattr(_ecp, 'HAS_EVIDENCE_BASIS_REQUIRED', False),
+        "allowed_next": list(_ecp.ALLOWED_NEXT),
+        "repair_target": getattr(_ecp, 'REPAIR_TARGET', _ecp.PHASE),
     },
     "judge.verification": {
-        "phase": "JUDGE",
-        # invariant_preservation is fake_checkable for judge.verification.
-        # result_verification + uncertainty_honesty have no inference rule → expected only.
-        # scope_completeness: p237 principal — verify all affected call sites were checked.
-        "required_principals": [
-            "invariant_preservation",
-        ],
-        "expected_principals": [
-            "ontology_alignment",         # stage=required_enforced, no inference rule
-            "result_verification",        # stage=required_enforced, no inference rule
-            "uncertainty_honesty",        # stage=required_enforced, no inference rule
-            "residual_risk_detection",
-            "scope_completeness",         # p237: verify all call sites were checked
-        ],
-        "forbidden_principals": [],
-        "required_fields": [],
-        "allowed_next": ["EXECUTE", "ANALYZE"],
-        "repair_target": "EXECUTE",
+        # Derived from cognition_contracts/judge_verification.py (single source of truth).
+        "phase": _jv.PHASE,
+        "required_principals": list(_jv.REQUIRED_PRINCIPALS),
+        "expected_principals": list(_jv.EXPECTED_PRINCIPALS),
+        "forbidden_principals": list(_jv.FORBIDDEN_PRINCIPALS),
+        "required_fields": list(getattr(_jv, 'REQUIRED_RECORD_FIELDS', [])),
+        "has_evidence_basis_required": getattr(_jv, 'HAS_EVIDENCE_BASIS_REQUIRED', False),
+        "allowed_next": list(_jv.ALLOWED_NEXT),
+        "repair_target": getattr(_jv, 'REPAIR_TARGET', _jv.PHASE),
     },
 }
 
