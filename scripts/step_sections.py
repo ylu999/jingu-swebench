@@ -423,8 +423,8 @@ def _step_cp_update_and_verdict(
     # ══════════════════════════════════════════════════════════════════
     _current_phase_str = str(_cp_s.phase).upper()
     _PHASE_DEADLINES = {
-        "OBSERVE": 15, "ANALYZE": 12, "DECIDE": 8,
-        "EXECUTE": 10, "DESIGN": 10, "JUDGE": 8,
+        "UNDERSTAND": 8, "OBSERVE": 15, "ANALYZE": 12, "DECIDE": 8,
+        "DESIGN": 10, "EXECUTE": 10, "JUDGE": 8,
     }
     _DEFAULT_DEADLINE = 12
     _phase_deadline = _PHASE_DEADLINES.get(_current_phase_str, _DEFAULT_DEADLINE)
@@ -726,7 +726,7 @@ def _step_cp_update_and_verdict(
                 )
                 if _foreign:
                     _pr_foreign_phase = _declared_phase
-                    _PHASE_ORDER = ["UNDERSTAND", "OBSERVE", "ANALYZE", "DECIDE", "EXECUTE", "JUDGE"]
+                    _PHASE_ORDER = ["UNDERSTAND", "OBSERVE", "ANALYZE", "DECIDE", "DESIGN", "EXECUTE", "JUDGE"]
                     try:
                         _eval_idx = _PHASE_ORDER.index(_eval_phase)
                         _decl_idx = _PHASE_ORDER.index(_declared_phase)
@@ -1503,7 +1503,7 @@ def _step_cp_update_and_verdict(
                 loop_counts=state._retryable_loop_counts,
             )
             if _pr_foreign_phase:
-                _phase_order = ["UNDERSTAND", "OBSERVE", "ANALYZE", "DECIDE", "EXECUTE", "JUDGE"]
+                _phase_order = ["UNDERSTAND", "OBSERVE", "ANALYZE", "DECIDE", "DESIGN", "EXECUTE", "JUDGE"]
                 _delta = abs(_phase_order.index(_pr_foreign_phase) - _phase_order.index(_eval_phase)) if (_pr_foreign_phase in _phase_order and _eval_phase in _phase_order) else 0
                 _foreign_reason = f"foreign_phase_declared:declared={_pr_foreign_phase},eval={_eval_phase},delta={_delta}"
                 # EF-5: use reasons_legacy for string-based filtering, rebuild reasons list

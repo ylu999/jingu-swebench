@@ -37,7 +37,7 @@ from typing import Iterator
 
 # ── Constants ────────────────────────────────────────────────────────────────
 
-ALL_PHASES = ["UNDERSTAND", "OBSERVE", "ANALYZE", "DECIDE", "EXECUTE", "JUDGE"]
+ALL_PHASES = ["UNDERSTAND", "OBSERVE", "ANALYZE", "DECIDE", "DESIGN", "EXECUTE", "JUDGE"]
 
 ALL_PRINCIPALS = [
     "causal_grounding",

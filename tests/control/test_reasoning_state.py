@@ -68,7 +68,7 @@ class TestNormalizeSignals:
 
 class TestInitialReasoningState:
     def test_phase_preserved(self):
-        for phase in ["UNDERSTAND", "OBSERVE", "ANALYZE", "DECIDE", "EXECUTE", "JUDGE"]:
+        for phase in ["UNDERSTAND", "OBSERVE", "ANALYZE", "DECIDE", "DESIGN", "EXECUTE", "JUDGE"]:
             s = initial_reasoning_state(phase)
             assert s.phase == phase
 
@@ -99,7 +99,7 @@ class TestUpdateReasoningStateInvariants:
             assert s.step_index == i
 
     # I5: phase preserved across all phases + task_success
-    @pytest.mark.parametrize("phase", ["UNDERSTAND", "OBSERVE", "ANALYZE", "DECIDE", "EXECUTE", "JUDGE"])
+    @pytest.mark.parametrize("phase", ["UNDERSTAND", "OBSERVE", "ANALYZE", "DECIDE", "DESIGN", "EXECUTE", "JUDGE"])
     def test_I5_phase_preserved(self, phase):
         s = initial_reasoning_state(phase)
         signals = normalize_signals({"evidence_gain": 1})
@@ -177,7 +177,7 @@ class TestUpdateReasoningStateInvariants:
 class TestDecideNext:
 
     # task_success → STOP regardless of phase
-    @pytest.mark.parametrize("phase", ["UNDERSTAND", "OBSERVE", "ANALYZE", "DECIDE", "EXECUTE", "JUDGE"])
+    @pytest.mark.parametrize("phase", ["UNDERSTAND", "OBSERVE", "ANALYZE", "DECIDE", "DESIGN", "EXECUTE", "JUDGE"])
     def test_task_success_stops_all_phases(self, phase):
         s = state_at(phase)
         signals = normalize_signals({"task_success": True})
@@ -224,7 +224,8 @@ class TestDecideNext:
         ("UNDERSTAND", "OBSERVE"),
         ("OBSERVE",    "ANALYZE"),
         ("ANALYZE",    "DECIDE"),
-        ("DECIDE",     "EXECUTE"),
+        ("DECIDE",     "DESIGN"),
+        ("DESIGN",     "EXECUTE"),
         # EXECUTE is excluded: 改动5 changed EXECUTE stagnation to VerdictRedirect(DECIDE)
         # See test_execute_stagnation_redirects_to_decide below.
     ])
@@ -937,3 +938,17 @@ class TestPhaseBudget:
         verdict = decide_next(s)
         assert isinstance(verdict, VerdictRedirect)
         assert verdict.reason == "env_noise detected"
+
+    def test_design_budget_advances_to_execute(self):
+        """DESIGN budget exhausted → VerdictAdvance(EXECUTE)."""
+        budget = PHASE_STEP_BUDGET["DESIGN"]
+        s = ReasoningState(phase="DESIGN", phase_steps=budget)
+        verdict = decide_next(s)
+        assert isinstance(verdict, VerdictAdvance)
+        assert verdict.to == "EXECUTE"
+
+    def test_all_phases_have_explicit_budget(self):
+        """Every phase in the canonical taxonomy has an explicit budget — no silent fallback."""
+        canonical_phases = ["UNDERSTAND", "OBSERVE", "ANALYZE", "DECIDE", "DESIGN", "EXECUTE", "JUDGE"]
+        for phase in canonical_phases:
+            assert phase in PHASE_STEP_BUDGET, f"{phase} missing from PHASE_STEP_BUDGET"

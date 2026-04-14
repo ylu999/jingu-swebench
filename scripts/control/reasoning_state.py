@@ -34,7 +34,7 @@ from typing import Literal, Optional
 
 # ── Phase ─────────────────────────────────────────────────────────────────────
 
-Phase = Literal["UNDERSTAND", "OBSERVE", "ANALYZE", "DECIDE", "EXECUTE", "JUDGE"]
+Phase = Literal["UNDERSTAND", "OBSERVE", "ANALYZE", "DECIDE", "DESIGN", "EXECUTE", "JUDGE"]
 
 # ── Signals ───────────────────────────────────────────────────────────────────
 
@@ -194,7 +194,7 @@ class VerdictRedirect:
 @dataclass(frozen=True)
 class VerdictStop:
     type: str = "STOP"
-    reason: Literal["task_success", "no_signal", "empty_patch"] = "no_signal"
+    reason: Literal["task_success", "no_signal", "empty_patch", "phase_budget_exhausted"] = "no_signal"
 
 @dataclass(frozen=True)
 class VerdictContinue:
@@ -207,7 +207,8 @@ _ADVANCE_TABLE: dict[Phase, Optional[Phase]] = {
     "UNDERSTAND": "OBSERVE",
     "OBSERVE":    "ANALYZE",
     "ANALYZE":    "DECIDE",
-    "DECIDE":     "EXECUTE",
+    "DECIDE":     "DESIGN",
+    "DESIGN":     "EXECUTE",
     "EXECUTE":    "JUDGE",
     "JUDGE":      None,  # terminal
 }
@@ -222,6 +223,7 @@ PHASE_STEP_BUDGET: dict[str, int] = {
     "OBSERVE":    10,
     "ANALYZE":    10,
     "DECIDE":     5,
+    "DESIGN":     10,
     "EXECUTE":    25,
     "JUDGE":      5,
 }
@@ -303,7 +305,7 @@ def decide_next(state: ReasoningState) -> ControlVerdict:
 
     # P2: ANALYZE → DECIDE (not EXECUTE). DECIDE phase is mandatory —
     # agent must declare expected_outcome + testable_hypothesis before executing.
-    # DECIDE → EXECUTE transition handled by stagnation path (_ADVANCE_TABLE).
+    # DECIDE → DESIGN → EXECUTE transition handled by stagnation path (_ADVANCE_TABLE).
     if state.phase == "ANALYZE" and state.actionability > 0:
         return VerdictAdvance(to="DECIDE")
 
