@@ -41,24 +41,33 @@ from declaration_extractor import build_phase_record_from_structured, extract_ph
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Phase 3: TransitionEvaluation — sole transition authority result type
+# Phase 4: TransitionEvaluation — sole transition authority result type
 #
 # evaluate_transition() produces this. The advance handler ONLY consumes it.
 # No gate logic in the handler. No re-decision. Only state commit + effects.
+#
+# verdict is the SOLE control signal. Four values:
+#   "advance"  — all gates passed, commit phase transition
+#   "retry"    — blocked, stay in current phase, agent retries
+#   "redirect" — blocked, move to a different phase (next_phase)
+#   "stop"     — terminal, stop the attempt
+#
+# routing is TELEMETRY ONLY — strategy prompt selection + logging.
+# It never drives control flow. Handler reads verdict, not routing.
 # ══════════════════════════════════════════════════════════════════════════════
 
 @dataclass
 class TransitionEvaluation:
     """Result of evaluate_transition() — the sole transition authority.
 
-    Phase 4: every blocked result carries a typed routing decision that
-    tells the handler WHERE to go and WHY. The handler applies routing
-    via cp_mutations (phase redirect) or stays in current phase (retry).
+    Phase 4: unified verdict model. One verdict field drives all control.
+    routing is telemetry-only (strategy prompt + explainability).
     """
-    # Whether transition is authorized (all gates passed)
-    authorized: bool = False
-    # Whether the attempt should stop immediately
-    stop: bool = False
+    # The ONE control signal — "advance" | "retry" | "redirect" | "stop"
+    verdict: str = "retry"
+    # Target phase for redirect (only meaningful when verdict="redirect")
+    next_phase: str = ""
+    # Stop reason (only meaningful when verdict="stop")
     stop_reason: str = ""
     # Messages to inject into agent context (role=user)
     pending_messages: list = dc_field(default_factory=list)
@@ -67,15 +76,13 @@ class TransitionEvaluation:
     phase_record_source: str = "none"
     # State mutations to apply (list of (attr, value) tuples or callables)
     state_mutations: list = dc_field(default_factory=list)
-    # CP state mutations: (field, value) pairs to apply via dataclasses.replace
-    cp_mutations: dict = dc_field(default_factory=dict)
     # Whether principal gate already redirected phase (RETRYABLE with redirect)
     pg_redirected: bool = False
     # Verdict source attribution
     source: str = "default"
     reason: str = ""
-    # Phase 4: typed routing for blocked transitions
-    # None when authorized=True or stop=True
+    # Telemetry-only: strategy prompt selection + explainability.
+    # Never drives control flow. Handler reads verdict, not routing.
     routing: "RoutingDecision | None" = None
 
 
@@ -448,7 +455,7 @@ def evaluate_transition(
                 f" — transition DENIED, staying in current phase",
                 flush=True,
             )
-            result.authorized = False
+            result.verdict = "retry"
             result.source = "gate_rejection"
             result.reason = "missing_phase_record_retry"
             result.routing = _route_blocked(eval_phase, result.reason)
@@ -475,7 +482,7 @@ def evaluate_transition(
                 f" — stopping attempt (no force advance)",
                 flush=True,
             )
-            result.stop = True
+            result.verdict = "stop"
             result.stop_reason = "protocol_violation_missing_phase_record"
             result.source = "submission_timeout"
             return result
@@ -531,7 +538,7 @@ def evaluate_transition(
                     r for r in state.phase_records
                     if r.phase.upper() != eval_phase
                 ]
-                result.authorized = False
+                result.verdict = "retry"
                 result.source = "gate_rejection"
                 result.reason = "cognition_validation_failed"
                 result.routing = _route_blocked(eval_phase, result.reason)
@@ -592,7 +599,7 @@ def evaluate_transition(
                         f" → fail-closed STOP",
                         flush=True,
                     )
-                    result.stop = True
+                    result.verdict = "stop"
                     result.stop_reason = f"admission_gate_exhausted_{phase_label.lower()}"
                     result.source = "gate_rejection"
                     return (True, False)
@@ -666,10 +673,10 @@ def evaluate_transition(
             reject_counter_attr="analysis_gate_rejects",
             phase_label="ANALYZE",
         )
-        if result.stop:
+        if result.verdict == "stop":
             return result
         if _analysis_gate_rejected:
-            result.authorized = False
+            result.verdict = "retry"
             result.source = "gate_rejection"
             result.reason = "analysis_gate_rejected"
             result.routing = _route_blocked(eval_phase, result.reason)
@@ -688,10 +695,10 @@ def evaluate_transition(
             reject_counter_attr="design_gate_rejects",
             phase_label="DESIGN",
         )
-        if result.stop:
+        if result.verdict == "stop":
             return result
         if _design_gate_rejected:
-            result.authorized = False
+            result.verdict = "retry"
             result.source = "gate_rejection"
             result.reason = "design_gate_rejected"
             result.routing = _route_blocked(eval_phase, result.reason)
@@ -710,10 +717,10 @@ def evaluate_transition(
             reject_counter_attr="decide_gate_rejects",
             phase_label="DECIDE",
         )
-        if result.stop:
+        if result.verdict == "stop":
             return result
         if _decide_gate_rejected:
-            result.authorized = False
+            result.verdict = "retry"
             result.source = "gate_rejection"
             result.reason = "decide_gate_rejected"
             result.routing = _route_blocked(eval_phase, result.reason)
@@ -732,10 +739,10 @@ def evaluate_transition(
             reject_counter_attr="execute_gate_rejects",
             phase_label="EXECUTE",
         )
-        if result.stop:
+        if result.verdict == "stop":
             return result
         if _execute_gate_rejected:
-            result.authorized = False
+            result.verdict = "retry"
             result.source = "gate_rejection"
             result.reason = "execute_gate_rejected"
             result.routing = _route_blocked(eval_phase, result.reason)
@@ -754,10 +761,10 @@ def evaluate_transition(
             reject_counter_attr="judge_gate_rejects",
             phase_label="JUDGE",
         )
-        if result.stop:
+        if result.verdict == "stop":
             return result
         if _judge_gate_rejected:
-            result.authorized = False
+            result.verdict = "retry"
             result.source = "gate_rejection"
             result.reason = "judge_gate_rejected"
             result.routing = _route_blocked(eval_phase, result.reason)
@@ -915,7 +922,7 @@ def evaluate_transition(
                     f" reasons={_admission.reasons_legacy}",
                     flush=True,
                 )
-                result.stop = True
+                result.verdict = "stop"
                 result.stop_reason = "no_signal"
                 result.source = "gate_rejection"
                 result.reason = "principal_gate_rejected"
@@ -934,6 +941,8 @@ def evaluate_transition(
                     if _k != _loop_key:
                         state._retryable_loop_counts[_k] = 0
 
+                # Determine if principal gate triggers a redirect
+                _pg_redirect_phase = ""
                 if not state.early_stop_verdict:
                     _pv_verdict = decide_next(_cp_s)
                     print(
@@ -942,9 +951,7 @@ def evaluate_transition(
                         flush=True,
                     )
                     if isinstance(_pv_verdict, VerdictRedirect):
-                        # Phase 3: do NOT mutate cp_state here — carry redirect
-                        # info in result for handler to execute.
-                        result.cp_mutations = {"phase": _pv_verdict.to, "phase_steps": 0}
+                        _pg_redirect_phase = _pv_verdict.to
                         result.pending_messages.append({
                             "role": "user",
                             "content": (
@@ -960,10 +967,15 @@ def evaluate_transition(
                         state.pending_redirect_hint = ""
                         result.pg_redirected = True
 
-                result.authorized = False
+                # Phase 4: unified verdict — redirect or retry
+                if _pg_redirect_phase:
+                    result.verdict = "redirect"
+                    result.next_phase = _pg_redirect_phase
+                else:
+                    result.verdict = "retry"
                 result.source = "gate_rejection"
                 result.reason = f"principal_gate_retryable:{_pg_violation}"
-                # Phase 4: use existing principal_gate routing if available
+                # Telemetry: routing for strategy prompt selection
                 if getattr(_admission, "routing", None):
                     result.routing = _admission.routing
                 else:
@@ -1099,7 +1111,7 @@ def evaluate_transition(
                 state.pending_redirect_hint = ""
             else:
                 # Fake check rejected but not yet at escalation limit
-                result.authorized = False
+                result.verdict = "retry"
                 result.source = "gate_rejection"
                 result.reason = f"fake_principal:{_inf_violation}"
                 result.routing = RoutingDecision(
@@ -1136,7 +1148,7 @@ def evaluate_transition(
     # ══════════════════════════════════════════════════════════════════
     # ALL GATES PASSED — transition authorized
     # ══════════════════════════════════════════════════════════════════
-    result.authorized = True
+    result.verdict = "advance"
     result.source = "admission"
     result.reason = "all_gates_passed"
     return result
@@ -1821,18 +1833,19 @@ def _step_cp_update_and_verdict(
             latest_assistant_text=latest_assistant_text,
         )
 
-        # ── Phase 3: Apply transition result (ONLY state commit + effects) ──
-        # inject pending messages from gate evaluation
+        # ── Phase 4: Apply transition result — verdict-driven, single authority ──
+        # Inject pending messages from gate evaluation
         for _msg in _transition.pending_messages:
             agent_self.messages.append(_msg)
 
-        # Handle stop
-        if _transition.stop:
+        _tv = _transition.verdict  # the ONE control signal
+        _rt = _transition.routing  # telemetry only
+
+        if _tv == "stop":
             state.early_stop_verdict = VerdictStop(reason=_transition.stop_reason)
             raise StopExecution(_transition.stop_reason)
 
-        # Handle authorized transition — commit phase advance
-        if _transition.authorized:
+        elif _tv == "advance":
             import dataclasses as _dc_adv
             if cp_state_holder is not None:
                 cp_state_holder[0] = _dc_adv.replace(
@@ -1846,38 +1859,35 @@ def _step_cp_update_and_verdict(
                 f"    [Plan-A] phase_advance COMMITTED: {_old_phase} → {_new_phase}",
                 flush=True,
             )
-        else:
-            # Gate(s) rejected — transition NOT committed.
-            # Messages already injected above. Log the rejection.
-            # Apply cp_mutations if evaluate_transition() requested them
-            # (e.g. principal gate RETRYABLE → redirect to a different phase)
-            if _transition.cp_mutations:
-                import dataclasses as _dc_mut
-                if cp_state_holder is not None:
-                    cp_state_holder[0] = _dc_mut.replace(
-                        cp_state_holder[0], **_transition.cp_mutations
-                    )
-                else:
-                    state.cp_state = _dc_mut.replace(
-                        state.cp_state, **_transition.cp_mutations
-                    )
-                _rt = _transition.routing
-                print(
-                    f"    [Plan-A] phase_advance BLOCKED + REDIRECT:"
-                    f" {_old_phase} → {_transition.cp_mutations.get('phase', '?')}"
-                    f" source={_transition.source} reason={_transition.reason}"
-                    f" routing={_rt.strategy if _rt else 'none'}",
-                    flush=True,
+
+        elif _tv == "redirect":
+            import dataclasses as _dc_redir
+            _redir_target = _transition.next_phase
+            if cp_state_holder is not None:
+                cp_state_holder[0] = _dc_redir.replace(
+                    cp_state_holder[0], phase=_redir_target, phase_steps=0
                 )
             else:
-                _rt = _transition.routing
-                print(
-                    f"    [Plan-A] phase_advance BLOCKED: {_old_phase} → {_new_phase}"
-                    f" source={_transition.source} reason={_transition.reason}"
-                    f" routing={_rt.strategy if _rt else 'none'}"
-                    f" route_to={_rt.next_phase if _rt else _eval_phase}",
-                    flush=True,
+                state.cp_state = _dc_redir.replace(
+                    state.cp_state, phase=_redir_target, phase_steps=0
                 )
+            print(
+                f"    [Plan-A] phase_advance BLOCKED + REDIRECT:"
+                f" {_old_phase} → {_redir_target}"
+                f" source={_transition.source} reason={_transition.reason}"
+                f" routing={_rt.strategy if _rt else 'none'}",
+                flush=True,
+            )
+
+        else:
+            # verdict == "retry" — blocked, stay in current phase
+            print(
+                f"    [Plan-A] phase_advance BLOCKED: {_old_phase} → {_new_phase}"
+                f" source={_transition.source} reason={_transition.reason}"
+                f" routing={_rt.strategy if _rt else 'none'}"
+                f" route_to={_rt.next_phase if _rt else _eval_phase}",
+                flush=True,
+            )
 
 
 
