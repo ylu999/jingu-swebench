@@ -92,6 +92,26 @@ def get_routing(failure_type: FailureType) -> dict:
     return FAILURE_ROUTING_RULES[failure_type]
 
 
+def get_routing_decision(failure_type: FailureType) -> "RoutingDecision | None":
+    """Get a typed RoutingDecision for a failure type (EF-5).
+
+    Returns RoutingDecision or None if import fails.
+    """
+    rule = FAILURE_ROUTING_RULES.get(failure_type)
+    if not rule:
+        return None
+    try:
+        from routing_decision import RoutingDecision
+        return RoutingDecision(
+            next_phase=rule["next_phase"],
+            strategy=failure_type,
+            repair_hints=[rule["repair_goal"]],
+            source="failure_type_route",
+        )
+    except Exception:
+        return None
+
+
 # ── FailureLayer (semantic rootcause) ─────────────────────────────────────────
 
 FailureLayer = Literal[
@@ -483,6 +503,7 @@ def route_from_failure(record: FailureRecord) -> dict:
         next_phase: str — which phase to retry from
         instructions: list[str] — specific instructions for the agent
         enforce_principals: list[str] — principals to enforce on retry
+        routing: RoutingDecision — typed routing decision (EF-5)
     """
     instructions: list[str] = []
     enforce_principals: list[str] = []
@@ -524,10 +545,23 @@ def route_from_failure(record: FailureRecord) -> dict:
                 "Submission blocked by control plane. Fix the identified issue first."
             )
 
+    # EF-5: build RoutingDecision
+    try:
+        from routing_decision import RoutingDecision
+        routing = RoutingDecision(
+            next_phase=next_phase,
+            strategy=record.failure_layer,
+            repair_hints=instructions,
+            source="failure_layer_route",
+        )
+    except Exception:
+        routing = None
+
     return {
         "next_phase": next_phase,
         "instructions": instructions,
         "enforce_principals": enforce_principals,
         "failure_layer": record.failure_layer,
         "confidence": record.confidence,
+        "routing": routing,
     }

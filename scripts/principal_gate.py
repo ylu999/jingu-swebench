@@ -14,6 +14,12 @@ from gate_rejection import (
     GateRejection, ContractView, FieldSpec, FieldFailure,
     build_gate_rejection, SDG_ENABLED,
 )
+from gate_failure_code import (
+    GateFailureCode, GateFailureCategory, GateFailureSeverity,
+    missing_principal, forbidden_principal, missing_field,
+    semantic_fail, forbidden_transition, get_repair_hint,
+)
+from routing_decision import AdmissionStatus, RoutingDecision
 
 # Load required principals from canonical source (subtype_contracts, p193).
 # Exception-safe: if import fails, fallback to static dict (no crash).
@@ -31,12 +37,8 @@ try:
         "EXECUTE":  _get_rp("EXECUTE"),
         "JUDGE":    _get_rp("JUDGE"),
     }
-    # Build PHASE_VIOLATION_REDIRECT from contracts
-    PHASE_VIOLATION_REDIRECT: dict[str, str] = {
-        phase: _get_rt(phase)
-        for phase in ["ANALYZE", "EXECUTE", "JUDGE"]
-        if _get_rt(phase)
-    }
+    # EF-5: PHASE_VIOLATION_REDIRECT deleted — routing now via RoutingDecision.
+    # Consumers use AdmissionResult.routing or subtype_contracts.get_repair_target().
     # Export get_required_principals for callers who prefer the function API
     def get_required_principals(phase: str) -> list[str]:
         """Return required principals for phase from SUBTYPE_CONTRACTS."""
@@ -50,12 +52,6 @@ except Exception:
         "EXECUTE":  ["minimal_change"],
         "JUDGE":    ["result_verification", "uncertainty_honesty"],
     }
-    PHASE_VIOLATION_REDIRECT = {
-        "ANALYZE":  "OBSERVE",
-        "EXECUTE":  "ANALYZE",
-        "JUDGE":    "EXECUTE",
-    }
-
     def get_required_principals(phase: str) -> list[str]:
         """Return required principals for phase (fallback static version)."""
         return PHASE_REQUIRED_PRINCIPALS.get(phase.upper(), [])
@@ -188,7 +184,7 @@ def get_principal_feedback(violation: str, bundle: dict | None = None) -> str:
     return f"Principal violation: {violation}. Declare required principals for this phase."
 
 
-# ── AdmissionResult (v0.4) ────────────────────────────────────────────────────
+# ── AdmissionResult (v2 — EF-5) ──────────────────────────────────────────────
 
 class AdmissionResult:
     """
@@ -199,20 +195,56 @@ class AdmissionResult:
       RETRYABLE  — missing material (principal or field); redirect to repair phase
       REJECTED   — phase boundary error (forbidden transition / structural mismatch);
                    do not redirect, stop attempt
+      ESCALATED  — system-level issue requiring external intervention
 
     Taxonomy rule:
       RETRYABLE: right phase, incomplete output — agent can fix in-loop
       REJECTED:  wrong phase position or boundary violation — no in-loop fix possible
-    """
-    __slots__ = ("status", "reasons", "rejection")
 
-    def __init__(self, status: str, reasons: list[str], rejection: GateRejection | None = None) -> None:
-        self.status = status    # "ADMITTED" | "RETRYABLE" | "REJECTED"
-        self.reasons = reasons  # violation codes
-        self.rejection = rejection  # p217: structured SDG rejection (populated on RETRYABLE/REJECTED)
+    v2 changes (EF-5):
+      - status: AdmissionStatus enum (backward-compatible str enum)
+      - reasons: list[GateFailureCode] (typed failure codes)
+      - reasons_legacy: property returning list[str] for backward compat
+      - routing: RoutingDecision | None — where to redirect on failure
+    """
+    __slots__ = ("status", "reasons", "rejection", "routing")
+
+    def __init__(
+        self,
+        status: str | AdmissionStatus,
+        reasons: list[str] | list[GateFailureCode],
+        rejection: GateRejection | None = None,
+        routing: RoutingDecision | None = None,
+    ) -> None:
+        # Accept both str and AdmissionStatus for backward compat
+        if isinstance(status, str) and not isinstance(status, AdmissionStatus):
+            try:
+                self.status: str | AdmissionStatus = AdmissionStatus(status)
+            except ValueError:
+                self.status = status  # fallback for unknown status strings
+        else:
+            self.status = status
+        self.reasons: list = reasons  # GateFailureCode list (or legacy str list)
+        self.rejection = rejection
+        self.routing = routing
+
+    @property
+    def reasons_legacy(self) -> list[str]:
+        """Backward-compatible string reason codes.
+
+        Returns list[str] regardless of whether reasons contains
+        GateFailureCode objects or plain strings.
+        """
+        result = []
+        for r in self.reasons:
+            if isinstance(r, GateFailureCode):
+                result.append(r.code)
+            else:
+                result.append(str(r))
+        return result
 
     def __repr__(self) -> str:
-        return f"AdmissionResult({self.status}, {self.reasons})"
+        return f"AdmissionResult({self.status}, {self.reasons_legacy})"
 
 
 def _build_principal_contract(phase: str) -> ContractView:
@@ -362,6 +394,17 @@ def evaluate_admission(phase_record, phase: str, next_phase: str = "", observe_t
             Principal checks (steps 1, 2) and transition checks (step 4) still apply.
     """
     try:
+        # Resolve subtype for typed failure codes
+        _subtype = ""
+        try:
+            from subtype_contracts import _PHASE_TO_SUBTYPE as _PTS
+            _subtype = _PTS.get(phase.upper(), "")
+        except Exception:
+            pass
+
+        retryable_codes: list[GateFailureCode] = []
+        rejected_codes: list[GateFailureCode] = []
+        # Legacy string lists maintained for _build_admission_rejection compatibility
         retryable: list[str] = []
         rejected: list[str] = []
 
@@ -370,16 +413,18 @@ def evaluate_admission(phase_record, phase: str, next_phase: str = "", observe_t
         declared = [p.lower() for p in (getattr(phase_record, "principals", None) or [])]
         for req in required:
             if req not in declared:
+                retryable_codes.append(missing_principal(req, phase.upper(), _subtype))
                 retryable.append(f"missing_required_principal:{req}")
 
         # 2. forbidden principals (REJECTED — fake principal / phase boundary violation)
         try:
             from subtype_contracts import get_forbidden_principals as _get_fp
-            forbidden = _get_fp(phase)
+            forbidden_list = _get_fp(phase)
         except Exception:
-            forbidden = []
-        for fp in forbidden:
+            forbidden_list = []
+        for fp in forbidden_list:
             if fp in declared:
+                rejected_codes.append(forbidden_principal(fp, phase.upper(), _subtype))
                 rejected.append(f"forbidden_principal:{fp}")
 
         # Steps 3, 3a, 3b: structural field presence checks.
@@ -395,30 +440,34 @@ def evaluate_admission(phase_record, phase: str, next_phase: str = "", observe_t
             for field_name in req_fields:
                 val = getattr(phase_record, field_name, None)
                 if not val:  # None, [], "", 0 all count as missing
+                    retryable_codes.append(missing_field(field_name, phase.upper(), _subtype))
                     retryable.append(f"missing_required_field:{field_name}")
 
             # 3a. structured fields check (RETRYABLE) — ANALYZE requires root_cause (p23)
-            # EXECUTE requires plan grounded in root_cause (causal binding)
             if phase.upper() == "ANALYZE":
                 _rc = getattr(phase_record, "root_cause", None) or ""
                 if not _rc:
+                    retryable_codes.append(missing_field("root_cause", phase.upper(), _subtype, gate_rule="check_root_cause"))
                     retryable.append("missing_root_cause")
 
-            # 3b. has_evidence_basis check (RETRYABLE) — for phases that require evidence basis
-            # but NOT specifically file.py:line regex matches (e.g. ANALYZE, OBSERVE).
-            # Y-lite: has_evidence_basis = evidence_refs OR from_steps OR observe_tool_signal.
-            # observe_tool_signal=True when agent used any observation-class tool (Read/Grep/Search/Bash)
-            # in this step — tools ARE the evidence basis for OBSERVE, even without explicit EVIDENCE text.
-            # This separates representational artifact (regex-extracted file refs) from cognition
-            # requirement (evidence grounding via any observation mechanism).
+            # 3b. has_evidence_basis check (RETRYABLE)
             try:
-                from subtype_contracts import SUBTYPE_CONTRACTS as _SC, _PHASE_TO_SUBTYPE as _PTS
-                _subtype = _PTS.get(phase.upper(), "")
-                _contract = _SC.get(_subtype, {})
+                from subtype_contracts import SUBTYPE_CONTRACTS as _SC, _PHASE_TO_SUBTYPE as _PTS2
+                _subtype2 = _PTS2.get(phase.upper(), "")
+                _contract = _SC.get(_subtype2, {})
                 if _contract.get("has_evidence_basis_required"):
                     _evidence_refs = getattr(phase_record, "evidence_refs", None) or []
                     _from_steps = getattr(phase_record, "from_steps", None) or []
                     if not _evidence_refs and not _from_steps and not observe_tool_signal:
+                        from gate_failure_code import GateFailureCode as _GFC, GateFailureCategory as _GFCat, GateFailureSeverity as _GFSev
+                        retryable_codes.append(_GFC(
+                            category=_GFCat.MISSING_EVIDENCE_BASIS,
+                            subcode="evidence_refs",
+                            severity=_GFSev.RETRYABLE,
+                            gate_rule="check_evidence_basis",
+                            phase=phase.upper(),
+                            subtype=_subtype2,
+                        ))
                         retryable.append("missing_evidence_basis")
             except Exception:
                 pass
@@ -431,17 +480,70 @@ def evaluate_admission(phase_record, phase: str, next_phase: str = "", observe_t
             except Exception:
                 allowed = []
             if allowed and next_phase.upper() not in [p.upper() for p in allowed]:
+                rejected_codes.append(forbidden_transition(phase.upper(), next_phase.upper(), _subtype))
                 rejected.append(f"forbidden_transition:{phase}->{next_phase}")
 
-        if rejected:
+        # Build RoutingDecision for non-ADMITTED results
+        def _build_routing(codes: list[GateFailureCode], status: AdmissionStatus) -> RoutingDecision | None:
+            if status == AdmissionStatus.ADMITTED:
+                return None
+            # Determine next_phase from first failure code's repair_target
+            _next = "ANALYZE"  # fallback
+            _source = "default_route"
+            _hints: list[str] = []
+            # Try bundle-based routing
+            try:
+                from jingu_onboard import onboard as _onb
+                _bundle = _onb()
+                if hasattr(_bundle, "bundle"):
+                    _bdata = _bundle.bundle
+                elif isinstance(_bundle, dict):
+                    _bdata = _bundle
+                else:
+                    _bdata = None
+            except Exception:
+                _bdata = None
+
+            for code in codes:
+                _target = code.repair_target(_bdata)
+                if _target and _target != code.phase:
+                    _next = _target
+                    _source = "principal_route"
+                    break
+                elif _target:
+                    _next = _target
+
+            # Collect repair hints from all codes
+            for code in codes:
+                _h = code.repair_hint(_bdata) if _bdata else ""
+                if _h:
+                    _hints.append(_h)
+
+            return RoutingDecision(
+                next_phase=_next,
+                strategy=status.value.lower(),
+                repair_hints=_hints,
+                source=_source,
+            )
+
+        if rejected_codes:
+            all_codes = rejected_codes + retryable_codes
             all_reasons = rejected + retryable
-            rejection = _build_admission_rejection(phase, all_reasons, phase_record, "REJECTED")
-            return AdmissionResult("REJECTED", all_reasons, rejection=rejection)
-        if retryable:
-            rejection = _build_admission_rejection(phase, retryable, phase_record, "RETRYABLE")
-            return AdmissionResult("RETRYABLE", retryable, rejection=rejection)
-        return AdmissionResult("ADMITTED", [])
+            rejection_obj = _build_admission_rejection(phase, all_reasons, phase_record, "REJECTED")
+            _routing = _build_routing(all_codes, AdmissionStatus.REJECTED)
+            return AdmissionResult(
+                AdmissionStatus.REJECTED, all_codes,
+                rejection=rejection_obj, routing=_routing,
+            )
+        if retryable_codes:
+            rejection_obj = _build_admission_rejection(phase, retryable, phase_record, "RETRYABLE")
+            _routing = _build_routing(retryable_codes, AdmissionStatus.RETRYABLE)
+            return AdmissionResult(
+                AdmissionStatus.RETRYABLE, retryable_codes,
+                rejection=rejection_obj, routing=_routing,
+            )
+        return AdmissionResult(AdmissionStatus.ADMITTED, [])
 
     except Exception as _e:
         # Safety: never crash the caller; treat as admitted on unexpected error
-        return AdmissionResult("ADMITTED", [f"admission_check_error:{_e}"])
+        return AdmissionResult(AdmissionStatus.ADMITTED, [f"admission_check_error:{_e}"])

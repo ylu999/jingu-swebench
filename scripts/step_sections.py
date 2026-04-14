@@ -1469,15 +1469,27 @@ def _step_cp_update_and_verdict(
                 _phase_order = ["UNDERSTAND", "OBSERVE", "ANALYZE", "DECIDE", "EXECUTE", "JUDGE"]
                 _delta = abs(_phase_order.index(_pr_foreign_phase) - _phase_order.index(_eval_phase)) if (_pr_foreign_phase in _phase_order and _eval_phase in _phase_order) else 0
                 _foreign_reason = f"foreign_phase_declared:declared={_pr_foreign_phase},eval={_eval_phase},delta={_delta}"
-                if _foreign_reason not in _admission.reasons:
+                # EF-5: use reasons_legacy for string-based filtering, rebuild reasons list
+                _legacy = _admission.reasons_legacy
+                if _foreign_reason not in _legacy:
                     _admission.reasons.insert(0, _foreign_reason)
-                _admission.reasons = [r for r in _admission.reasons if not r.startswith("missing_required_principal")]
-                _non_foreign_reasons = [r for r in _admission.reasons if r != _foreign_reason]
+                # Filter out missing_required_principal from typed or string reasons
+                _admission.reasons = [
+                    r for r in _admission.reasons
+                    if not (
+                        (hasattr(r, "code") and r.code.startswith("MISSING_PRINCIPAL:"))
+                        or (isinstance(r, str) and r.startswith("missing_required_principal"))
+                    )
+                ]
+                _non_foreign_reasons = [
+                    r for r in _admission.reasons
+                    if not (isinstance(r, str) and r == _foreign_reason)
+                ]
                 if not _non_foreign_reasons and _admission.status == "RETRYABLE":
                     _admission.status = "ADMITTED"
             print(
                 f"    [principal_gate] eval_phase={_eval_phase} record_phase={_pr.phase}"
-                f" admission={_admission.status} reasons={_admission.reasons}",
+                f" admission={_admission.status} reasons={_admission.reasons_legacy}",
                 flush=True,
             )
             # Phase Submission Enforcement telemetry
@@ -1486,18 +1498,24 @@ def _step_cp_update_and_verdict(
             elif _admission.status in ("RETRYABLE", "REJECTED"):
                 state._phase_record_reject_total += 1
             if _admission.status in ("RETRYABLE", "REJECTED"):
-                _pg_violation = _admission.reasons[0] if _admission.reasons else "admission_violation"
+                # EF-5: extract string violation code from typed or legacy reasons
+                _pg_violation = _admission.reasons_legacy[0] if _admission.reasons else "admission_violation"
                 _pg_feedback = _get_pg_feedback(_pg_violation)
-                try:
-                    from jingu_onboard import onboard as _onb_repair
-                    _gov_repair = _onb_repair()
-                    _route_obj = _gov_repair.get_route(str(_cp_s.phase), _pg_violation)
-                    _repair_phase = _route_obj.next_phase if _route_obj else ""
-                    _repair_hint = _gov_repair.get_repair_hint(str(_cp_s.phase), _pg_violation)
-                    _pg_guidance = _repair_hint if _repair_hint else ""
-                except Exception:
-                    _repair_phase = ""
-                    _pg_guidance = ""
+                # EF-5: prefer RoutingDecision from AdmissionResult, fallback to onboard
+                if getattr(_admission, "routing", None):
+                    _repair_phase = _admission.routing.next_phase
+                    _pg_guidance = "; ".join(_admission.routing.repair_hints) if _admission.routing.repair_hints else ""
+                else:
+                    try:
+                        from jingu_onboard import onboard as _onb_repair
+                        _gov_repair = _onb_repair()
+                        _route_obj = _gov_repair.get_route(str(_cp_s.phase), _pg_violation)
+                        _repair_phase = _route_obj.next_phase if _route_obj else ""
+                        _repair_hint = _gov_repair.get_repair_hint(str(_cp_s.phase), _pg_violation)
+                        _pg_guidance = _repair_hint if _repair_hint else ""
+                    except Exception:
+                        _repair_phase = ""
+                        _pg_guidance = ""
                 _repair_suffix = f" Repair phase: {_repair_phase}." if _repair_phase else ""
                 _guidance_suffix = f" {_pg_guidance}" if _pg_guidance else ""
                 if _SDG_ENABLED and getattr(_admission, "rejection", None):
@@ -1540,11 +1558,11 @@ def _step_cp_update_and_verdict(
                     _emit_decision(
                         state, decision_type="gate_verdict", step_n=_cp_s.step_index,
                         verdict="stop", reason="no_signal",
-                        rule_violated=_admission.reasons[0] if _admission.reasons else None,
+                        rule_violated=_admission.reasons_legacy[0] if _admission.reasons else None,
                     )
                     print(
                         f"    [principal_gate] REJECTED → VerdictStop"
-                        f" reasons={_admission.reasons}",
+                        f" reasons={_admission.reasons_legacy}",
                         flush=True,
                     )
                     raise StopExecution("no_signal")
@@ -1570,7 +1588,7 @@ def _step_cp_update_and_verdict(
                     }
                     _has_structured_violation = any(
                         r in _STRUCTURED_BYPASS_EXEMPT
-                        for r in (_admission.reasons or [])
+                        for r in (_admission.reasons_legacy or [])
                     )
                     if _loop_count >= _RETRYABLE_LOOP_LIMIT and not _has_structured_violation:
                         print(
@@ -1588,7 +1606,7 @@ def _step_cp_update_and_verdict(
                             reason=f"phase={_loop_key[0]} violation={_loop_key[1]}",
                         )
                         _admission.status = "ADMITTED"
-                        _admission.reasons = [f"contract_bypass:{_loop_key[1]}"]
+                        _admission.reasons = [f"contract_bypass:{_loop_key[1]}"]  # legacy string for bypass
                         state._retryable_loop_counts[_loop_key] = 0
                         _contract_bypass = True
 

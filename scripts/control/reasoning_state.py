@@ -227,13 +227,16 @@ def decide_next(state: ReasoningState) -> ControlVerdict:
 
     # 2.5. principal_violation — cognition correctness gate
     if state.principal_violation:
-        # Repair target: PHASE_VIOLATION_REDIRECT maps violating phase → repair phase.
+        # EF-5: Use subtype_contracts repair_target instead of deleted PHASE_VIOLATION_REDIRECT.
         # Fallback: ANALYZE (always valid repair target).
+        _repair = "ANALYZE"
         try:
-            from principal_gate import PHASE_VIOLATION_REDIRECT as _pvr
-            _repair = _pvr.get(state.phase, "ANALYZE")
+            from subtype_contracts import get_repair_target as _get_rt
+            _rt = _get_rt(state.phase)
+            if _rt:
+                _repair = _rt
         except Exception:
-            _repair = "ANALYZE"
+            pass
         return VerdictRedirect(
             to=_repair,  # type: ignore[arg-type]
             reason=f"principal_violation:{state.principal_violation}",
