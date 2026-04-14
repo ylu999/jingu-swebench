@@ -1105,6 +1105,8 @@ class JinguAgent:
         _monitor._missing_submission_count = 0
         # Plan-B: separate storage for diagnostic-only records (never admitted)
         _monitor.diagnostic_phase_records = []
+        # C-09: per-phase extraction telemetry from extract_phase_output()
+        _monitor.extraction_telemetry = {}
         # Plan-A: reset extraction retry counts per attempt
         _monitor.extraction_retry_counts = {}
 
@@ -1380,6 +1382,11 @@ class JinguAgent:
                     f" diagnostic_regex={_em_regex}",
                     flush=True,
                 )
+                # C-09: merge extraction_telemetry from step_sections into jingu_body
+                _ext_telem = getattr(_monitor, "extraction_telemetry", None)
+                if _ext_telem:
+                    jingu_body["extraction_telemetry"] = _ext_telem
+
                 # p207-P9: log selective bypass summary at attempt end
                 if _monitor._bypassed_principals:
                     _bp_sorted = sorted(_monitor._bypassed_principals)

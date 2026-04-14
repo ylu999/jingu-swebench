@@ -35,7 +35,7 @@ from gate_rejection import SDG_ENABLED as _SDG_ENABLED, build_repair_from_reject
 from failure_routing import route_failure as route_failure_p216, is_data_driven_routing_enabled
 from strategy_prompts import get_strategy_prompt
 from step_monitor_state import StopExecution
-from declaration_extractor import build_phase_record_from_structured
+from declaration_extractor import build_phase_record_from_structured, extract_phase_output
 
 
 # ── PR3: limit event unification helper ──────────────────────────────────────
@@ -849,6 +849,42 @@ def _step_cp_update_and_verdict(
                 if not hasattr(state, "diagnostic_phase_records"):
                     state.diagnostic_phase_records = []
                 state.diagnostic_phase_records.append(_diagnostic_pr)
+
+            # ── C-09: Parallel extract_phase_output() for unified telemetry ──
+            # CONSERVATIVE: existing paths unchanged; this adds telemetry only.
+            try:
+                _schema_fields: list[str] = []
+                if _extraction_schema is not None:
+                    _schema_props = _extraction_schema.get("properties", {})
+                    _schema_fields = [k for k in _schema_props if k not in ("phase", "subtype")]
+
+                _epo_record, _epo_meta = extract_phase_output(
+                    tool_submitted=_tool_submitted,
+                    structured_parsed=_structured_parsed,
+                    agent_message=_extract_text,
+                    phase=str(_old_phase),
+                    schema_fields=_schema_fields,
+                )
+
+                if not hasattr(state, "extraction_telemetry"):
+                    state.extraction_telemetry = {}
+                state.extraction_telemetry[_eval_phase] = {
+                    "extraction_source": _epo_meta.source,
+                    "schema_field_count": len(_epo_meta.fields_in_schema),
+                    "extracted_count": len(_epo_meta.fields_extracted),
+                    "missing_count": len(_epo_meta.fields_missing),
+                    "fields_extracted": _epo_meta.fields_extracted,
+                    "fields_missing": _epo_meta.fields_missing,
+                }
+                print(
+                    f"    [extraction] phase={_eval_phase}"
+                    f" source={_epo_meta.source}"
+                    f" extracted={len(_epo_meta.fields_extracted)}"
+                    f" missing={len(_epo_meta.fields_missing)}",
+                    flush=True,
+                )
+            except Exception as _epo_exc:
+                print(f"    [extraction] telemetry error (non-fatal): {_epo_exc}", flush=True)
 
             # ── Log summary ──
             if _pr is not None:
