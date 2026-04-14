@@ -10,8 +10,7 @@ Contract declare once, loader wires everywhere.
 
 from __future__ import annotations
 
-import re
-from dataclasses import dataclass, field as dc_field
+from cognition_contracts._base import FieldSpec, GateRule
 
 
 # ── Contract identity ────────────────────────────────────────────────────────
@@ -61,16 +60,6 @@ REQUIRED_RECORD_FIELDS: list[str] = []
 # ── Gate field specifications ────────────────────────────────────────────────
 # Who: analysis_gate.py (_ANALYZE_CONTRACT), gate_rejection.py (SDG)
 
-@dataclass
-class FieldSpec:
-    """Specification for a single field in the contract."""
-    name: str
-    description: str
-    required: bool
-    min_length: int | None = None
-    semantic_check: str | None = None
-
-
 FIELD_SPECS: list[FieldSpec] = [
     FieldSpec(
         name="root_cause",
@@ -92,7 +81,7 @@ FIELD_SPECS: list[FieldSpec] = [
         required=True,
     ),
     FieldSpec(
-        name="alternatives_considered",
+        name="alternative_hypotheses",
         description="At least 2 hypotheses with rejection reasoning for non-chosen",
         required=False,
         semantic_check="multiple_distinct_hypotheses",
@@ -117,15 +106,6 @@ GATE_REQUIRED_FIELDS: list[str] = [fs.name for fs in FIELD_SPECS if fs.required]
 # Each rule maps to a check function name, the field it evaluates, and the
 # repair hint injected on failure.
 
-@dataclass
-class GateRule:
-    """One evaluation rule in the analysis gate."""
-    name: str
-    field: str           # PhaseRecord field this rule evaluates
-    repair_hint: str     # hint injected into SDG repair on failure
-    threshold: float = 0.5
-
-
 GATE_RULES: list[GateRule] = [
     GateRule(
         name="code_grounding",
@@ -134,7 +114,7 @@ GATE_RULES: list[GateRule] = [
     ),
     GateRule(
         name="alternative_hypothesis",
-        field="alternatives_considered",
+        field="alternative_hypotheses",
         repair_hint="Consider at least 2 hypotheses and explain why non-chosen ones were rejected",
     ),
     GateRule(
@@ -192,7 +172,7 @@ PROMPT_GUIDANCE = (
 SCHEMA_PROPERTIES: dict = {
     "phase": {
         "type": "string",
-        "enum": [PHASE.lower()],
+        "enum": [PHASE],
         "description": "Current reasoning phase.",
     },
     "subtype": {
@@ -210,7 +190,7 @@ SCHEMA_PROPERTIES: dict = {
         "minLength": 20,
         "description": FIELD_SPEC_MAP["causal_chain"].description,
     },
-    "evidence": {
+    "evidence_refs": {
         "type": "array",
         "items": {"type": "string"},
         "minItems": 1,
@@ -227,7 +207,7 @@ SCHEMA_PROPERTIES: dict = {
             "required": ["hypothesis", "ruled_out_reason"],
         },
         "minItems": 1,
-        "description": FIELD_SPEC_MAP["alternatives_considered"].description,
+        "description": FIELD_SPEC_MAP["alternative_hypotheses"].description,
     },
     "invariant_capture": {
         "type": "object",
@@ -259,5 +239,5 @@ SCHEMA_PROPERTIES: dict = {
 
 SCHEMA_REQUIRED: list[str] = [
     "phase", "subtype", "root_cause", "causal_chain",
-    "evidence", "alternatives_considered", "principals",
+    "evidence_refs", "alternative_hypotheses", "principals",
 ]
