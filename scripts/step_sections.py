@@ -1210,6 +1210,216 @@ def _step_cp_update_and_verdict(
             except Exception as _dg_exc:
                 print(f"    [design_gate] error (non-fatal): {_dg_exc}", flush=True)
 
+        # Decide gate
+        _decide_gate_rejected = False
+        _decide_gate_force_passed = False
+        _DECIDE_MAX_REJECTS = 2
+        if _eval_phase == "DECIDE" and _pr is not None and not _cognition_rejected and not _extraction_gated:
+            try:
+                from decide_gate import evaluate_decide as _eval_decide
+                _decide_verdict = _eval_decide(_pr)
+                _dcg_reject_count = getattr(state, 'decide_gate_rejects', 0)
+                print(
+                    f"    [decide_gate] passed={_decide_verdict.passed}"
+                    f" failed_rules={_decide_verdict.failed_rules}"
+                    f" scores={_decide_verdict.scores}"
+                    f" rejects_so_far={_dcg_reject_count}",
+                    flush=True,
+                )
+                if not _decide_verdict.passed and _dcg_reject_count >= _DECIDE_MAX_REJECTS:
+                    print(f"    [decide_gate] FORCE_PASS — max_rejects={_DECIDE_MAX_REJECTS} reached, allowing advance", flush=True)
+                    _emit_limit_triggered(
+                        state, step_n=_cp_s.step_index,
+                        limit_name="decide_gate_force_pass",
+                        configured_value=_DECIDE_MAX_REJECTS, actual_value=_dcg_reject_count,
+                        action_taken="force_pass", source_file="step_sections.py", source_line=1213,
+                        reason=f"failed_rules={_decide_verdict.failed_rules} scores={_decide_verdict.scores}",
+                    )
+                    _decide_gate_force_passed = True
+                elif not _decide_verdict.passed:
+                    _decide_gate_rejected = True
+                    _dcg_sdg_repair_used = False
+                    if _SDG_ENABLED and getattr(_decide_verdict, "rejection", None):
+                        try:
+                            _dcg_sdg_content = _build_sdg_repair(_decide_verdict.rejection)
+                            _dcg_sdg_content += "\n\nFix only the failing fields. Do not rewrite fields already OK.\nStay in DECIDE phase."
+                            agent_self.messages.append({
+                                "role": "user",
+                                "content": _dcg_sdg_content,
+                            })
+                            _dcg_sdg_repair_used = True
+                            print(f"    [decide_gate] sdg_repair_used=true failures={len(_decide_verdict.rejection.failures)}", flush=True)
+                        except Exception as _dcg_sdg_exc:
+                            print(f"    [decide_gate] sdg_repair error (fallback): {_dcg_sdg_exc}", flush=True)
+
+                    if not _dcg_sdg_repair_used:
+                        _dcg_scores = _decide_verdict.scores
+                        _dcg_pass = 0.5
+                        _dcg_field_status = "\n".join(
+                            f"- {k.upper()}: {'OK' if v >= _dcg_pass else 'MISSING'} (score={v:.1f})"
+                            for k, v in _dcg_scores.items()
+                        )
+                        agent_self.messages.append({
+                            "role": "user",
+                            "content": (
+                                f"[decide_gate REJECT]\n"
+                                f"DECIDE gate result:\n"
+                                f"{_dcg_field_status}\n\n"
+                                f"Fix only the MISSING fields. Do not rewrite fields already OK.\n"
+                                f"Stay in DECIDE phase."
+                            ),
+                        })
+                    state.phase_records = [
+                        r for r in state.phase_records
+                        if r.phase.upper() != _eval_phase
+                    ]
+                    if not hasattr(state, 'decide_gate_rejects'):
+                        state.decide_gate_rejects = 0
+                    state.decide_gate_rejects += 1
+                    print(f"    [decide_gate] REJECT ({state.decide_gate_rejects}/{_DECIDE_MAX_REJECTS}) — redirecting to DECIDE", flush=True)
+            except Exception as _dcg_exc:
+                print(f"    [decide_gate] error (non-fatal): {_dcg_exc}", flush=True)
+
+        # Execute gate
+        _execute_gate_rejected = False
+        _execute_gate_force_passed = False
+        _EXECUTE_MAX_REJECTS = 2
+        if _eval_phase == "EXECUTE" and _pr is not None and not _cognition_rejected and not _extraction_gated:
+            try:
+                from execute_gate import evaluate_execute as _eval_execute
+                _execute_verdict = _eval_execute(_pr)
+                _exg_reject_count = getattr(state, 'execute_gate_rejects', 0)
+                print(
+                    f"    [execute_gate] passed={_execute_verdict.passed}"
+                    f" failed_rules={_execute_verdict.failed_rules}"
+                    f" scores={_execute_verdict.scores}"
+                    f" rejects_so_far={_exg_reject_count}",
+                    flush=True,
+                )
+                if not _execute_verdict.passed and _exg_reject_count >= _EXECUTE_MAX_REJECTS:
+                    print(f"    [execute_gate] FORCE_PASS — max_rejects={_EXECUTE_MAX_REJECTS} reached, allowing advance", flush=True)
+                    _emit_limit_triggered(
+                        state, step_n=_cp_s.step_index,
+                        limit_name="execute_gate_force_pass",
+                        configured_value=_EXECUTE_MAX_REJECTS, actual_value=_exg_reject_count,
+                        action_taken="force_pass", source_file="step_sections.py", source_line=1280,
+                        reason=f"failed_rules={_execute_verdict.failed_rules} scores={_execute_verdict.scores}",
+                    )
+                    _execute_gate_force_passed = True
+                elif not _execute_verdict.passed:
+                    _execute_gate_rejected = True
+                    _exg_sdg_repair_used = False
+                    if _SDG_ENABLED and getattr(_execute_verdict, "rejection", None):
+                        try:
+                            _exg_sdg_content = _build_sdg_repair(_execute_verdict.rejection)
+                            _exg_sdg_content += "\n\nFix only the failing fields. Do not rewrite fields already OK.\nStay in EXECUTE phase."
+                            agent_self.messages.append({
+                                "role": "user",
+                                "content": _exg_sdg_content,
+                            })
+                            _exg_sdg_repair_used = True
+                            print(f"    [execute_gate] sdg_repair_used=true failures={len(_execute_verdict.rejection.failures)}", flush=True)
+                        except Exception as _exg_sdg_exc:
+                            print(f"    [execute_gate] sdg_repair error (fallback): {_exg_sdg_exc}", flush=True)
+
+                    if not _exg_sdg_repair_used:
+                        _exg_scores = _execute_verdict.scores
+                        _exg_pass = 0.5
+                        _exg_field_status = "\n".join(
+                            f"- {k.upper()}: {'OK' if v >= _exg_pass else 'MISSING'} (score={v:.1f})"
+                            for k, v in _exg_scores.items()
+                        )
+                        agent_self.messages.append({
+                            "role": "user",
+                            "content": (
+                                f"[execute_gate REJECT]\n"
+                                f"EXECUTE gate result:\n"
+                                f"{_exg_field_status}\n\n"
+                                f"Fix only the MISSING fields. Do not rewrite fields already OK.\n"
+                                f"Stay in EXECUTE phase."
+                            ),
+                        })
+                    state.phase_records = [
+                        r for r in state.phase_records
+                        if r.phase.upper() != _eval_phase
+                    ]
+                    if not hasattr(state, 'execute_gate_rejects'):
+                        state.execute_gate_rejects = 0
+                    state.execute_gate_rejects += 1
+                    print(f"    [execute_gate] REJECT ({state.execute_gate_rejects}/{_EXECUTE_MAX_REJECTS}) — redirecting to EXECUTE", flush=True)
+            except Exception as _exg_exc:
+                print(f"    [execute_gate] error (non-fatal): {_exg_exc}", flush=True)
+
+        # Judge gate
+        _judge_gate_rejected = False
+        _judge_gate_force_passed = False
+        _JUDGE_MAX_REJECTS = 2
+        if _eval_phase == "JUDGE" and _pr is not None and not _cognition_rejected and not _extraction_gated:
+            try:
+                from judge_gate import evaluate_judge as _eval_judge
+                _judge_verdict = _eval_judge(_pr)
+                _jg_reject_count = getattr(state, 'judge_gate_rejects', 0)
+                print(
+                    f"    [judge_gate] passed={_judge_verdict.passed}"
+                    f" failed_rules={_judge_verdict.failed_rules}"
+                    f" scores={_judge_verdict.scores}"
+                    f" rejects_so_far={_jg_reject_count}",
+                    flush=True,
+                )
+                if not _judge_verdict.passed and _jg_reject_count >= _JUDGE_MAX_REJECTS:
+                    print(f"    [judge_gate] FORCE_PASS — max_rejects={_JUDGE_MAX_REJECTS} reached, allowing advance", flush=True)
+                    _emit_limit_triggered(
+                        state, step_n=_cp_s.step_index,
+                        limit_name="judge_gate_force_pass",
+                        configured_value=_JUDGE_MAX_REJECTS, actual_value=_jg_reject_count,
+                        action_taken="force_pass", source_file="step_sections.py", source_line=1347,
+                        reason=f"failed_rules={_judge_verdict.failed_rules} scores={_judge_verdict.scores}",
+                    )
+                    _judge_gate_force_passed = True
+                elif not _judge_verdict.passed:
+                    _judge_gate_rejected = True
+                    _jg_sdg_repair_used = False
+                    if _SDG_ENABLED and getattr(_judge_verdict, "rejection", None):
+                        try:
+                            _jg_sdg_content = _build_sdg_repair(_judge_verdict.rejection)
+                            _jg_sdg_content += "\n\nFix only the failing fields. Do not rewrite fields already OK.\nStay in JUDGE phase."
+                            agent_self.messages.append({
+                                "role": "user",
+                                "content": _jg_sdg_content,
+                            })
+                            _jg_sdg_repair_used = True
+                            print(f"    [judge_gate] sdg_repair_used=true failures={len(_judge_verdict.rejection.failures)}", flush=True)
+                        except Exception as _jg_sdg_exc:
+                            print(f"    [judge_gate] sdg_repair error (fallback): {_jg_sdg_exc}", flush=True)
+
+                    if not _jg_sdg_repair_used:
+                        _jg_scores = _judge_verdict.scores
+                        _jg_pass = 0.5
+                        _jg_field_status = "\n".join(
+                            f"- {k.upper()}: {'OK' if v >= _jg_pass else 'MISSING'} (score={v:.1f})"
+                            for k, v in _jg_scores.items()
+                        )
+                        agent_self.messages.append({
+                            "role": "user",
+                            "content": (
+                                f"[judge_gate REJECT]\n"
+                                f"JUDGE gate result:\n"
+                                f"{_jg_field_status}\n\n"
+                                f"Fix only the MISSING fields. Do not rewrite fields already OK.\n"
+                                f"Stay in JUDGE phase."
+                            ),
+                        })
+                    state.phase_records = [
+                        r for r in state.phase_records
+                        if r.phase.upper() != _eval_phase
+                    ]
+                    if not hasattr(state, 'judge_gate_rejects'):
+                        state.judge_gate_rejects = 0
+                    state.judge_gate_rejects += 1
+                    print(f"    [judge_gate] REJECT ({state.judge_gate_rejects}/{_JUDGE_MAX_REJECTS}) — redirecting to JUDGE", flush=True)
+            except Exception as _jg_exc:
+                print(f"    [judge_gate] error (non-fatal): {_jg_exc}", flush=True)
+
         _pg_retryable_no_bypass = False  # Plan-A: tracks if principal gate RETRYABLE redirected phase
         try:
             if _extraction_gated:
@@ -1224,6 +1434,18 @@ def _step_cp_update_and_verdict(
                 raise RuntimeError("design_gate rejected, skipping principal gate")
             if _design_gate_force_passed:
                 raise RuntimeError("design_gate FORCE_PASS, skipping principal gate to allow advance")
+            if _decide_gate_rejected:
+                raise RuntimeError("decide_gate rejected, skipping principal gate")
+            if _decide_gate_force_passed:
+                raise RuntimeError("decide_gate FORCE_PASS, skipping principal gate to allow advance")
+            if _execute_gate_rejected:
+                raise RuntimeError("execute_gate rejected, skipping principal gate")
+            if _execute_gate_force_passed:
+                raise RuntimeError("execute_gate FORCE_PASS, skipping principal gate to allow advance")
+            if _judge_gate_rejected:
+                raise RuntimeError("judge_gate rejected, skipping principal gate")
+            if _judge_gate_force_passed:
+                raise RuntimeError("judge_gate FORCE_PASS, skipping principal gate to allow advance")
             if _pr is None:
                 raise RuntimeError("phase_record unavailable, skipping principal gate")
             from principal_gate import (

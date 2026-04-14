@@ -95,6 +95,9 @@ class StepMonitorState:
         # p211: analysis gate reject counter — escape hatch after N rejects
         self.analysis_gate_rejects: int = 0
         self.design_gate_rejects: int = 0
+        self.decide_gate_rejects: int = 0
+        self.execute_gate_rejects: int = 0
+        self.judge_gate_rejects: int = 0
         # P16: RETRYABLE loop breaker — counts consecutive identical (phase, reason) RETRYABLE.
         # Same phase + same reason N times in a row → ESCALATE_CONTRACT_BUG (VerdictStop).
         # This is a safety fuse, not a contract substitute. Prevents infinite gate loops.
@@ -181,6 +184,9 @@ class StepMonitorState:
         state.pending_redirect_hint = d.get("pending_redirect_hint", "")
         state.analysis_gate_rejects = d.get("analysis_gate_rejects", 0)
         state.design_gate_rejects = d.get("design_gate_rejects", 0)
+        state.decide_gate_rejects = d.get("decide_gate_rejects", 0)
+        state.execute_gate_rejects = d.get("execute_gate_rejects", 0)
+        state.judge_gate_rejects = d.get("judge_gate_rejects", 0)
         state._execute_entry_step = d.get("execute_entry_step", -1)
         state._execute_write_seen = d.get("execute_write_seen", False)
         state.last_analyze_root_cause = d.get("last_analyze_root_cause", "")
@@ -220,6 +226,9 @@ class StepMonitorState:
             result["pending_redirect_hint"] = self.pending_redirect_hint or ""
             result["analysis_gate_rejects"] = self.analysis_gate_rejects
             result["design_gate_rejects"] = self.design_gate_rejects
+            result["decide_gate_rejects"] = self.decide_gate_rejects
+            result["execute_gate_rejects"] = self.execute_gate_rejects
+            result["judge_gate_rejects"] = self.judge_gate_rejects
             result["execute_entry_step"] = self._execute_entry_step
             result["execute_write_seen"] = self._execute_write_seen
             result["last_analyze_root_cause"] = self.last_analyze_root_cause
