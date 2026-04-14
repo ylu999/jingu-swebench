@@ -857,17 +857,9 @@ def evaluate_transition(
                         flush=True,
                     )
                     if isinstance(_pv_verdict, VerdictRedirect):
-                        import dataclasses as _dc_ret
-                        if cp_state_holder is not None:
-                            cp_state_holder[0] = _dc_ret.replace(
-                                cp_state_holder[0], phase=_pv_verdict.to, phase_steps=0
-                            )
-                            _cp_s = cp_state_holder[0]
-                        else:
-                            state.cp_state = _dc_ret.replace(
-                                state.cp_state, phase=_pv_verdict.to, phase_steps=0
-                            )
-                            _cp_s = state.cp_state
+                        # Phase 3: do NOT mutate cp_state here — carry redirect
+                        # info in result for handler to execute.
+                        result.cp_mutations = {"phase": _pv_verdict.to, "phase_steps": 0}
                         result.pending_messages.append({
                             "role": "user",
                             "content": (
@@ -1756,11 +1748,30 @@ def _step_cp_update_and_verdict(
         else:
             # Gate(s) rejected — transition NOT committed.
             # Messages already injected above. Log the rejection.
-            print(
-                f"    [Plan-A] phase_advance BLOCKED: {_old_phase} → {_new_phase}"
-                f" source={_transition.source} reason={_transition.reason}",
-                flush=True,
-            )
+            # Apply cp_mutations if evaluate_transition() requested them
+            # (e.g. principal gate RETRYABLE → redirect to a different phase)
+            if _transition.cp_mutations:
+                import dataclasses as _dc_mut
+                if cp_state_holder is not None:
+                    cp_state_holder[0] = _dc_mut.replace(
+                        cp_state_holder[0], **_transition.cp_mutations
+                    )
+                else:
+                    state.cp_state = _dc_mut.replace(
+                        state.cp_state, **_transition.cp_mutations
+                    )
+                print(
+                    f"    [Plan-A] phase_advance BLOCKED + REDIRECT:"
+                    f" {_old_phase} → {_transition.cp_mutations.get('phase', '?')}"
+                    f" source={_transition.source} reason={_transition.reason}",
+                    flush=True,
+                )
+            else:
+                print(
+                    f"    [Plan-A] phase_advance BLOCKED: {_old_phase} → {_new_phase}"
+                    f" source={_transition.source} reason={_transition.reason}",
+                    flush=True,
+                )
 
 
 
