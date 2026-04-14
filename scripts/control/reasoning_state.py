@@ -96,6 +96,8 @@ class ReasoningState:
     task_success:         bool  = False
     # Cognition correctness gate — set at phase boundary, cleared each step
     principal_violation:  str   = ""   # e.g. "missing_causal_grounding"; "" = clean
+    # Per-phase step counter — incremented every step, reset on phase change
+    phase_steps:          int   = 0
 
 def initial_reasoning_state(phase: Phase) -> ReasoningState:
     """Create a fresh state at attempt start. Mirror of initialReasoningState()."""
@@ -146,6 +148,8 @@ def update_reasoning_state(
         task_success         = signals.task_success,
         # principal_violation cleared each step (phase-boundary field, not a signal)
         principal_violation  = "",
+        # phase_steps incremented every step (reset externally on phase change)
+        phase_steps          = prev.phase_steps + 1,
     )
 
 
@@ -162,6 +166,17 @@ def set_principal_violation(state: ReasoningState, violation: str) -> ReasoningS
     """
     import dataclasses as _dc
     return _dc.replace(state, principal_violation=violation)
+
+
+def reset_phase_steps(state: ReasoningState) -> ReasoningState:
+    """Reset phase_steps to 0 when phase changes externally.
+
+    Called by the runtime after advancing cp_state.phase to a new phase.
+    Preserves I5 contract: update_reasoning_state never touches phase;
+    phase change (and phase_steps reset) is runtime-owned.
+    """
+    import dataclasses as _dc
+    return _dc.replace(state, phase_steps=0)
 
 # ── ControlVerdict ────────────────────────────────────────────────────────────
 
@@ -198,6 +213,18 @@ _ADVANCE_TABLE: dict[Phase, Optional[Phase]] = {
 }
 
 NO_PROGRESS_THRESHOLD = 4  # consecutive no-signal steps → forced advance or stop
+
+# Per-phase step budget — hard limit on steps in any single phase.
+# When phase_steps >= budget, decide_next() forces VerdictAdvance.
+# Rationale: prevents unbounded exploration (e.g. 40 steps in OBSERVE).
+PHASE_STEP_BUDGET: dict[str, int] = {
+    "UNDERSTAND": 5,
+    "OBSERVE":    10,
+    "ANALYZE":    10,
+    "DECIDE":     5,
+    "EXECUTE":    25,
+    "JUDGE":      5,
+}
 
 def decide_next(state: ReasoningState) -> ControlVerdict:
     """
@@ -241,6 +268,14 @@ def decide_next(state: ReasoningState) -> ControlVerdict:
             to=_repair,  # type: ignore[arg-type]
             reason=f"principal_violation:{state.principal_violation}",
         )
+
+    # 2.75. phase budget exceeded — hard step limit per phase
+    _budget = PHASE_STEP_BUDGET.get(state.phase, 15)
+    if state.phase_steps >= _budget:
+        next_phase = _ADVANCE_TABLE.get(state.phase)
+        if next_phase is None:
+            return VerdictStop(reason="phase_budget_exhausted")
+        return VerdictAdvance(to=next_phase)
 
     # 3. stagnation
     if state.no_progress_steps >= NO_PROGRESS_THRESHOLD:

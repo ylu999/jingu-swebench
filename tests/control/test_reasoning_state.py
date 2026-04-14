@@ -18,7 +18,7 @@ from control.reasoning_state import (
     CognitionSignals, ReasoningState, DEFAULT_SIGNALS,
     initial_reasoning_state, normalize_signals, update_reasoning_state, decide_next,
     VerdictAdvance, VerdictRedirect, VerdictStop, VerdictContinue,
-    NO_PROGRESS_THRESHOLD,
+    NO_PROGRESS_THRESHOLD, PHASE_STEP_BUDGET, reset_phase_steps,
 )
 from control.swe_signal_adapter import extract_step_signals, extract_verify_signals, extract_weak_progress
 
@@ -611,11 +611,13 @@ class TestB3StagnationGating:
 
     def test_step_calls_do_not_trigger_stagnation_verdict(self):
         """
-        Even with NO_PROGRESS_THRESHOLD*10 step calls (no evidence), verdict is CONTINUE
-        because no_progress_steps never advances with update_stagnation=False.
+        With step calls under the phase budget (update_stagnation=False), verdict is CONTINUE
+        because no_progress_steps never advances.
+        Note: phase_steps still increments, so iterations must stay under PHASE_STEP_BUDGET.
         """
         s = initial_reasoning_state("OBSERVE")
-        for _ in range(NO_PROGRESS_THRESHOLD * 10):
+        # Stay under OBSERVE budget (10) — 5 steps is safe
+        for _ in range(5):
             s = update_reasoning_state(s, no_progress_signals(), update_stagnation=False)
         assert s.no_progress_steps == 0
         verdict = decide_next(s)
@@ -870,3 +872,68 @@ class TestB5SemanticEventGating:
             env_error_detected=False, patch_non_empty=False,
         )
         assert pee is False
+
+
+# ── Phase Budget Tests ────────────────────────────────────────────────────────
+
+class TestPhaseBudget:
+
+    def test_phase_steps_increments(self):
+        """phase_steps increments by 1 on each update_reasoning_state call."""
+        s = initial_reasoning_state("OBSERVE")
+        assert s.phase_steps == 0
+        s = update_reasoning_state(s, no_progress_signals())
+        assert s.phase_steps == 1
+        s = update_reasoning_state(s, no_progress_signals())
+        assert s.phase_steps == 2
+
+    def test_budget_triggers_advance(self):
+        """When phase_steps >= budget, decide_next returns VerdictAdvance."""
+        budget = PHASE_STEP_BUDGET["OBSERVE"]
+        s = ReasoningState(phase="OBSERVE", phase_steps=budget)
+        verdict = decide_next(s)
+        assert isinstance(verdict, VerdictAdvance)
+        assert verdict.to == "ANALYZE"
+
+    def test_under_budget_continues(self):
+        """When phase_steps < budget, decide_next returns VerdictContinue."""
+        budget = PHASE_STEP_BUDGET["OBSERVE"]
+        s = ReasoningState(phase="OBSERVE", phase_steps=budget - 1)
+        verdict = decide_next(s)
+        assert isinstance(verdict, VerdictContinue)
+
+    def test_judge_budget_stops(self):
+        """JUDGE has no next phase — budget exhausted returns VerdictStop."""
+        budget = PHASE_STEP_BUDGET["JUDGE"]
+        s = ReasoningState(phase="JUDGE", phase_steps=budget)
+        verdict = decide_next(s)
+        assert isinstance(verdict, VerdictStop)
+        assert verdict.reason == "phase_budget_exhausted"
+
+    def test_execute_has_largest_budget(self):
+        """EXECUTE budget is the largest (25) to allow patch iteration."""
+        assert PHASE_STEP_BUDGET["EXECUTE"] >= 20
+        assert PHASE_STEP_BUDGET["EXECUTE"] > PHASE_STEP_BUDGET["OBSERVE"]
+
+    def test_reset_phase_steps(self):
+        """reset_phase_steps sets phase_steps to 0."""
+        s = ReasoningState(phase="OBSERVE", phase_steps=15)
+        s2 = reset_phase_steps(s)
+        assert s2.phase_steps == 0
+        assert s2.phase == "OBSERVE"  # phase unchanged
+
+    def test_budget_priority_below_task_success(self):
+        """task_success (priority 1) takes precedence over budget (priority 2.75)."""
+        budget = PHASE_STEP_BUDGET["OBSERVE"]
+        s = ReasoningState(phase="OBSERVE", phase_steps=budget, task_success=True)
+        verdict = decide_next(s)
+        assert isinstance(verdict, VerdictStop)
+        assert verdict.reason == "task_success"
+
+    def test_budget_priority_below_env_noise(self):
+        """env_noise (priority 2) takes precedence over budget (priority 2.75)."""
+        budget = PHASE_STEP_BUDGET["OBSERVE"]
+        s = ReasoningState(phase="OBSERVE", phase_steps=budget, env_noise=True)
+        verdict = decide_next(s)
+        assert isinstance(verdict, VerdictRedirect)
+        assert verdict.reason == "env_noise detected"

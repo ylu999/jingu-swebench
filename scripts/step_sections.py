@@ -1657,12 +1657,12 @@ def _step_cp_update_and_verdict(
                             import dataclasses as _dc_ret
                             if cp_state_holder is not None:
                                 cp_state_holder[0] = _dc_ret.replace(
-                                    cp_state_holder[0], phase=_pv_verdict.to
+                                    cp_state_holder[0], phase=_pv_verdict.to, phase_steps=0
                                 )
                                 _cp_s = cp_state_holder[0]
                             else:
                                 state.cp_state = _dc_ret.replace(
-                                    state.cp_state, phase=_pv_verdict.to
+                                    state.cp_state, phase=_pv_verdict.to, phase_steps=0
                                 )
                                 _cp_s = state.cp_state
                             agent_self.messages.append({
@@ -1851,11 +1851,11 @@ def _step_cp_update_and_verdict(
             import dataclasses as _dc_adv
             if cp_state_holder is not None:
                 cp_state_holder[0] = _dc_adv.replace(
-                    cp_state_holder[0], phase=_new_phase, no_progress_steps=0
+                    cp_state_holder[0], phase=_new_phase, no_progress_steps=0, phase_steps=0
                 )
             else:
                 state.cp_state = _dc_adv.replace(
-                    state.cp_state, phase=_new_phase, no_progress_steps=0
+                    state.cp_state, phase=_new_phase, no_progress_steps=0, phase_steps=0
                 )
             print(
                 f"    [Plan-A] phase_advance COMMITTED: {_old_phase} → {_new_phase}",
