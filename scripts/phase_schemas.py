@@ -68,28 +68,25 @@ PHASE_RECORD_BASE_SCHEMA: dict[str, Any] = {
     "required": ["phase", "subtype", "principals", "content"],
 }
 
+# ── All phase schemas derived from cognition_contracts (single source of truth) ──
+from cognition_contracts import observation_fact_gathering as _ofg
+from cognition_contracts import analysis_root_cause as _arc
+from cognition_contracts import decision_fix_direction as _dfd
+from cognition_contracts import design_solution_shape as _dss
+from cognition_contracts import execution_code_patch as _ecp
+from cognition_contracts import judge_verification as _jv
+
 # OBSERVE phase: evidence gathering
 OBSERVE_RECORD_SCHEMA: dict[str, Any] = {
     **PHASE_RECORD_BASE_SCHEMA,
     "properties": {
         **PHASE_RECORD_BASE_SCHEMA["properties"],
-        "phase": {
-            "type": "string",
-            "enum": ["OBSERVE"],
-            "description": "The current reasoning phase.",
-        },
-        "subtype": {
-            "type": "string",
-            "enum": ["observation.fact_gathering"],
-            "description": "Observation subtype.",
-        },
+        **_ofg.SCHEMA_PROPERTIES,
     },
-    "required": ["phase", "subtype", "principals", "evidence_refs", "content"],
+    "required": list(_ofg.SCHEMA_REQUIRED) + ["content"],
 }
 
 # ANALYZE phase: root cause with evidence
-# Derived from cognition_contracts/analysis_root_cause.py (single source of truth).
-from cognition_contracts import analysis_root_cause as _arc
 ANALYZE_RECORD_SCHEMA: dict[str, Any] = {
     **PHASE_RECORD_BASE_SCHEMA,
     "properties": {
@@ -99,43 +96,14 @@ ANALYZE_RECORD_SCHEMA: dict[str, Any] = {
     "required": list(_arc.SCHEMA_REQUIRED) + ["content"],
 }
 
-# DECIDE phase: fix direction selection (with prediction fields for decision quality v1)
+# DECIDE phase: fix direction selection
 DECIDE_RECORD_SCHEMA: dict[str, Any] = {
     **PHASE_RECORD_BASE_SCHEMA,
     "properties": {
         **PHASE_RECORD_BASE_SCHEMA["properties"],
-        "phase": {
-            "type": "string",
-            "enum": ["DECIDE"],
-            "description": "The current reasoning phase.",
-        },
-        "subtype": {
-            "type": "string",
-            "enum": ["decision.fix_direction"],
-            "description": "Decision subtype.",
-        },
-        "expected_tests_to_pass": {
-            "type": "array",
-            "items": {"type": "string"},
-            "description": "Test names you predict will pass after your fix (max 5).",
-            "maxItems": 5,
-        },
-        "expected_files_to_change": {
-            "type": "array",
-            "items": {"type": "string"},
-            "description": "File paths your fix will modify.",
-        },
-        "testable_hypothesis": {
-            "type": "string",
-            "description": "If we do X, then tests Y will pass because Z.",
-        },
-        "risk_level": {
-            "type": "string",
-            "enum": ["low", "medium", "high"],
-            "description": "Risk of regression: low=isolated change, medium=touches shared code, high=modifies core invariants.",
-        },
+        **_dfd.SCHEMA_PROPERTIES,
     },
-    "required": ["phase", "subtype", "principals", "content", "testable_hypothesis"],
+    "required": list(_dfd.SCHEMA_REQUIRED) + ["content"],
 }
 
 # DESIGN phase: solution shape
@@ -143,42 +111,19 @@ DESIGN_RECORD_SCHEMA: dict[str, Any] = {
     **PHASE_RECORD_BASE_SCHEMA,
     "properties": {
         **PHASE_RECORD_BASE_SCHEMA["properties"],
-        "phase": {
-            "type": "string",
-            "enum": ["DESIGN"],
-            "description": "The current reasoning phase.",
-        },
-        "subtype": {
-            "type": "string",
-            "enum": ["design.solution_shape"],
-            "description": "Design subtype.",
-        },
+        **_dss.SCHEMA_PROPERTIES,
     },
-    "required": ["phase", "subtype", "principals", "content"],
+    "required": list(_dss.SCHEMA_REQUIRED) + ["content"],
 }
 
-# EXECUTE phase: code patch with plan
+# EXECUTE phase: code patch
 EXECUTE_RECORD_SCHEMA: dict[str, Any] = {
     **PHASE_RECORD_BASE_SCHEMA,
     "properties": {
         **PHASE_RECORD_BASE_SCHEMA["properties"],
-        "phase": {
-            "type": "string",
-            "enum": ["EXECUTE"],
-            "description": "The current reasoning phase.",
-        },
-        "subtype": {
-            "type": "string",
-            "enum": ["execution.code_patch"],
-            "description": "Execution subtype.",
-        },
-        "plan": {
-            "type": "string",
-            "minLength": 10,
-            "description": "How the root cause will be fixed. Must reference the root cause.",
-        },
+        **_ecp.SCHEMA_PROPERTIES,
     },
-    "required": ["phase", "subtype", "principals", "content", "plan"],
+    "required": list(_ecp.SCHEMA_REQUIRED) + ["content"],
 }
 
 # JUDGE phase: verification
@@ -186,22 +131,19 @@ JUDGE_RECORD_SCHEMA: dict[str, Any] = {
     **PHASE_RECORD_BASE_SCHEMA,
     "properties": {
         **PHASE_RECORD_BASE_SCHEMA["properties"],
-        "phase": {
-            "type": "string",
-            "enum": ["JUDGE"],
-            "description": "The current reasoning phase.",
-        },
-        "subtype": {
-            "type": "string",
-            "enum": ["judge.verification"],
-            "description": "Judge subtype.",
-        },
+        **_jv.SCHEMA_PROPERTIES,
     },
-    "required": ["phase", "subtype", "principals", "content"],
+    "required": list(_jv.SCHEMA_REQUIRED) + ["content"],
+}
+
+# UNDERSTAND phase: uses base schema (no cognition contract yet)
+UNDERSTAND_RECORD_SCHEMA: dict[str, Any] = {
+    **PHASE_RECORD_BASE_SCHEMA,
 }
 
 # Mapping: phase -> cognition-aligned record schema
 PHASE_RECORD_SCHEMAS: dict[str, dict[str, Any]] = {
+    "UNDERSTAND": UNDERSTAND_RECORD_SCHEMA,
     "OBSERVE": OBSERVE_RECORD_SCHEMA,
     "ANALYZE": ANALYZE_RECORD_SCHEMA,
     "DECIDE": DECIDE_RECORD_SCHEMA,
