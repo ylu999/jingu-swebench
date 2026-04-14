@@ -172,20 +172,20 @@ STRATEGY_PROMPTS: dict[str, str] = {
         "[ROUTING: SUBMIT PHASE RECORD]\n"
         "You must call submit_phase_record before the phase can advance.\n"
         "Requirements:\n"
-        "1. Summarize your findings for the current phase\n"
-        "2. Call submit_phase_record with the structured JSON output\n"
-        "3. Include all required fields for this phase\n"
-        "4. Do NOT skip this step — the system cannot advance without it"
+        "1. Prepare the structured output required for the current phase\n"
+        "2. Include all required fields for this phase\n"
+        "3. Call submit_phase_record with the completed JSON payload\n"
+        "4. Do NOT continue with free-text reasoning instead of the submission"
     ),
 
     "fix_cognition_errors": (
         "[ROUTING: FIX COGNITION ERRORS]\n"
-        "Your phase record failed schema validation.\n"
+        "Your phase record was rejected by cognition validation.\n"
         "Requirements:\n"
-        "1. Check the error messages above for specific field violations\n"
-        "2. Fix the identified fields in your phase record\n"
-        "3. Resubmit with corrected values\n"
-        "4. Ensure all required fields are present and non-empty"
+        "1. Check the feedback above for the specific validation failures\n"
+        "2. Fix the rejected fields, claims, or evidence links\n"
+        "3. Ensure the record satisfies the current phase contract\n"
+        "4. Resubmit using submit_phase_record with corrected structured output"
     ),
 }
 
