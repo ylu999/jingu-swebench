@@ -513,7 +513,7 @@ class JinguAgent:
             "step": getattr(cp, "step", 0),
             "no_progress_steps": getattr(cp, "no_progress_steps", 0),
             "patch_first_write": getattr(cp, "patch_first_write", False),
-            "phase_records_count": len(getattr(cp, "phase_records", [])),
+            "phase_records_count": len(getattr(self._state, "phase_records", [])) if self._state else len(getattr(cp, "phase_records", [])),
         } if cp else None
 
         # gate verdict from decision
