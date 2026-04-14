@@ -16,10 +16,7 @@ Every field must be derived from system state, not from LLM output.
 import re
 from dataclasses import dataclass, field
 from phase_record import PhaseRecord
-from gate_rejection import (
-    GateRejection, ContractView, FieldSpec, FieldFailure,
-    build_gate_rejection, SDG_ENABLED,
-)
+from gate_rejection import GateRejection
 
 
 @dataclass
@@ -176,54 +173,7 @@ def _check_constraint_encoding(pr: PhaseRecord) -> float:
         return 0.0
 
 
-# ── DESIGN contract (SDG) ──────────────────────────────────────────────────
-
-_DESIGN_CONTRACT = ContractView(
-    required_fields=["content"],
-    field_specs={
-        "content": FieldSpec(
-            description="Design plan with invariant preservation, approach comparison, and constraint encoding justification",
-            required=True,
-            min_length=20,
-            semantic_check="design_quality",
-        ),
-        "invariant_preservation": FieldSpec(
-            description="Statement of what invariant the design preserves",
-            required=False,
-            semantic_check="invariant_stated",
-        ),
-        "design_comparison": FieldSpec(
-            description="Comparison of at least 2 design approaches",
-            required=False,
-            semantic_check="multiple_approaches",
-        ),
-        "constraint_encoding": FieldSpec(
-            description="If allowlist: justification of completeness",
-            required=False,
-            semantic_check="completeness_justified",
-        ),
-    },
-)
-
-_RULE_TO_FIELD: dict[str, tuple[str, str]] = {
-    "invariant_preservation": (
-        "invariant_preservation",
-        "State what invariant your design preserves: what delimiter/boundary must NOT be allowed?",
-    ),
-    "design_comparison": (
-        "design_comparison",
-        "Compare at least 2 approaches (e.g. allowlist vs exclusion) with tradeoffs",
-    ),
-    "constraint_encoding": (
-        "constraint_encoding",
-        "Your design uses an allowlist. Justify completeness: does it cover all valid inputs?",
-    ),
-}
-
-
-# ── Main evaluation function ──────────────────────────────────────────────
-
-_THRESHOLD = 0.5
+# ── Main evaluation function (soft quality signal — no rejection) ─────────
 
 
 def evaluate_design(
@@ -231,84 +181,33 @@ def evaluate_design(
     analysis_records: list[PhaseRecord] | None = None,
 ) -> DesignVerdict:
     """
-    Evaluate design quality before EXECUTE phase advance.
+    Evaluate design quality as soft telemetry signal.
 
-    Fires once at ANALYZE→EXECUTE transition (not every step).
+    Scores are computed for observability but never cause rejection.
+    Gate mode is soft_quality_signal — all rules emit scores only.
 
     Args:
         pr: PhaseRecord containing the design/plan.
         analysis_records: Previous analysis PhaseRecords (for invariant cross-check).
     """
-    failed = []
-    reasons = []
-    scores = {}
+    scores: dict = {}
 
-    # Rule 1: Invariant preservation
-    score1 = _check_invariant_preservation(pr, analysis_records)
-    scores["invariant_preservation"] = score1
-    if score1 < _THRESHOLD:
-        failed.append("invariant_preservation")
-        reasons.append(
-            "Design does not state what invariant must be preserved. "
-            "What delimiter or boundary character must NOT appear? "
-            "Why must it be excluded?"
-        )
+    # Rule 1: Invariant preservation (score only)
+    scores["invariant_preservation"] = _check_invariant_preservation(pr, analysis_records)
 
-    # Rule 2: Design comparison
-    score2 = _check_design_comparison(pr)
-    scores["design_comparison"] = score2
-    if score2 < _THRESHOLD:
-        failed.append("design_comparison")
-        reasons.append(
-            "Design proposes a single approach without comparing alternatives. "
-            "Compare at least 2 approaches (e.g. allowlist vs exclusion-based) "
-            "with tradeoffs before choosing."
-        )
+    # Rule 2: Design comparison (score only)
+    scores["design_comparison"] = _check_design_comparison(pr)
 
-    # Rule 3: Constraint encoding
-    score3 = _check_constraint_encoding(pr)
-    scores["constraint_encoding"] = score3
-    if score3 < _THRESHOLD:
-        failed.append("constraint_encoding")
-        reasons.append(
-            "Design uses an allowlist approach without justifying completeness. "
-            "Can you prove your allowlist covers all valid inputs? "
-            "Have you verified against both passing and failing test cases?"
-        )
+    # Rule 3: Constraint encoding (score only)
+    scores["constraint_encoding"] = _check_constraint_encoding(pr)
 
-    # Build SDG rejection on failure
-    rejection = None
-    if failed and SDG_ENABLED:
-        field_failures = []
-        for rule_name in failed:
-            field_name, hint = _RULE_TO_FIELD.get(
-                rule_name, (rule_name, f"Fix {rule_name}")
-            )
-            score = scores.get(rule_name, 0.0)
-            reason = "missing" if score == 0.0 else "semantic_fail"
-
-            field_spec = _DESIGN_CONTRACT.field_specs.get(field_name)
-            expected = field_spec.description if field_spec else f"{field_name} required"
-
-            field_failures.append(FieldFailure(
-                field=field_name,
-                reason=reason,
-                hint=hint,
-                expected=expected,
-                actual=None,
-            ))
-
-        rejection = build_gate_rejection(
-            gate_name="design_gate",
-            contract=_DESIGN_CONTRACT,
-            extracted={},
-            failures=field_failures,
-        )
+    # Mark as soft quality signal — no hard rejection
+    scores["gate_mode"] = "soft_quality_signal"
 
     return DesignVerdict(
-        passed=len(failed) == 0,
-        failed_rules=failed,
-        reasons=reasons,
+        passed=True,
+        failed_rules=[],
+        reasons=[],
         scores=scores,
-        rejection=rejection,
+        rejection=None,
     )
