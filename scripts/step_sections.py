@@ -84,6 +84,11 @@ class TransitionEvaluation:
     # Telemetry-only: strategy prompt selection + explainability.
     # Never drives control flow. Handler reads verdict, not routing.
     routing: "RoutingDecision | None" = None
+    # Governance exception marker: True when verdict="advance" was produced
+    # by tolerance exhaustion (force_advance), not by clean gate passage.
+    # Audit-only — does NOT change control flow.
+    tolerated: bool = False
+    tolerated_gate: str = ""  # which gate was force-advanced (e.g. "design_gate")
 
 
 # ── Phase 4.5: Rejection Policy Table ─────────────────────────────────────
@@ -838,6 +843,18 @@ def evaluate_transition(
     # ══════════════════════════════════════════════════════════════════
     # Gate 9: Principal Gate
     # ══════════════════════════════════════════════════════════════════
+    # Track which gate was force-advanced for audit
+    _force_passed_gate = ""
+    if _analysis_gate_force_passed:
+        _force_passed_gate = "analysis_gate"
+    elif _design_gate_force_passed:
+        _force_passed_gate = "design_gate"
+    elif _decide_gate_force_passed:
+        _force_passed_gate = "decide_gate"
+    elif _execute_gate_force_passed:
+        _force_passed_gate = "execute_gate"
+    elif _judge_gate_force_passed:
+        _force_passed_gate = "judge_gate"
     _any_force_passed = (
         _analysis_gate_force_passed or _design_gate_force_passed
         or _decide_gate_force_passed or _execute_gate_force_passed
@@ -1214,8 +1231,14 @@ def evaluate_transition(
     # ALL GATES PASSED — transition authorized
     # ══════════════════════════════════════════════════════════════════
     result.verdict = "advance"
-    result.source = "admission"
-    result.reason = "all_gates_passed"
+    if _any_force_passed:
+        result.source = "tolerance"
+        result.reason = f"force_advance:{_force_passed_gate}"
+        result.tolerated = True
+        result.tolerated_gate = _force_passed_gate
+    else:
+        result.source = "admission"
+        result.reason = "all_gates_passed"
     return result
 
 
@@ -1920,10 +1943,30 @@ def _step_cp_update_and_verdict(
                 state.cp_state = _dc_adv.replace(
                     state.cp_state, phase=_new_phase, no_progress_steps=0, phase_steps=0
                 )
-            print(
-                f"    [Plan-A] phase_advance COMMITTED: {_old_phase} → {_new_phase}",
-                flush=True,
-            )
+            if _transition.tolerated:
+                # Governance exception: advance despite gate failure
+                if not hasattr(state, "_force_advance_count"):
+                    state._force_advance_count = {}
+                _fa_gate = _transition.tolerated_gate
+                state._force_advance_count[_fa_gate] = (
+                    state._force_advance_count.get(_fa_gate, 0) + 1
+                )
+                print(
+                    f"    [Plan-A] phase_advance TOLERATED: {_old_phase} → {_new_phase}"
+                    f" gate={_fa_gate} (governance exception — gate rejected but policy allowed advance)",
+                    flush=True,
+                )
+                _emit_decision(
+                    state, decision_type="gate_verdict", step_n=_cp_s.step_index,
+                    verdict="tolerated_advance",
+                    reason=_transition.reason,
+                    signals={"tolerated_gate": _fa_gate, "force_advance_counts": dict(state._force_advance_count)},
+                )
+            else:
+                print(
+                    f"    [Plan-A] phase_advance COMMITTED: {_old_phase} → {_new_phase}",
+                    flush=True,
+                )
 
         elif _tv == "redirect":
             import dataclasses as _dc_redir
