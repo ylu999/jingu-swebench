@@ -22,7 +22,6 @@ from analysis_gate import (
     _check_code_grounding,
     _check_alternative_hypothesis,
     _check_causal_chain,
-    _is_code_evidence_ref,
 )
 from gate_rejection import GateRejection, FieldFailure
 
@@ -268,21 +267,29 @@ class TestCodeGrounding:
 
 
 class TestIsCodeEvidenceRef:
+    """_is_code_evidence_ref was removed in D-02/D-03 structural rewrite.
+    Code grounding now checks evidence_refs structurally. These tests
+    verify the structural check via _check_code_grounding instead."""
 
-    def test_file_line_ref(self):
-        assert _is_code_evidence_ref("django/db/models.py:45") is True
+    def test_file_line_ref_scores_high(self):
+        pr = PhaseRecord(
+            phase="ANALYZE", subtype="analysis.root_cause",
+            principals=[], claims=[],
+            evidence_refs=["django/db/models.py:45"],
+            from_steps=[], content="",
+            root_cause="Bug in django/db/models.py:45",
+        )
+        assert _check_code_grounding(pr) >= 0.5
 
-    def test_path_ref(self):
-        assert _is_code_evidence_ref("django/db/models.py") is True
-
-    def test_test_name_with_double_colon(self):
-        assert _is_code_evidence_ref("tests/test_models.py::test_clean") is True
-
-    def test_plain_text_not_code(self):
-        assert _is_code_evidence_ref("validation logic") is False
-
-    def test_empty_string(self):
-        assert _is_code_evidence_ref("") is False
+    def test_no_refs_scores_zero(self):
+        pr = PhaseRecord(
+            phase="ANALYZE", subtype="analysis.root_cause",
+            principals=[], claims=[],
+            evidence_refs=[],
+            from_steps=[], content="validation logic",
+            root_cause="",
+        )
+        assert _check_code_grounding(pr) == 0.0
 
 
 # ── Tests: Alternative hypothesis (Rule 2) ───────────────────────────────────
@@ -472,7 +479,7 @@ class TestAnalysisGateRejection:
         fields_failed = [f.field for f in verdict.rejection.failures]
         assert "root_cause" in fields_failed
         assert "causal_chain" in fields_failed
-        assert "alternatives_considered" in fields_failed
+        assert "alternative_hypotheses" in fields_failed
 
     def test_rejection_failures_have_hints(self):
         """Each FieldFailure has a non-empty hint."""

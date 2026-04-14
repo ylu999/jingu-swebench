@@ -19,7 +19,6 @@ from principal_gate import (
     check_principal_gate,
     get_principal_feedback,
     PHASE_REQUIRED_PRINCIPALS,
-    PHASE_VIOLATION_REDIRECT,
 )
 
 
@@ -180,8 +179,8 @@ def test_observe_has_no_required_principals():
     assert PHASE_REQUIRED_PRINCIPALS["OBSERVE"] == []
 
 
-def test_phase_redirect_table():
-    """PHASE_VIOLATION_REDIRECT has redirect targets for enforced phases."""
-    assert PHASE_VIOLATION_REDIRECT["ANALYZE"] == "OBSERVE"
-    assert PHASE_VIOLATION_REDIRECT["EXECUTE"] == "ANALYZE"
-    assert PHASE_VIOLATION_REDIRECT["JUDGE"] == "EXECUTE"
+def test_phase_redirect_via_routing_decision():
+    """Routing now uses RoutingDecision (EF-5), PHASE_VIOLATION_REDIRECT deleted."""
+    from routing_decision import RoutingDecision
+    # RoutingDecision type exists and is importable
+    assert hasattr(RoutingDecision, 'next_phase')
