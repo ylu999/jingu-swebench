@@ -195,29 +195,96 @@ def reset_phase_steps(state: ReasoningState) -> ReasoningState:
     import dataclasses as _dc
     return _dc.replace(state, phase_steps=0)
 
+# ── VerdictSource ─────────────────────────────────────────────────────────────
+#
+# Every verdict carries a `source` that says WHY it was produced.
+# This is the foundation for verdict merge (Phase 2.5) and full gate
+# authority (Phase 3). In the transition period, source is informational
+# and used for telemetry/attribution. In Phase 3, it becomes the merge key.
+
+VerdictSource = Literal[
+    "task_success",          # verify signal: tests passed
+    "env_noise",             # environment issue detected
+    "principal_violation",   # phase-boundary cognition check failed
+    "phase_budget",          # per-phase step limit exceeded
+    "stagnation",            # no-progress threshold exceeded
+    "phase_gate",            # phase-specific heuristic (e.g. OBSERVE→hypothesis)
+    "admission",             # agent submitted a phase record (admission-driven)
+    "repeated_patch",        # same patch content written N+ times
+    "submission_timeout",    # phase submission deadline exceeded
+    "gate_rejection",       # analysis/design/principal gate rejected (Phase 3: pre-transition)
+    "default",               # no condition triggered → CONTINUE
+]
+
 # ── ControlVerdict ────────────────────────────────────────────────────────────
+#
+# Phase 2.5 transition note:
+#   All verdict types now carry `source` (attribution) and `reason` (human-readable).
+#   This is the unified verdict type family. In Phase 3, gate evaluation will
+#   produce these verdicts directly; for now, they are produced by decide_next()
+#   and step_sections overrides.
 
 @dataclass(frozen=True)
 class VerdictAdvance:
     type: str = "ADVANCE"
     to: Optional[Phase] = None
+    source: VerdictSource = "default"
+    reason: str = ""
 
 @dataclass(frozen=True)
 class VerdictRedirect:
     type: str = "REDIRECT"
     to: Phase = "ANALYZE"
+    source: VerdictSource = "default"
     reason: str = ""
 
 @dataclass(frozen=True)
 class VerdictStop:
     type: str = "STOP"
-    reason: Literal["task_success", "no_signal", "empty_patch", "phase_budget_exhausted"] = "no_signal"
+    reason: str = "no_signal"
+    source: VerdictSource = "default"
 
 @dataclass(frozen=True)
 class VerdictContinue:
     type: str = "CONTINUE"
+    source: VerdictSource = "default"
+    reason: str = ""
 
 ControlVerdict = VerdictAdvance | VerdictRedirect | VerdictStop | VerdictContinue
+
+# ── Verdict Merge ─────────────────────────────────────────────────────────────
+#
+# Priority order for merging multiple verdict sources into a single transition
+# decision. Lower number = higher priority. When multiple sources produce
+# verdicts, the highest-priority non-CONTINUE verdict wins.
+#
+# Phase 2.5: used by step_sections to resolve conflicts between decide_next()
+#            output and submission-triggered advance.
+# Phase 3:   used by the verdict merge layer after all gates have evaluated.
+
+VERDICT_TYPE_PRIORITY: dict[str, int] = {
+    "STOP":     0,   # highest — fatal / terminal, always wins
+    "REDIRECT": 1,   # hard redirect — override advance
+    "ADVANCE":  2,   # phase transition
+    "CONTINUE": 3,   # lowest — no action, yields to anything else
+}
+
+def merge_verdicts(verdicts: list[ControlVerdict]) -> ControlVerdict:
+    """Merge multiple verdicts by priority. Highest-priority (lowest number) wins.
+
+    If all verdicts are CONTINUE, returns the first CONTINUE.
+    Empty list returns VerdictContinue(source="default").
+    """
+    if not verdicts:
+        return VerdictContinue(source="default")
+    best = verdicts[0]
+    best_pri = VERDICT_TYPE_PRIORITY.get(best.type, 99)
+    for v in verdicts[1:]:
+        v_pri = VERDICT_TYPE_PRIORITY.get(v.type, 99)
+        if v_pri < best_pri:
+            best = v
+            best_pri = v_pri
+    return best
 
 # Phase advance table (mirrors phase_controller.ts)
 _ADVANCE_TABLE: dict[Phase, Optional[Phase]] = {
@@ -265,11 +332,11 @@ def decide_next(state: ReasoningState) -> ControlVerdict:
     """
     # 1. terminal success
     if state.task_success:
-        return VerdictStop(reason="task_success")
+        return VerdictStop(reason="task_success", source="task_success")
 
     # 2. env_noise — unconditional redirect (not gated on anything else)
     if state.env_noise:
-        return VerdictRedirect(to="ANALYZE", reason="env_noise detected")
+        return VerdictRedirect(to="ANALYZE", reason="env_noise detected", source="env_noise")
 
     # 2.5. principal_violation — cognition correctness gate
     if state.principal_violation:
@@ -286,6 +353,7 @@ def decide_next(state: ReasoningState) -> ControlVerdict:
         return VerdictRedirect(
             to=_repair,  # type: ignore[arg-type]
             reason=f"principal_violation:{state.principal_violation}",
+            source="principal_violation",
         )
 
     # 2.75. phase budget exceeded — hard step limit per phase
@@ -293,8 +361,8 @@ def decide_next(state: ReasoningState) -> ControlVerdict:
     if state.phase_steps >= _budget:
         next_phase = _ADVANCE_TABLE.get(state.phase)
         if next_phase is None:
-            return VerdictStop(reason="phase_budget_exhausted")
-        return VerdictAdvance(to=next_phase)
+            return VerdictStop(reason="phase_budget_exhausted", source="phase_budget")
+        return VerdictAdvance(to=next_phase, source="phase_budget", reason="phase_budget_exceeded")
 
     # 3. stagnation
     if state.no_progress_steps >= NO_PROGRESS_THRESHOLD:
@@ -309,22 +377,22 @@ def decide_next(state: ReasoningState) -> ControlVerdict:
             # execute_no_progress redirect is only meaningful when patch is absent
             # (agent is stuck in EXECUTE without producing any code).
             if state.actionability > 0:
-                return VerdictContinue()
-            return VerdictRedirect(to="DECIDE", reason="execute_no_progress")
+                return VerdictContinue(source="stagnation", reason="execute_has_patch_continuing")
+            return VerdictRedirect(to="DECIDE", reason="execute_no_progress", source="stagnation")
         next_phase = _ADVANCE_TABLE.get(state.phase)
         if next_phase is None or state.phase == "JUDGE":
-            return VerdictStop(reason="no_signal")
-        return VerdictAdvance(to=next_phase)
+            return VerdictStop(reason="no_signal", source="stagnation")
+        return VerdictAdvance(to=next_phase, source="stagnation", reason="no_progress")
 
     # 4. phase gates
     if state.phase == "OBSERVE" and state.hypothesis_narrowing > 0:
-        return VerdictAdvance(to="ANALYZE")
+        return VerdictAdvance(to="ANALYZE", source="phase_gate", reason="hypothesis_narrowing")
 
     # P2: ANALYZE → DECIDE (not EXECUTE). DECIDE phase is mandatory —
     # agent must declare expected_outcome + testable_hypothesis before executing.
     # DECIDE → DESIGN → EXECUTE transition handled by stagnation path (_ADVANCE_TABLE).
     if state.phase == "ANALYZE" and state.actionability > 0:
-        return VerdictAdvance(to="DECIDE")
+        return VerdictAdvance(to="DECIDE", source="phase_gate", reason="actionability")
 
     # 5. default
-    return VerdictContinue()
+    return VerdictContinue(source="default")

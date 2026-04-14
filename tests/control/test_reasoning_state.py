@@ -952,3 +952,104 @@ class TestPhaseBudget:
         canonical_phases = ["UNDERSTAND", "OBSERVE", "ANALYZE", "DECIDE", "DESIGN", "EXECUTE", "JUDGE"]
         for phase in canonical_phases:
             assert phase in PHASE_STEP_BUDGET, f"{phase} missing from PHASE_STEP_BUDGET"
+
+
+# ── Verdict Source Attribution Tests ──────────────────────────────────────────
+
+class TestVerdictSource:
+    """Phase 2.5: every verdict from decide_next() must carry a typed source."""
+
+    def test_task_success_source(self):
+        s = ReasoningState(phase="EXECUTE", task_success=True)
+        v = decide_next(s)
+        assert v.source == "task_success"
+
+    def test_env_noise_source(self):
+        s = ReasoningState(phase="OBSERVE", env_noise=True)
+        v = decide_next(s)
+        assert v.source == "env_noise"
+
+    def test_principal_violation_source(self):
+        s = ReasoningState(phase="ANALYZE", principal_violation="missing_causal_grounding")
+        v = decide_next(s)
+        assert v.source == "principal_violation"
+
+    def test_phase_budget_source(self):
+        budget = PHASE_STEP_BUDGET["OBSERVE"]
+        s = ReasoningState(phase="OBSERVE", phase_steps=budget)
+        v = decide_next(s)
+        assert v.source == "phase_budget"
+
+    def test_stagnation_source(self):
+        s = ReasoningState(phase="OBSERVE", no_progress_steps=NO_PROGRESS_THRESHOLD)
+        v = decide_next(s)
+        assert v.source == "stagnation"
+
+    def test_phase_gate_source(self):
+        s = ReasoningState(phase="OBSERVE", hypothesis_narrowing=1)
+        v = decide_next(s)
+        assert v.source == "phase_gate"
+
+    def test_default_source(self):
+        s = ReasoningState(phase="OBSERVE")
+        v = decide_next(s)
+        assert v.source == "default"
+
+    def test_execute_stagnation_with_patch_source(self):
+        """EXECUTE stagnation with actionability>0 → CONTINUE with stagnation source."""
+        s = ReasoningState(
+            phase="EXECUTE", no_progress_steps=NO_PROGRESS_THRESHOLD, actionability=1
+        )
+        v = decide_next(s)
+        assert isinstance(v, VerdictContinue)
+        assert v.source == "stagnation"
+
+    def test_all_verdicts_have_source(self):
+        """Structural test: every verdict type has a source field."""
+        for cls in [VerdictAdvance, VerdictRedirect, VerdictStop, VerdictContinue]:
+            v = cls()
+            assert hasattr(v, "source"), f"{cls.__name__} missing source field"
+
+
+# ── Verdict Merge Tests ──────────────────────────────────────────────────────
+
+class TestVerdictMerge:
+
+    def test_stop_wins_over_all(self):
+        from control.reasoning_state import merge_verdicts
+        verdicts = [
+            VerdictContinue(source="default"),
+            VerdictAdvance(to="ANALYZE", source="admission"),
+            VerdictStop(reason="task_success", source="task_success"),
+        ]
+        result = merge_verdicts(verdicts)
+        assert isinstance(result, VerdictStop)
+
+    def test_redirect_wins_over_advance(self):
+        from control.reasoning_state import merge_verdicts
+        verdicts = [
+            VerdictAdvance(to="ANALYZE", source="admission"),
+            VerdictRedirect(to="DECIDE", reason="env_noise", source="env_noise"),
+        ]
+        result = merge_verdicts(verdicts)
+        assert isinstance(result, VerdictRedirect)
+
+    def test_advance_wins_over_continue(self):
+        from control.reasoning_state import merge_verdicts
+        verdicts = [
+            VerdictContinue(source="default"),
+            VerdictAdvance(to="ANALYZE", source="admission"),
+        ]
+        result = merge_verdicts(verdicts)
+        assert isinstance(result, VerdictAdvance)
+
+    def test_empty_returns_continue(self):
+        from control.reasoning_state import merge_verdicts
+        result = merge_verdicts([])
+        assert isinstance(result, VerdictContinue)
+
+    def test_single_verdict_returned(self):
+        from control.reasoning_state import merge_verdicts
+        v = VerdictRedirect(to="ANALYZE", source="env_noise")
+        result = merge_verdicts([v])
+        assert result is v

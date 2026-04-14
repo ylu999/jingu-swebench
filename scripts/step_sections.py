@@ -538,7 +538,7 @@ def _step_cp_update_and_verdict(
                             f" → VerdictStop(repeated_patch)",
                             flush=True,
                         )
-                        _step_verdict = VerdictStop(reason="repeated_patch")
+                        _step_verdict = VerdictStop(reason="repeated_patch", source="repeated_patch")
                     elif _ph_count >= 2:
                         print(
                             f"    [p1-min] repeated_patch warning: hash={_ph}"
@@ -561,7 +561,7 @@ def _step_cp_update_and_verdict(
         from control.reasoning_state import _ADVANCE_TABLE as _adv_tbl
         _submission_next = _adv_tbl.get(_current_phase_str)
         if _submission_next is not None:
-            _step_verdict = VerdictAdvance(to=_submission_next)
+            _step_verdict = VerdictAdvance(to=_submission_next, source="admission", reason="submission_triggered")
             print(
                 f"    [admission-advance] submission-triggered:"
                 f" phase={_current_phase_str} to={_submission_next}",
@@ -581,9 +581,10 @@ def _step_cp_update_and_verdict(
             f" steps_without_submission={state._steps_without_submission}",
             flush=True,
         )
-        _step_verdict = VerdictContinue()
+        _step_verdict = VerdictContinue(source="default", reason="rc1_no_submission")
 
-    _verdict_to_log = f"step={_cp_s.step_index} verdict={_step_verdict.type}"
+    _verdict_source = getattr(_step_verdict, "source", "unknown")
+    _verdict_to_log = f"step={_cp_s.step_index} verdict={_step_verdict.type} source={_verdict_source}"
     if hasattr(_step_verdict, "to") and _step_verdict.to is not None:
         _verdict_to_log += f" to={_step_verdict.to}"
     if hasattr(_step_verdict, "reason") and _step_verdict.reason:
@@ -1064,7 +1065,7 @@ def _step_cp_update_and_verdict(
                         _cog_feedback = _build_cog_feedback(_cog_errors, _pr, _cog_loader)
                         _cognition_rejected = True
                         # Plan-A: no rollback needed — phase was never advanced
-                        _step_verdict = VerdictContinue(reason="cognition_validation_failed")
+                        _step_verdict = VerdictContinue(source="gate_rejection", reason="cognition_validation_failed")
                         _emit_decision(
                             state, decision_type="gate_verdict", step_n=_cp_s.step_index,
                             verdict="continue", reason="cognition_validation_failed",
