@@ -176,6 +176,17 @@ def forbidden_transition(from_phase: str, to_phase: str, subtype: str) -> GateFa
     )
 
 
+def get_repair_hint(failure: GateFailureCode, bundle: dict) -> str:
+    """Unified repair hint lookup: bundle repair_templates > empty.
+
+    Single source for all repair hints — replaces _FEEDBACK dict in principal_gate.py.
+    Priority:
+      1. Bundle repair_templates (keyed by gate_rule)
+      2. Empty string (caller provides its own fallback if needed)
+    """
+    return failure.repair_hint(bundle)
+
+
 def fake_principal(principal: str, phase: str, subtype: str) -> GateFailureCode:
     return GateFailureCode(
         category=GateFailureCategory.FAKE_PRINCIPAL,

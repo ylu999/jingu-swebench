@@ -60,36 +60,8 @@ except Exception:
         """Return required principals for phase (fallback static version)."""
         return PHASE_REQUIRED_PRINCIPALS.get(phase.upper(), [])
 
-# Human-readable feedback for each violation
-_FEEDBACK: dict[str, str] = {
-    "missing_causal_grounding": (
-        "Your analysis must identify a root cause with causal evidence. "
-        "Declare PRINCIPALS: causal_grounding"
-    ),
-    "missing_minimal_change": (
-        "Your patch must be scoped to the minimum change. "
-        "Declare PRINCIPALS: minimal_change"
-    ),
-    "missing_invariant_preservation": (
-        "Your judge output must verify an invariant was preserved. "
-        "Declare PRINCIPALS: invariant_preservation"
-    ),
-    "missing_result_verification": (
-        "Your judge output must verify the actual result. "
-        "Declare PRINCIPALS: result_verification"
-    ),
-    "missing_uncertainty_honesty": (
-        "Your judge output must express honest uncertainty. "
-        "Declare PRINCIPALS: uncertainty_honesty"
-    ),
-    # p23: structured output / causal binding
-    "missing_root_cause": (
-        "Your ANALYZE output must include a ROOT_CAUSE: section.\n"
-        "Format:\nROOT_CAUSE:\n<one specific root cause>\n\n"
-        "EVIDENCE:\n- file.py:line - what this shows\n\n"
-        "CAUSAL_CHAIN:\n<reasoning from evidence to root cause>"
-    ),
-}
+# Repair hints now unified via get_repair_hint() in gate_failure_code.py (EF-4).
+# _FEEDBACK dict deleted — bundle repair_templates is the single source of truth.
 
 
 def check_principal_gate(phase_record, phase: str) -> str | None:
@@ -196,12 +168,24 @@ def check_principal_inference(phase_record, phase: str) -> str | None:
         return None
 
 
-def get_principal_feedback(violation: str) -> str:
-    """Return human-readable feedback for a principal violation."""
-    return _FEEDBACK.get(
-        violation,
-        f"Principal violation: {violation}. Declare required principals for this phase.",
-    )
+def get_principal_feedback(violation: str, bundle: dict | None = None) -> str:
+    """Return human-readable feedback for a principal violation.
+
+    Uses get_repair_hint() from gate_failure_code if a GateFailureCode is available
+    via bundle lookup. Falls back to a generic message.
+    """
+    # Try bundle-based hint via gate_failure_code
+    if bundle and violation.startswith("missing_"):
+        principal = violation.replace("missing_", "", 1)
+        try:
+            from gate_failure_code import get_repair_hint, missing_principal
+            fc = missing_principal(principal, "", "")
+            hint = get_repair_hint(fc, bundle)
+            if hint:
+                return hint
+        except Exception:
+            pass
+    return f"Principal violation: {violation}. Declare required principals for this phase."
 
 
 # ── AdmissionResult (v0.4) ────────────────────────────────────────────────────
@@ -236,9 +220,8 @@ def _build_principal_contract(phase: str) -> ContractView:
     required = PHASE_REQUIRED_PRINCIPALS.get(phase.upper(), [])
     field_specs = {}
     for p in required:
-        feedback = _FEEDBACK.get(f"missing_{p}", f"Declare {p}")
         field_specs[p] = FieldSpec(
-            description=feedback,
+            description=f"Declare {p}",
             required=True,
             semantic_check="principal_declared",
         )
@@ -279,11 +262,10 @@ def _build_admission_rejection(
     for reason_code in reasons:
         if reason_code.startswith("missing_required_principal:"):
             principal = reason_code.split(":", 1)[1]
-            feedback = _FEEDBACK.get(f"missing_{principal}", f"Declare {principal}")
             failures.append(FieldFailure(
                 field=principal,
                 reason="principal_violation",
-                hint=feedback,
+                hint=f"Declare {principal}",
                 expected=f"Principal '{principal}' must be declared",
                 actual=None,
             ))
@@ -308,11 +290,10 @@ def _build_admission_rejection(
         elif reason_code.startswith("missing_"):
             # Generic missing field (e.g. missing_root_cause, missing_plan)
             field_name = reason_code.replace("missing_", "")
-            feedback = _FEEDBACK.get(reason_code, f"Provide {field_name}")
             failures.append(FieldFailure(
                 field=field_name,
                 reason="missing",
-                hint=feedback,
+                hint=f"Provide {field_name}",
                 expected=f"Non-empty {field_name}",
                 actual=None,
             ))
@@ -320,7 +301,7 @@ def _build_admission_rejection(
             failures.append(FieldFailure(
                 field="plan",
                 reason="semantic_fail",
-                hint=_FEEDBACK.get("plan_not_grounded_in_root_cause", "Ground plan in root cause"),
+                hint="Ground plan in root cause",
                 expected="Plan must reference the root cause from ANALYZE",
                 actual=getattr(phase_record, "plan", "")[:80] if hasattr(phase_record, "plan") else None,
             ))
