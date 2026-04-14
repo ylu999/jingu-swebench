@@ -86,72 +86,124 @@ class TransitionEvaluation:
     routing: "RoutingDecision | None" = None
 
 
-# ── Phase 4: Gate-level routing table ─────────────────────────────────────
-# Maps blocked reasons to routing decisions.
-# Format: reason_prefix -> (next_phase_fn, strategy, repair_hint)
-# next_phase_fn: callable(eval_phase) -> target phase, or None for "same phase"
+# ── Phase 4.5: Rejection Policy Table ─────────────────────────────────────
+# Single source of truth for all rejection → verdict escalation.
+#
+# Each entry maps a blocked_reason to a sequence of verdicts by occurrence:
+#   verdicts[0] = first rejection
+#   verdicts[1] = second rejection (if different from first)
+#   verdicts[-1] = final escalation (repeat for all subsequent)
+#
+# Verdict spec: (verdict_type, strategy_key, repair_hint)
+#   verdict_type: "retry" | "redirect" | "stop" | "force_advance"
+#   strategy_key: maps to strategy_prompts.py via get_strategy_prompt()
+#   repair_hint: injected into agent context
+#
+# "force_advance" = admit despite gate failure (tolerance exhaustion).
+# This replaces the scattered force_pass logic in _run_phase_gate.
 
-_GATE_ROUTING_TABLE: dict[str, dict] = {
+_REJECTION_POLICY: dict[str, dict] = {
     "missing_phase_record_retry": {
-        "next_phase": None,  # stay in current phase
-        "strategy": "submit_phase_record",
-        "repair_hint": "Call submit_phase_record with your findings before phase can advance.",
+        "verdicts": [
+            ("retry", "submit_phase_record", "Call submit_phase_record with your findings before phase can advance."),
+            ("retry", "submit_phase_record", "Call submit_phase_record with your findings before phase can advance."),
+            ("stop", "submit_phase_record", "Agent never submitted phase record after max retries."),
+        ],
     },
     "cognition_validation_failed": {
-        "next_phase": None,  # retry same phase
-        "strategy": "fix_cognition_errors",
-        "repair_hint": "Fix the validation errors reported and resubmit.",
+        "verdicts": [
+            ("retry", "fix_cognition_errors", "Fix the validation errors reported and resubmit."),
+            ("retry", "fix_cognition_errors", "Fix the validation errors reported and resubmit."),
+            ("stop", "fix_cognition_errors", "Cognition validation failed after max retries."),
+        ],
     },
     "analysis_gate_rejected": {
-        "next_phase": None,  # retry ANALYZE
-        "strategy": "complete_causal_chain",
-        "repair_hint": "Strengthen root cause, causal chain, or alternatives as indicated.",
+        "verdicts": [
+            ("retry", "complete_causal_chain", "Strengthen root cause, causal chain, or alternatives as indicated."),
+            ("retry", "complete_causal_chain", "Strengthen root cause, causal chain, or alternatives as indicated."),
+            ("stop", "rethink_root_cause", "Analysis gate exhausted — fail closed."),
+        ],
     },
     "design_gate_rejected": {
-        "next_phase": None,  # retry DESIGN
-        "strategy": "compare_alternatives",
-        "repair_hint": "Improve design comparison or constraint encoding as indicated.",
+        "verdicts": [
+            ("retry", "compare_alternatives", "Improve design comparison or constraint encoding as indicated."),
+            ("retry", "compare_alternatives", "Improve design comparison or constraint encoding as indicated."),
+            ("force_advance", "compare_alternatives", "Design gate tolerance exhausted — admitting."),
+        ],
     },
     "decide_gate_rejected": {
-        "next_phase": None,  # retry DECIDE
-        "strategy": "rethink_root_cause",
-        "repair_hint": "Strengthen decision rationale as indicated.",
+        "verdicts": [
+            ("retry", "rethink_root_cause", "Strengthen decision rationale as indicated."),
+            ("retry", "rethink_root_cause", "Strengthen decision rationale as indicated."),
+            ("force_advance", "rethink_root_cause", "Decide gate tolerance exhausted — admitting."),
+        ],
     },
     "execute_gate_rejected": {
-        "next_phase": None,  # retry EXECUTE
-        "strategy": "fix_execution_errors",
-        "repair_hint": "Fix the execution issues reported.",
+        "verdicts": [
+            ("retry", "fix_execution_errors", "Fix the execution issues reported."),
+            ("retry", "fix_execution_errors", "Fix the execution issues reported."),
+            ("force_advance", "fix_execution_errors", "Execute gate tolerance exhausted — admitting."),
+        ],
     },
     "judge_gate_rejected": {
-        "next_phase": None,  # retry JUDGE
-        "strategy": "verify_test_coverage",
-        "repair_hint": "Improve verification coverage as indicated.",
+        "verdicts": [
+            ("retry", "verify_test_coverage", "Improve verification coverage as indicated."),
+            ("retry", "verify_test_coverage", "Improve verification coverage as indicated."),
+            ("force_advance", "verify_test_coverage", "Judge gate tolerance exhausted — admitting."),
+        ],
+    },
+    "principal_gate_retryable": {
+        "verdicts": [
+            ("retry", "rethink_root_cause", "Fix principal violations as indicated."),
+            ("retry", "rethink_root_cause", "Fix principal violations as indicated."),
+            ("retry", "rethink_root_cause", "Fix principal violations as indicated."),
+            # escalation handled by principal_gate's own loop_count mechanism
+        ],
+    },
+    "fake_principal": {
+        "verdicts": [
+            ("retry", "gather_code_evidence", "Provide concrete evidence for declared principals."),
+            ("retry", "gather_code_evidence", "Provide concrete evidence for declared principals."),
+            ("retry", "gather_code_evidence", "Provide concrete evidence for declared principals."),
+            # escalation (selective bypass) handled by _FAKE_LOOP_LIMIT mechanism
+        ],
     },
 }
 
 
-def _route_blocked(eval_phase: str, reason: str) -> RoutingDecision:
-    """Phase 4: produce a typed RoutingDecision for a blocked transition.
+def lookup_rejection_policy(reason: str, occurrence: int) -> tuple[str, str, str]:
+    """Look up the verdict for a given rejection reason and occurrence count.
 
-    Looks up the gate routing table. Falls back to retry-same-phase.
+    Args:
+        reason: blocked reason (may contain ":" suffix — prefix is used for lookup)
+        occurrence: how many times this reason has been seen (0-based)
+
+    Returns:
+        (verdict_type, strategy_key, repair_hint)
+        Falls back to ("retry", "rethink_root_cause", "") for unknown reasons.
     """
-    # Strip suffix for parametric reasons (e.g. "principal_gate_retryable:missing_required")
     _reason_key = reason.split(":")[0] if ":" in reason else reason
-    entry = _GATE_ROUTING_TABLE.get(_reason_key)
-    if entry:
-        _target = entry["next_phase"] or eval_phase
-        return RoutingDecision(
-            next_phase=_target,
-            strategy=entry["strategy"],
-            repair_hints=[entry["repair_hint"]],
-            source="gate_route",
-        )
-    # Default: retry same phase
+    entry = _REJECTION_POLICY.get(_reason_key)
+    if not entry:
+        return ("retry", "rethink_root_cause", "")
+    verdicts = entry["verdicts"]
+    # Clamp to last entry for occurrences beyond the list
+    idx = min(occurrence, len(verdicts) - 1)
+    return verdicts[idx]
+
+
+def _route_blocked(eval_phase: str, reason: str, occurrence: int = 0) -> RoutingDecision:
+    """Phase 4.5: produce a typed RoutingDecision for a blocked transition.
+
+    Consults _REJECTION_POLICY for strategy and repair hint.
+    RoutingDecision is telemetry-only — verdict is set by the caller.
+    """
+    _verdict_type, _strategy, _hint = lookup_rejection_policy(reason, occurrence)
     return RoutingDecision(
         next_phase=eval_phase,
-        strategy="rethink_root_cause",
-        repair_hints=[],
-        source="gate_route_default",
+        strategy=_strategy,
+        repair_hints=[_hint] if _hint else [],
+        source="rejection_policy",
     )
 
 
@@ -560,7 +612,7 @@ def evaluate_transition(
     # Gate 4-8: Phase-specific gates
     # ══════════════════════════════════════════════════════════════════
 
-    # Helper: run a phase gate with standard reject/force_pass/retry pattern
+    # Helper: run a phase gate with policy-driven escalation
     def _run_phase_gate(
         gate_name: str,
         eval_fn,
@@ -569,7 +621,12 @@ def evaluate_transition(
         reject_counter_attr: str,
         phase_label: str,
     ) -> tuple[bool, bool]:  # (rejected, force_passed)
-        """Run a phase-specific gate. Returns (rejected, force_passed)."""
+        """Run a phase-specific gate. Returns (rejected, force_passed).
+
+        Phase 4.5: escalation behavior is driven by _REJECTION_POLICY.
+        max_rejects is still the threshold count; the policy table determines
+        what happens when that count is reached (stop vs force_advance).
+        """
         try:
             _gate_verdict = eval_fn(**eval_args)
             _reject_count = getattr(state, reject_counter_attr, 0)
@@ -581,8 +638,12 @@ def evaluate_transition(
                 flush=True,
             )
             if not _gate_verdict.passed and _reject_count >= max_rejects:
-                # ANALYZE gate: fail-closed STOP (not force-pass)
-                if gate_name == "analysis_gate":
+                # Phase 4.5: consult policy for escalation verdict
+                _reason_key = f"{phase_label.lower()}_gate_rejected"
+                _esc_verdict, _esc_strategy, _esc_hint = lookup_rejection_policy(
+                    _reason_key, _reject_count
+                )
+                if _esc_verdict == "stop":
                     _missing_rules = _gate_verdict.failed_rules or []
                     _emit_limit_triggered(
                         state, step_n=_cp_s.step_index,
@@ -596,20 +657,24 @@ def evaluate_transition(
                         f"    [{gate_name}] ADMISSION EXHAUSTED:"
                         f" rejects={_reject_count}/{max_rejects}"
                         f" failed_rules={_missing_rules}"
-                        f" → fail-closed STOP",
+                        f" → fail-closed STOP (policy)",
                         flush=True,
                     )
                     result.verdict = "stop"
                     result.stop_reason = f"admission_gate_exhausted_{phase_label.lower()}"
                     result.source = "gate_rejection"
                     return (True, False)
-                else:
-                    print(f"    [{gate_name}] FORCE_PASS — max_rejects={max_rejects} reached, allowing advance", flush=True)
+                elif _esc_verdict == "force_advance":
+                    print(
+                        f"    [{gate_name}] FORCE_ADVANCE — max_rejects={max_rejects}"
+                        f" reached, policy={_esc_strategy}, allowing advance",
+                        flush=True,
+                    )
                     _emit_limit_triggered(
                         state, step_n=_cp_s.step_index,
-                        limit_name=f"{gate_name}_force_pass",
+                        limit_name=f"{gate_name}_force_advance",
                         configured_value=max_rejects, actual_value=_reject_count,
-                        action_taken="force_pass", source_file="step_sections.py", source_line=0,
+                        action_taken="force_advance", source_file="step_sections.py", source_line=0,
                         reason=f"failed_rules={_gate_verdict.failed_rules} scores={_gate_verdict.scores}",
                     )
                     return (False, True)

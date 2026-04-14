@@ -167,6 +167,26 @@ STRATEGY_PROMPTS: dict[str, str] = {
         "3. Do not present hypotheses as facts\n"
         "4. Prioritize investigating the most uncertain assumptions first"
     ),
+
+    "submit_phase_record": (
+        "[ROUTING: SUBMIT PHASE RECORD]\n"
+        "You must call submit_phase_record before the phase can advance.\n"
+        "Requirements:\n"
+        "1. Summarize your findings for the current phase\n"
+        "2. Call submit_phase_record with the structured JSON output\n"
+        "3. Include all required fields for this phase\n"
+        "4. Do NOT skip this step — the system cannot advance without it"
+    ),
+
+    "fix_cognition_errors": (
+        "[ROUTING: FIX COGNITION ERRORS]\n"
+        "Your phase record failed schema validation.\n"
+        "Requirements:\n"
+        "1. Check the error messages above for specific field violations\n"
+        "2. Fix the identified fields in your phase record\n"
+        "3. Resubmit with corrected values\n"
+        "4. Ensure all required fields are present and non-empty"
+    ),
 }
 
 
