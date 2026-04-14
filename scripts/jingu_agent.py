@@ -2213,6 +2213,31 @@ class JinguAgent:
                             if _approach_summary:
                                 _past_approach_summaries.append(_approach_summary)
                             last_failure = retry_plan.next_attempt_prompt[:600]
+                            # Decision Quality v1: prediction error feedback
+                            try:
+                                from prediction_feedback import compute_prediction_error, build_prediction_error_hint
+                                _decide_rec = next(
+                                    (r for r in (jingu_body or {}).get("phase_records", [])
+                                     if r.get("phase") == "DECIDE"),
+                                    None,
+                                )
+                                if _decide_rec and _decide_rec.get("testable_hypothesis"):
+                                    _cv = (jingu_body or {}).get("controlled_verify", {})
+                                    _pred_err = compute_prediction_error(
+                                        _decide_rec, _cv,
+                                        actual_files_changed=fp.get("files", []) if fp else [],
+                                    )
+                                    _pred_hint = build_prediction_error_hint(_pred_err, _decide_rec)
+                                    if _pred_hint:
+                                        last_failure = _pred_hint + "\n\n" + last_failure
+                                    print(f"    [prediction-error] score={_pred_err['score']:.2f} "
+                                          f"type={_pred_err['error_type']} "
+                                          f"hit={_pred_err['pass_hit']:.2f} "
+                                          f"miss={_pred_err['pass_miss']:.2f}")
+                            except ImportError:
+                                pass  # prediction_feedback module not yet available
+                            except Exception as _pe_exc:
+                                print(f"    [prediction-error] error (non-fatal): {_pe_exc}")
                             _jb_ft = (jingu_body or {}).get("failure_type")
                             _jb_routing = (jingu_body or {}).get("failure_routing")
                             _jb_cv = (jingu_body or {}).get("controlled_verify") or {}

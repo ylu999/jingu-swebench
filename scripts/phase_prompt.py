@@ -81,8 +81,14 @@ _DECIDE_GUIDANCE = (
     "- Option 2: <approach> — pros: ... cons: ...\n\n"
     "SELECTED:\n<which option and why>\n\n"
     "CONSTRAINTS:\n<what must NOT break — existing tests, API contracts, etc.>\n\n"
+    "PREDICTION (MANDATORY):\n"
+    "- testable_hypothesis: If we <do X>, then <tests Y> will pass because <Z>\n"
+    "- expected_tests_to_pass: <up to 5 test names from FAIL_TO_PASS>\n"
+    "- expected_files_to_change: <file paths your fix will modify>\n"
+    "- risk_level: low | medium | high\n\n"
     "Rules: You MUST list at least 2 options with tradeoffs. "
     "SELECTED must reference a specific option. Do NOT start coding yet.\n"
+    "Your predictions will be compared against actual test results.\n"
     + _DECIDE_PRINCIPAL
 )
 
