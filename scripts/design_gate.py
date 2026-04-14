@@ -11,7 +11,6 @@ Events are system-generated facts, never LLM self-descriptions.
 Every field must be derived from system state, not from LLM output.
 """
 
-import re
 from dataclasses import dataclass, field
 from phase_record import PhaseRecord
 from gate_rejection import GateRejection
@@ -43,148 +42,84 @@ class DesignVerdict:
     rejection: GateRejection | None = None
 
 
-# ── Rule 1: Invariant Preservation ──────────────────────────────────────────
-
-# Signals that the design references a specific invariant to preserve
-_INVARIANT_PRESERVATION_SIGNALS = {
-    "invariant_stated": re.compile(
-        r'(?:must|should|need\s+to)\s+(?:preserve|maintain|keep|ensure|enforce)\s+'
-        r'(?:the\s+)?(?:invariant|constraint|rule|property|guarantee)',
-        re.I,
-    ),
-    "delimiter_referenced": re.compile(
-        r'(?:delimiter|separator|boundary|special\s+char)',
-        re.I,
-    ),
-    "forbidden_chars": re.compile(
-        r'(?:must\s+not|cannot|should\s+not|forbidden|disallow|reject|exclude)\s+'
-        r'(?:contain|allow|accept|include|permit)',
-        re.I,
-    ),
-}
+# ── Rule 1: Invariant Preservation (structural) ─────────────────────────────
 
 
 def _check_invariant_preservation(pr: PhaseRecord, analysis_records: list[PhaseRecord] | None = None) -> float:
     """
-    Check that design references the invariant identified in analysis.
+    Check that design references invariants to preserve.
+
+    Structural check: looks for a non-empty `invariants` list with
+    substantive entries (len > 5 after strip).
 
     Score:
-      0.0 = no invariant reference in design
-      0.5 = mentions invariant vaguely (1 signal)
-      1.0 = explicit invariant preservation statement (2+ signals)
+      0.0 = no invariants field or empty
+      1.0 = at least one substantive invariant present
     """
-    text = (pr.content or "") + " " + (pr.root_cause or "")
-    if not text.strip():
-        return 0.0
-
-    matched = sum(1 for p in _INVARIANT_PRESERVATION_SIGNALS.values() if p.search(text))
-
-    if matched >= 2:
+    invariants = getattr(pr, 'invariants', None) or []
+    substantive = [inv for inv in invariants if isinstance(inv, str) and len(inv.strip()) > 5]
+    if len(substantive) >= 1:
         return 1.0
-    elif matched >= 1:
-        return 0.5
-    else:
-        return 0.0
+    return 0.0
 
 
-# ── Rule 2: Design Comparison ──────────────────────────────────────────────
-
-_COMPARISON_SIGNALS = {
-    "alternative_approach": re.compile(
-        r'(?:alternative|another\s+approach|option\s+\d|approach\s+\d|'
-        r'(?:first|second)\s+(?:approach|option|strategy))',
-        re.I,
-    ),
-    "comparison_language": re.compile(
-        r'(?:(?:instead\s+of|rather\s+than|compared\s+to|versus|vs\.?)\s+'
-        r'|(?:pros?\s+and\s+cons?|tradeoff|trade-off))',
-        re.I,
-    ),
-    "design_choice": re.compile(
-        r'(?:allowlist|whitelist|blocklist|blacklist|exclusion|inclusion|'
-        r'deny\s*list|permit\s*list|positive\s+match|negative\s+match)',
-        re.I,
-    ),
-}
+# ── Rule 2: Design Comparison (structural) ───────────────────────────────────
 
 
 def _check_design_comparison(pr: PhaseRecord) -> float:
     """
     Check that design compares at least 2 approaches.
 
+    Structural check: looks for a `design_comparison` dict with an
+    `options` list containing substantive entries (name + pros or cons).
+
     Score:
-      0.0 = single approach, no alternatives
-      0.5 = mentions alternatives vaguely (1 signal)
-      1.0 = explicit comparison of 2+ approaches (2+ signals)
+      0.0 = no design_comparison or no substantive options
+      0.5 = 1 substantive option
+      1.0 = 2+ substantive options
     """
-    text = (pr.content or "")
-    if not text.strip():
+    comparison = getattr(pr, 'design_comparison', None) or {}
+    if not isinstance(comparison, dict):
         return 0.0
-
-    matched = sum(1 for p in _COMPARISON_SIGNALS.values() if p.search(text))
-
-    if matched >= 2:
+    options = comparison.get('options') or []
+    substantive = [
+        a for a in options
+        if isinstance(a, dict) and a.get('name') and (a.get('pros') or a.get('cons'))
+    ]
+    if len(substantive) >= 2:
         return 1.0
-    elif matched >= 1:
+    elif len(substantive) >= 1:
         return 0.5
-    else:
-        return 0.0
+    return 0.0
 
 
-# ── Rule 3: Constraint Encoding ────────────────────────────────────────────
-
-_ALLOWLIST_INDICATORS = re.compile(
-    r'(?:allowlist|whitelist|permitted\s+characters?|'
-    r'valid\s+characters?|accepted\s+characters?|'
-    r'\[a-zA-Z|\\w\+|[a-z]\+)',
-    re.I,
-)
-
-_COMPLETENESS_SIGNALS = {
-    "justification": re.compile(
-        r'(?:because|since|this\s+covers?|this\s+includes?|'
-        r'complete\s+(?:set|list|coverage)|all\s+(?:valid|allowed|permitted))',
-        re.I,
-    ),
-    "test_verification": re.compile(
-        r'(?:test\s+case|verified?\s+(?:against|with|by)|'
-        r'pass(?:es|ing)?\s+(?:all|both|every)|'
-        r'fail(?:s|ing)?\s+(?:for|on|with))',
-        re.I,
-    ),
-}
+# ── Rule 3: Constraint Encoding (structural) ─────────────────────────────────
 
 
 def _check_constraint_encoding(pr: PhaseRecord) -> float:
     """
     Check that if design uses allowlist approach, completeness is justified.
 
-    If no allowlist detected: returns 1.0 (rule not applicable).
-    If allowlist detected without justification: returns 0.0.
-    If allowlist detected with justification: returns 1.0.
+    Structural check: looks at `scope_boundary` for allowlist indicators,
+    then checks that `invariants` has at least one substantive entry.
 
     Score:
-      1.0 = no allowlist (rule N/A) OR allowlist with completeness justification
-      0.5 = allowlist with partial justification (1 signal)
-      0.0 = allowlist without any completeness justification
+      1.0 = no scope_boundary (rule N/A)
+      1.0 = scope_boundary without allowlist indicator (rule N/A)
+      1.0 = allowlist with substantive invariant justification
+      0.0 = allowlist without substantive invariant justification
     """
-    text = (pr.content or "")
-    if not text.strip():
-        return 1.0  # no content = rule not applicable
-
-    # Check if design uses allowlist approach
-    if not _ALLOWLIST_INDICATORS.search(text):
-        return 1.0  # no allowlist detected, rule not applicable
-
-    # Allowlist detected — check for completeness justification
-    matched = sum(1 for p in _COMPLETENESS_SIGNALS.values() if p.search(text))
-
-    if matched >= 2:
+    scope = getattr(pr, 'scope_boundary', '') or ''
+    if not scope.strip():
+        return 1.0  # no scope = rule N/A
+    allowlist_terms = ('allowlist', 'whitelist', 'permitted characters', 'valid characters')
+    is_allowlist = any(term in scope.lower() for term in allowlist_terms)
+    if not is_allowlist:
+        return 1.0  # no allowlist = rule N/A
+    invariants = getattr(pr, 'invariants', None) or []
+    if len(invariants) >= 1 and any(len(inv.strip()) > 10 for inv in invariants if isinstance(inv, str)):
         return 1.0
-    elif matched >= 1:
-        return 0.5
-    else:
-        return 0.0
+    return 0.0
 
 
 # ── Main evaluation function (soft quality signal — no rejection) ─────────
