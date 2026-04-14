@@ -1,13 +1,11 @@
 """
-design_gate.py — Design quality enforcement for ANALYZE→EXECUTE transition.
+design_gate.py — Design quality enforcement for ANALYZE->EXECUTE transition.
 
 Evaluates whether the agent's design meets minimum quality thresholds
 before allowing advance to EXECUTE. Targets constraint_encoding_failure.
 
-Three rules:
-1. Invariant preservation: design states what invariant must hold
-2. Design comparison: at least 2 approaches compared (allowlist vs exclusion etc.)
-3. Constraint encoding: if allowlist detected, must justify completeness
+Contract source of truth: cognition_contracts/design_solution_shape.py
+Gate rules and field specs are defined there; this file implements scoring.
 
 Events are system-generated facts, never LLM self-descriptions.
 Every field must be derived from system state, not from LLM output.
@@ -17,6 +15,22 @@ import re
 from dataclasses import dataclass, field
 from phase_record import PhaseRecord
 from gate_rejection import GateRejection
+
+# ── Contract-derived references ──────────────────────────────────────────────
+# Gate rules and repair hints originate from the canonical contract.
+# design_gate scoring functions implement the checks; the contract defines
+# which fields they target and what repair hint to emit on failure.
+try:
+    from cognition_contracts.design_solution_shape import (
+        GATE_RULES as _CONTRACT_GATE_RULES,
+        GATE_RULE_MAP as _CONTRACT_RULE_MAP,
+        GATE_THRESHOLD as _CONTRACT_THRESHOLD,
+    )
+except ImportError:
+    # Fallback: contract module not yet on PYTHONPATH — degrade gracefully.
+    _CONTRACT_GATE_RULES = []
+    _CONTRACT_RULE_MAP = {}
+    _CONTRACT_THRESHOLD = 0.5
 
 
 @dataclass

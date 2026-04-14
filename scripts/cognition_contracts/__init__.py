@@ -11,4 +11,5 @@ from cognition_contracts._base import (  # noqa: F401
     validate_contract_definition,
 )
 from cognition_contracts import analysis_root_cause as analysis_root_cause  # noqa: F401
+from cognition_contracts import design_solution_shape as design_solution_shape  # noqa: F401
 from cognition_contracts import implementation_governance as implementation_governance  # noqa: F401
