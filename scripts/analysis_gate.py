@@ -108,57 +108,22 @@ def _check_code_grounding(pr: PhaseRecord) -> float:
 
 # ── Rule 2: Alternative Hypothesis ───────────────────────────────────────────
 
-# Structural markers indicating hypothesis enumeration.
-# These are NOT surface keyword checks — they indicate the agent structured
-# its reasoning into multiple distinct hypotheses.
-_HYPOTHESIS_MARKERS = [
-    # Explicit hypothesis labeling
-    r'hypothesis\s*[:#\d]',
-    r'possibility\s*[:#\d]',
-    # Numbered/lettered alternatives
-    r'(?:^|\n)\s*(?:\d+[\.\):]|[a-c][\.\):])\s+',
-    # Explicit alternative framing
-    r'alternative(?:\s+\w+){0,3}\s*:',
-    r'another\s+(?:possible|potential|likely)\s+(?:cause|reason|explanation)',
-    # Rejection reasoning (evidence of multi-hypothesis analysis)
-    r'(?:ruled?\s+out|eliminated?|less\s+likely|unlikely)\s+because',
-    r'(?:however|but)\s+(?:this|that)\s+(?:doesn\'t|does not|cannot|can\'t)\s+explain',
-]
-_HYPOTHESIS_PATTERNS = [re.compile(p, re.IGNORECASE | re.MULTILINE) for p in _HYPOTHESIS_MARKERS]
-
-
 def _check_alternative_hypothesis(pr: PhaseRecord) -> float:
-    """
-    Check that analysis considers multiple hypotheses.
-
-    Primary signal: structural markers in pr.content indicating multiple
-    distinct hypotheses with rejection reasoning for non-chosen ones.
-
-    Score:
-      0.0 = single assertion, no alternatives
-      0.5 = mentions alternatives vaguely (1-2 markers)
-      1.0 = 2+ distinct hypotheses with rejection reasoning (3+ markers)
-    """
-    text = pr.content or ""
-    if not text:
+    """Read pr.alternative_hypotheses (structured array from bundle schema)."""
+    hypotheses = getattr(pr, 'alternative_hypotheses', None) or []
+    if not hypotheses:
         return 0.0
-
-    # Also check root_cause — sometimes hypothesis comparison is there
-    full_text = text
-    if pr.root_cause:
-        full_text = text + " " + pr.root_cause
-
-    matched_patterns = 0
-    for pattern in _HYPOTHESIS_PATTERNS:
-        if pattern.search(full_text):
-            matched_patterns += 1
-
-    if matched_patterns >= 3:
+    substantive = [
+        h for h in hypotheses
+        if isinstance(h, dict)
+        and len((h.get('hypothesis') or '').strip()) > 5
+        and len((h.get('ruled_out_reason') or '').strip()) > 5
+    ]
+    if len(substantive) >= 2:
         return 1.0
-    elif matched_patterns >= 1:
+    elif len(substantive) >= 1:
         return 0.5
-    else:
-        return 0.0
+    return 0.0
 
 
 # ── Rule 3: Causal Chain ─────────────────────────────────────────────────────
@@ -212,50 +177,6 @@ _PARSING_DOMAIN_SIGNALS = re.compile(
     r'|validator\s+pattern|pattern\s+match(?:ing|er|es)?|re\.compile|regexp)\b',
     re.IGNORECASE,
 )
-
-# Generalized invariant signals (apply to ALL bug types):
-# Any of these indicates the agent identified what must be preserved.
-_INVARIANT_SIGNALS_GENERAL = {
-    # Preserved behavior / contract
-    "preserved_behavior": re.compile(
-        r'(?:must\s+(?:still|continue\s+to|remain|preserve|maintain|keep)'
-        r'|(?:preserve|maintain|keep)\s+(?:existing|current|original|backward)'
-        r'|unchanged|invariant|contract|guarantee'
-        r'|non.?regression|compatibility)',
-        re.IGNORECASE,
-    ),
-    # Forbidden behavior (what must NOT happen)
-    "forbidden_behavior": re.compile(
-        r'(?:must\s+not|cannot|should\s+not|forbidden|disallow|reject|prevent|block)'
-        r'\s+(?:contain|allow|accept|appear|pass|return|produce|create|generate)',
-        re.IGNORECASE,
-    ),
-    # Boundary / constraint (domain-general)
-    "boundary_constraint": re.compile(
-        r'(?:boundary|constraint|limitation|restriction|precondition|postcondition'
-        r'|edge\s+case|corner\s+case|valid\s+range|invalid\s+input'
-        r'|type\s+(?:check|error|constraint)|assertion)',
-        re.IGNORECASE,
-    ),
-    # Specific code structural signal (decorator, cache, override, etc.)
-    "code_structural": re.compile(
-        r'(?:cache[_.]clear|lru_cache|decorator|override|super\(\)|__init__'
-        r'|migration|backward|forward|schema|interface|signature|call\s+site'
-        r'|caller|import)',
-        re.IGNORECASE,
-    ),
-}
-
-# Parsing-domain-specific signals (strict — original behavior)
-_INVARIANT_SIGNALS_PARSING = {
-    "delimiter": re.compile(r'delimiter|separator|boundary\s+character', re.I),
-    "forbidden_char": re.compile(
-        r'(?:must\s+not|cannot|should\s+not|forbidden|disallow)\s+(?:contain|allow|accept|appear)',
-        re.I,
-    ),
-    "structural_role": re.compile(r'(?:structural|parsing|syntactic)\s+(?:role|meaning|significance|boundary)', re.I),
-    "specific_char": re.compile(r'[`\'"]\s*[:@/\\#]\s*[`\'"]', re.I),
-}
 
 
 def _is_parsing_domain(pr: PhaseRecord) -> bool:
