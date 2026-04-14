@@ -274,6 +274,10 @@ def build_phase_record_from_structured(
         root_cause=parsed.get("root_cause", ""),
         causal_chain=parsed.get("causal_chain", ""),
         plan=parsed.get("plan", ""),
+        testable_hypothesis=parsed.get("testable_hypothesis", ""),
+        expected_tests_to_pass=parsed.get("expected_tests_to_pass", [])[:5],
+        expected_files_to_change=parsed.get("expected_files_to_change", []),
+        risk_level=parsed.get("risk_level", ""),
     )
 
 

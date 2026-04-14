@@ -31,6 +31,11 @@ class PhaseRecord:
     root_cause: str = ""                # ANALYZE: ROOT_CAUSE: section (required for analysis.root_cause)
     causal_chain: str = ""              # ANALYZE: CAUSAL_CHAIN: section
     plan: str = ""                      # EXECUTE: PLAN: section (must reference root_cause)
+    # DECIDE: prediction fields (decision quality upgrade)
+    testable_hypothesis: str = ""           # DECIDE: "If X then Y because Z"
+    expected_tests_to_pass: list[str] = field(default_factory=list)  # DECIDE: predicted passing tests
+    expected_files_to_change: list[str] = field(default_factory=list)  # DECIDE: predicted changed files
+    risk_level: str = ""                    # DECIDE: "low"/"medium"/"high"
 
     def as_dict(self) -> dict:
         """Serialise to a plain dict for JSON output."""
@@ -47,4 +52,12 @@ class PhaseRecord:
             d["root_cause"] = self.root_cause[:200]
         if self.plan:
             d["plan"] = self.plan[:200]
+        if self.testable_hypothesis:
+            d["testable_hypothesis"] = self.testable_hypothesis
+        if self.expected_tests_to_pass:
+            d["expected_tests_to_pass"] = self.expected_tests_to_pass[:5]
+        if self.expected_files_to_change:
+            d["expected_files_to_change"] = self.expected_files_to_change
+        if self.risk_level:
+            d["risk_level"] = self.risk_level
         return d

@@ -251,7 +251,7 @@ ANALYZE_RECORD_SCHEMA: dict[str, Any] = {
     "required": list(_arc.SCHEMA_REQUIRED) + ["content"],
 }
 
-# DECIDE phase: fix direction selection
+# DECIDE phase: fix direction selection (with prediction fields for decision quality v1)
 DECIDE_RECORD_SCHEMA: dict[str, Any] = {
     **PHASE_RECORD_BASE_SCHEMA,
     "properties": {
@@ -266,8 +266,28 @@ DECIDE_RECORD_SCHEMA: dict[str, Any] = {
             "enum": ["decision.fix_direction"],
             "description": "Decision subtype.",
         },
+        "expected_tests_to_pass": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Test names you predict will pass after your fix (max 5).",
+            "maxItems": 5,
+        },
+        "expected_files_to_change": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "File paths your fix will modify.",
+        },
+        "testable_hypothesis": {
+            "type": "string",
+            "description": "If we do X, then tests Y will pass because Z.",
+        },
+        "risk_level": {
+            "type": "string",
+            "enum": ["low", "medium", "high"],
+            "description": "Risk of regression: low=isolated change, medium=touches shared code, high=modifies core invariants.",
+        },
     },
-    "required": ["phase", "subtype", "principals", "content"],
+    "required": ["phase", "subtype", "principals", "content", "testable_hypothesis"],
 }
 
 # DESIGN phase: solution shape
