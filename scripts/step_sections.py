@@ -418,13 +418,15 @@ def evaluate_transition(
 ) -> TransitionEvaluation:
     """Phase 3: sole transition authority.
 
-    Runs ALL pre-transition gates in sequence:
-      1. Phase Record Acquisition (Plan-B STRONG)
-      2. Phase Completion Gate (hard block if no admitted record)
-      3. Cognition Validation
-      4. Phase-specific gates (analysis, design, decide, execute, judge)
-      5. Principal Gate
-      6. Principal Inference
+    P0.1 cleanup: evaluate_transition() no longer acquires or validates records.
+    Records are admitted at submit time by admit_phase_record().
+    This function consumes the pre-admitted record and runs:
+      1. Pre-admitted record lookup (from state.phase_records)
+      2. Phase Completion Gate (defensive assertion — should not fire post-admission)
+      3. Phase-specific gates (analysis, design, decide, execute, judge)
+      4. Principal Gate
+      5. Principal Inference
+      6. Diagnostic extraction (telemetry only)
 
     Returns TransitionEvaluation — the advance handler ONLY consumes this,
     never re-evaluates gates.
@@ -433,76 +435,38 @@ def evaluate_transition(
     result = TransitionEvaluation()
 
     # ══════════════════════════════════════════════════════════════════
-    # P0.1: Check if record was already admitted at submit time
-    # If so, skip Gates 1-3 entirely.
+    # Step 1: Lookup pre-admitted record from state.phase_records
+    # Records are admitted by admit_phase_record() at submit time.
+    # This is the ONLY acquisition path — no legacy pop/build/append.
     # ══════════════════════════════════════════════════════════════════
-    _already_admitted = False
+    _pr = None
+    _pr_source = "none"
+    _pr_foreign_phase = ""
+    _diagnostic_pr = None
     for _existing in reversed(state.phase_records):
         if hasattr(_existing, 'phase') and _existing.phase.upper() == eval_phase:
             _pr = _existing
             _pr_source = "pre_admitted"
-            _already_admitted = True
-            print(
-                f"    [evaluate_transition] using pre-admitted record"
-                f" phase={eval_phase} source=pre_admitted",
-                flush=True,
-            )
             break
 
-    # ══════════════════════════════════════════════════════════════════
-    # Gate 1: Phase Record Acquisition (Plan-B STRONG)
-    # P0.1: If already admitted at submit time, _pr/_pr_source are set
-    # from the pre-admitted check above. Gate 1's pop will return None
-    # (already consumed by admit_phase_record), so _tool_submitted stays
-    # None and the tool_submitted branch is skipped. _pr remains set.
-    # Gate 2 sees _pr is not None → passes. Gate 3 re-validates (safe).
-    # ══════════════════════════════════════════════════════════════════
-    if not _already_admitted:
-        _pr = None
-        _pr_source = "none"
-    _pr_foreign_phase = ""
-    _diagnostic_pr = None
+    if _pr is not None:
+        print(
+            f"    [evaluate_transition] phase={eval_phase}"
+            f" record_phase={_pr.phase} source=pre_admitted"
+            f" subtype={_pr.subtype} principals={_pr.principals}",
+            flush=True,
+        )
+    else:
+        print(
+            f"    [evaluate_transition] phase={eval_phase}"
+            f" source=none — no pre-admitted record found"
+            f" ASSERTION_FAILURE=should_not_happen_post_admission",
+            flush=True,
+        )
+
+    # Diagnostic extraction (telemetry ONLY, never admission)
+    _model = getattr(agent_self, "model", None)
     try:
-        _model = getattr(agent_self, "model", None)
-        _tool_submitted = None
-        if _model is not None and hasattr(_model, "pop_submitted_phase_record"):
-            _tool_submitted = _model.pop_submitted_phase_record()
-
-        if _tool_submitted is not None:
-            _pr = build_phase_record_from_structured(
-                _tool_submitted, str(old_phase)
-            )
-            state.phase_records.append(_pr)
-            _pr_source = "tool_submitted"
-            if hasattr(state, "_extraction_tool_submitted"):
-                state._extraction_tool_submitted += 1
-            _declared_phase = (_tool_submitted.get("phase") or "").upper()
-            _foreign = bool(_declared_phase and _declared_phase != eval_phase)
-            print(
-                f"    [phase_record] extraction_method=tool_submitted"
-                f" fields={list(_tool_submitted.keys())}"
-                f" admitted=true",
-                flush=True,
-            )
-            if _foreign:
-                _pr_foreign_phase = _declared_phase
-                _PHASE_ORDER = ["UNDERSTAND", "OBSERVE", "ANALYZE", "DECIDE", "DESIGN", "EXECUTE", "JUDGE"]
-                try:
-                    _eval_idx = _PHASE_ORDER.index(eval_phase)
-                    _decl_idx = _PHASE_ORDER.index(_declared_phase)
-                    _align = "declared_ahead" if _decl_idx > _eval_idx else "declared_behind"
-                    _align_delta = _decl_idx - _eval_idx
-                except (ValueError, AttributeError):
-                    _align = "unknown_phase"
-                    _align_delta = 0
-                print(
-                    f"    [phase_record] foreign_phase_declared:"
-                    f" eval_phase={eval_phase} declared_phase={_declared_phase}"
-                    f" alignment={_align} delta={_align_delta}",
-                    flush=True,
-                )
-
-        # Diagnostic extraction (telemetry ONLY, never admission)
         _accumulated = state._phase_accumulated_text.get(eval_phase, "")
         _extract_text = _accumulated if _accumulated.strip() else latest_assistant_text
         _structured_parsed = None
@@ -605,7 +569,7 @@ def evaluate_transition(
                 state.diagnostic_phase_records = []
             state.diagnostic_phase_records.append(_diagnostic_pr)
 
-        # C-09: Parallel extract_phase_output() for unified telemetry
+        # C-09: extraction telemetry (uses diagnostic data, not admission data)
         try:
             _schema_fields: list[str] = []
             if _extraction_schema is not None:
@@ -613,7 +577,7 @@ def evaluate_transition(
                 _schema_fields = [k for k in _schema_props if k not in ("phase", "subtype")]
 
             _epo_record, _epo_meta = extract_phase_output(
-                tool_submitted=_tool_submitted,
+                tool_submitted=None,  # already consumed by admission
                 structured_parsed=_structured_parsed,
                 agent_message=_extract_text,
                 phase=str(old_phase),
@@ -640,196 +604,39 @@ def evaluate_transition(
         except Exception as _epo_exc:
             print(f"    [extraction] telemetry error (non-fatal): {_epo_exc}", flush=True)
 
-        # Log summary
-        if _pr is not None:
-            print(
-                f"    [phase_record] eval_phase={eval_phase}"
-                f" record_phase={_pr.phase} source={_pr_source}"
-                f" subtype={_pr.subtype} principals={_pr.principals}"
-                f" evidence_refs={_pr.evidence_refs}"
-                f" admitted=true",
-                flush=True,
-            )
-        else:
-            print(
-                f"    [phase_record] eval_phase={eval_phase}"
-                f" source=none admitted=false"
-                f" diagnostic_available={_diagnostic_pr is not None}"
-                f" PROTOCOL_VIOLATION=missing_phase_record",
-                flush=True,
-            )
-
-    except Exception as _pr_exc:
-        print(f"    [phase_record] error (non-fatal): {_pr_exc}", flush=True)
+    except Exception as _diag_exc:
+        print(f"    [diagnostic] error (non-fatal): {_diag_exc}", flush=True)
 
     # ══════════════════════════════════════════════════════════════════
-    # Gate 2: Phase Completion Gate — HARD BLOCK
+    # Gate 2: Phase Completion — defensive assertion
+    # P0.1: Records are admitted at submit time. If evaluate_transition()
+    # is called, admission should have already succeeded. This gate is
+    # now a defensive assertion, not an active acquisition retry loop.
     # ══════════════════════════════════════════════════════════════════
-    _MAX_SUBMISSION_RETRIES = 2
-    _extraction_gated = False
     if _pr is None:
-        _extraction_gated = True
-        _ext_key = eval_phase
-        _ext_retries = state.extraction_retry_counts.get(_ext_key, 0)
-        state.extraction_retry_counts[_ext_key] = _ext_retries + 1
-
-        _sub_failure = None
-        _model_ref = getattr(agent_self, "model", None)
-        if _model_ref is not None and hasattr(_model_ref, "pop_submission_failure"):
-            _sub_failure = _model_ref.pop_submission_failure()
-
+        # Should not happen post-admission — log and stop gracefully
         if hasattr(state, "_missing_submission_count"):
             state._missing_submission_count += 1
+        _emit_decision(
+            state, decision_type="gate_verdict", step_n=_cp_s.step_index,
+            verdict="stop", reason="no_admitted_record_assertion_failure",
+            signals={"phase": eval_phase},
+        )
+        print(
+            f"    [phase_gate] ASSERTION FAILURE: evaluate_transition called"
+            f" but no pre-admitted record found for {eval_phase}"
+            f" — this should not happen post-admission; stopping",
+            flush=True,
+        )
+        result.verdict = "stop"
+        result.stop_reason = "no_admitted_record_assertion_failure"
+        result.source = "assertion_failure"
+        return result
 
-        if _ext_retries < _MAX_SUBMISSION_RETRIES:
-            _emit_limit_triggered(
-                state, step_n=_cp_s.step_index,
-                limit_name="phase_record_submission_retry",
-                configured_value=_MAX_SUBMISSION_RETRIES,
-                actual_value=_ext_retries + 1,
-                action_taken="block_transition_retry",
-                source_file="step_sections.py",
-                source_line=640,
-                reason=f"protocol_violation: no submit_phase_record for {eval_phase} ({_ext_retries + 1}/{_MAX_SUBMISSION_RETRIES})"
-                       + (f" submission_failure={_sub_failure}" if _sub_failure else ""),
-            )
-            if _sub_failure:
-                _failure_hint = (
-                    f"[SUBMISSION PARSE FAILURE]\n"
-                    f"You called submit_phase_record but the JSON was invalid.\n"
-                    f"Error: {_sub_failure.get('detail', 'unknown')}\n"
-                    f"Fix the JSON and call submit_phase_record again.\n"
-                    f"Retry {_ext_retries + 1}/{_MAX_SUBMISSION_RETRIES}."
-                )
-            else:
-                _failure_hint = (
-                    f"[PROTOCOL VIOLATION: PHASE RECORD REQUIRED]\n"
-                    f"Phase {eval_phase} cannot be completed without calling submit_phase_record.\n"
-                    f"This is not optional. The system CANNOT proceed to the next phase.\n"
-                    f"Call submit_phase_record now with your {eval_phase} findings.\n"
-                    f"Retry {_ext_retries + 1}/{_MAX_SUBMISSION_RETRIES}."
-                )
-            result.pending_messages.append({
-                "role": "user",
-                "content": _failure_hint,
-            })
-            # Phase Submission Enforcement: force tool_choice on retry
-            _model_force = getattr(agent_self, "model", None)
-            if _model_force is not None and hasattr(_model_force, "set_force_phase_record"):
-                _model_force.set_force_phase_record(True)
-                print(
-                    f"    [phase_submission_enforcement] ARMED:"
-                    f" forcing submit_phase_record on next query"
-                    f" (retry {_ext_retries + 1}/{_MAX_SUBMISSION_RETRIES})",
-                    flush=True,
-                )
-            print(
-                f"    [phase_gate] BLOCKED: no admitted record for {eval_phase}"
-                f" retry={_ext_retries + 1}/{_MAX_SUBMISSION_RETRIES}"
-                f" failure_type={'parse_error' if _sub_failure else 'not_called'}"
-                f" — transition DENIED, staying in current phase",
-                flush=True,
-            )
-            result.verdict = "retry"
-            result.source = "gate_rejection"
-            result.reason = "missing_phase_record_retry"
-            result.routing = _route_blocked(eval_phase, result.reason)
-            return result
-        else:
-            _emit_limit_triggered(
-                state, step_n=_cp_s.step_index,
-                limit_name="phase_record_submission_exhausted",
-                configured_value=_MAX_SUBMISSION_RETRIES,
-                actual_value=_ext_retries + 1,
-                action_taken="protocol_violation_stop",
-                source_file="step_sections.py",
-                source_line=640,
-                reason=f"protocol_violation: agent never called submit_phase_record for {eval_phase} after {_ext_retries + 1} attempts",
-            )
-            _emit_decision(
-                state, decision_type="gate_verdict", step_n=_cp_s.step_index,
-                verdict="stop", reason="protocol_violation_missing_phase_record",
-                signals={"phase": eval_phase, "retries": _ext_retries + 1},
-            )
-            print(
-                f"    [phase_gate] PROTOCOL VIOLATION: agent never submitted"
-                f" phase record for {eval_phase} after {_ext_retries + 1} retries"
-                f" — stopping attempt (no force advance)",
-                flush=True,
-            )
-            result.verdict = "stop"
-            result.stop_reason = "protocol_violation_missing_phase_record"
-            result.source = "submission_timeout"
-            return result
-
-    # From here: _pr is not None and not _extraction_gated
+    # Record available — set on result for downstream gates
     result.phase_record = _pr
     result.phase_record_source = _pr_source
-
-    # ══════════════════════════════════════════════════════════════════
-    # Gate 3: Cognition Validation
-    # ══════════════════════════════════════════════════════════════════
-    _cognition_rejected = False
-    try:
-        from cognition_prompts import COGNITION_EXECUTION_ENABLED as _COG_ENABLED
-        if _COG_ENABLED:
-            from cognition_prompts import CognitionLoader as _CogLoader
-            from phase_validator import (
-                validate_phase_record as _validate_pr,
-                build_validation_feedback as _build_cog_feedback,
-            )
-            import json as _json_cog
-            import os as _os_cog
-            from pathlib import Path as _Path_cog
-            _bundle_path_cog = _os_cog.environ.get(
-                "JINGU_BUNDLE_PATH",
-                str(_Path_cog(__file__).parent.parent / "bundle.json"),
-            )
-            with open(_bundle_path_cog) as _f_cog:
-                _cog_bundle = _json_cog.load(_f_cog)
-            _cog_loader = _CogLoader(_cog_bundle)
-            _cog_errors = _validate_pr(_pr, _cog_loader)
-            if _cog_errors:
-                _cog_codes = [e.code for e in _cog_errors]
-                print(
-                    f"    [cognition_validator] REJECT errors={_cog_codes}",
-                    flush=True,
-                )
-                _cog_feedback = _build_cog_feedback(_cog_errors, _pr, _cog_loader)
-                _cognition_rejected = True
-                _emit_decision(
-                    state, decision_type="gate_verdict", step_n=_cp_s.step_index,
-                    verdict="continue", reason="cognition_validation_failed",
-                )
-                result.pending_messages.append({
-                    "role": "user",
-                    "content": (
-                        f"[Cognition Validation Failed]\n\n"
-                        f"{_cog_feedback}\n\n"
-                        f"Fix the issues above and resubmit for phase {old_phase}."
-                    ),
-                })
-                state.phase_records = [
-                    r for r in state.phase_records
-                    if r.phase.upper() != eval_phase
-                ]
-                result.verdict = "retry"
-                result.source = "gate_rejection"
-                result.reason = "cognition_validation_failed"
-                result.routing = _route_blocked(eval_phase, result.reason)
-                return result
-            else:
-                if old_phase and str(old_phase).upper() != "":
-                    _from_p = str(old_phase).upper()
-                    # Transition validation (warning only)
-                    # Note: _step_verdict not available here — use _new_phase from caller
-                print(
-                    f"    [cognition_validator] PASS phase={_pr.phase}"
-                    f" subtype={_pr.subtype}",
-                    flush=True,
-                )
-    except Exception as _cog_exc:
-        print(f"    [cognition_validator] error (non-fatal): {_cog_exc}", flush=True)
+    # Gate 3 (Cognition Validation) removed — already done in admit_phase_record()
 
     # ══════════════════════════════════════════════════════════════════
     # Gate 4-8: Phase-specific gates
