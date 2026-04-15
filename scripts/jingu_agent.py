@@ -1138,7 +1138,7 @@ class JinguAgent:
         # passed as state= to admit_phase_record() and all step sections.
         # Writing self._state.required_next_phase here is the SAME as writing
         # state.required_next_phase that Gate 0 reads in admit_phase_record().
-        _routed_phase = str(cp_state_holder[0].phase).upper() if cp_state_holder else "OBSERVE"
+        _routed_phase = str(self._cp_state_holder[0].phase).upper() if self._cp_state_holder else "OBSERVE"
         if attempt > 1 and _routed_phase != "OBSERVE":
             self._state.required_next_phase = _routed_phase
             print(
