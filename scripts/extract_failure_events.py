@@ -131,7 +131,7 @@ def _extract_from_jingu_body(
         # Determine the phase where execution happened
         exec_phase = "EXECUTE"
         for pr in reversed(phase_records):
-            if pr.get("phase", "").upper() in ("EXECUTE", "EXECUTION"):
+            if pr.get("phase", "").upper() == "EXECUTE":
                 exec_phase = pr.get("phase", "EXECUTE")
                 break
 

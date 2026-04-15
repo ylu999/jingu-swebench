@@ -92,7 +92,7 @@ def _recognize(signal: FailureSignal) -> RecognitionResult | None:
         return RecognitionResult(
             state="execution_stall",
             confidence=0.9,
-            next_phase="ANALYSIS",
+            next_phase="ANALYZE",
             reason="Agent entered EXECUTE but wrote no code. Needs concrete plan.",
         )
 
@@ -100,7 +100,7 @@ def _recognize(signal: FailureSignal) -> RecognitionResult | None:
         return RecognitionResult(
             state="analysis_gap",
             confidence=0.85,
-            next_phase="ANALYSIS",
+            next_phase="ANALYZE",
             reason="Multiple analysis steps without ROOT_CAUSE. Needs focused hypothesis.",
         )
 
@@ -108,7 +108,7 @@ def _recognize(signal: FailureSignal) -> RecognitionResult | None:
         return RecognitionResult(
             state="observe_loop",
             confidence=0.9,
-            next_phase="ANALYSIS",
+            next_phase="ANALYZE",
             reason="3+ consecutive OBSERVE phases without advancing. Stuck in observation.",
         )
 
@@ -123,7 +123,7 @@ def _route(recog: RecognitionResult, ctx: ExecutionContext) -> RouteDecision | N
     if recog.state == "execution_stall":
         return RouteDecision(
             action="REROUTE",
-            target_phase="ANALYSIS",
+            target_phase="ANALYZE",
             hint=(
                 f"[JINGU ROUTING] EXECUTION_STALL (attempt {ctx.attempt}): "
                 f"You entered EXECUTE but wrote no code. "
@@ -135,7 +135,7 @@ def _route(recog: RecognitionResult, ctx: ExecutionContext) -> RouteDecision | N
     if recog.state == "analysis_gap":
         return RouteDecision(
             action="REROUTE",
-            target_phase="ANALYSIS",
+            target_phase="ANALYZE",
             hint=(
                 f"[JINGU ROUTING] ANALYSIS_GAP (attempt {ctx.attempt}): "
                 f"Multiple analysis steps without ROOT_CAUSE. "
@@ -147,7 +147,7 @@ def _route(recog: RecognitionResult, ctx: ExecutionContext) -> RouteDecision | N
     if recog.state == "observe_loop":
         return RouteDecision(
             action="REROUTE",
-            target_phase="ANALYSIS",
+            target_phase="ANALYZE",
             hint=(
                 f"[JINGU ROUTING] OBSERVE_LOOP (attempt {ctx.attempt}): "
                 f"You are stuck in observation. "

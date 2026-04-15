@@ -130,7 +130,7 @@ def override_retry_plan_from_pack(
     must_do: list[str]
     must_not_do: list[str]
 
-    if decision.target_phase == "ANALYSIS":
+    if decision.target_phase == "ANALYZE":
         must_do = [
             "Re-read the failing FAIL_TO_PASS tests to understand expected behavior",
             "Identify the correct source location for the bug from first principles",
@@ -140,7 +140,7 @@ def override_retry_plan_from_pack(
             "Do not expand or continue the current patch direction",
             "Do not add workarounds or suppress test errors",
         ]
-    elif decision.target_phase == "EXECUTION":
+    elif decision.target_phase == "EXECUTE":
         must_do = [
             "Identify which test cases are still failing and why",
             "Extend the patch to cover the uncovered branches or cases",

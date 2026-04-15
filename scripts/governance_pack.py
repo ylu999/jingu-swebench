@@ -47,7 +47,7 @@ class RecognitionResult:
     """
     state: str           # "wrong_direction" | "insufficient_coverage" | "regression_risk" | "pass"
     confidence: float    # 0.0–1.0
-    next_phase: str      # "ANALYSIS" | "DESIGN" | "EXECUTION"
+    next_phase: str      # "ANALYZE" | "DESIGN" | "EXECUTE"
     reason: str          # human-readable explanation (for logging)
     pack_name: str = ""  # set by governance_runtime after recognition
 
@@ -59,7 +59,7 @@ class RouteDecision:
     Drives the control loop: REROUTE means override retry_plan with phase-specific hint.
     """
     action: str              # "REROUTE" | "CONTINUE"
-    target_phase: str = ""   # "ANALYSIS" | "DESIGN" | "EXECUTION"
+    target_phase: str = ""   # "ANALYZE" | "DESIGN" | "EXECUTE"
     hint: str = ""           # injected into retry_plan.next_attempt_prompt
     pack_name: str = ""      # set by governance_runtime
 

@@ -482,7 +482,7 @@ def _infer_phase_boundary_discipline(phase_record) -> tuple[float, list[str], st
     decl_match = phase_decl_re.search(content)
     if decl_match:
         declared = decl_match.group(1).strip().upper()
-        # Normalize common variants
+        # LLM output boundary: normalize agent-declared phase variants to canonical names
         norm_map = {"OBSERVATION": "OBSERVE", "ANALYSIS": "ANALYZE",
                     "EXECUTION": "EXECUTE", "JUDGMENT": "JUDGE", "JUDGEMENT": "JUDGE",
                     "DECISION": "DECIDE"}

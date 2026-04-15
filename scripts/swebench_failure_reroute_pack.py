@@ -66,11 +66,11 @@ def _recognize(signal: FailureSignal) -> RecognitionResult | None:
     """
     Map FailureSignal → RecognitionResult (behavioral state + next phase).
 
-    F2P_ALL_FAIL → wrong_direction → ANALYSIS
+    F2P_ALL_FAIL → wrong_direction → ANALYZE
       Rationale: if ALL target tests fail, the fix direction is incorrect.
       Agent must re-analyze from scratch, not expand current patch.
 
-    F2P_PARTIAL → insufficient_coverage → EXECUTION
+    F2P_PARTIAL → insufficient_coverage → EXECUTE
       Rationale: some tests pass, direction is correct but coverage insufficient.
       Agent should extend the patch, not restart analysis.
     """
@@ -78,7 +78,7 @@ def _recognize(signal: FailureSignal) -> RecognitionResult | None:
         return RecognitionResult(
             state="wrong_direction",
             confidence=0.9,
-            next_phase="ANALYSIS",
+            next_phase="ANALYZE",
             reason=(
                 f"All {signal.controlled_failed} target FAIL_TO_PASS tests still failing "
                 f"(controlled_passed={signal.controlled_passed}). "
@@ -90,7 +90,7 @@ def _recognize(signal: FailureSignal) -> RecognitionResult | None:
         return RecognitionResult(
             state="insufficient_coverage",
             confidence=0.8,
-            next_phase="EXECUTION",
+            next_phase="EXECUTE",
             reason=(
                 f"{signal.controlled_passed} target tests pass, "
                 f"{signal.controlled_failed} still failing. "
@@ -140,14 +140,14 @@ def _route(recog: RecognitionResult, ctx: ExecutionContext) -> RouteDecision | N
     if recog.state == "wrong_direction":
         return RouteDecision(
             action="REROUTE",
-            target_phase="ANALYSIS",
+            target_phase="ANALYZE",
             hint=_build_wrong_direction_hint(signal, ctx),
         )
 
     if recog.state == "insufficient_coverage":
         return RouteDecision(
             action="REROUTE",
-            target_phase="EXECUTION",
+            target_phase="EXECUTE",
             hint=_build_coverage_hint(signal, ctx),
         )
 
