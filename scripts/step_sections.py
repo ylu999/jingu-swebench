@@ -1760,14 +1760,6 @@ def _step_cp_update_and_verdict(
         and hasattr(_model_peek, "_submitted_phase_record")
         and _model_peek._submitted_phase_record is not None
     )
-    # DEBUG: diagnose phase_records_count=0 bug
-    print(
-        f"    [admission-debug] model_type={type(_model_peek).__name__}"
-        f" has_attr={hasattr(_model_peek, '_submitted_phase_record') if _model_peek else 'N/A'}"
-        f" record={'SET' if (_model_peek and getattr(_model_peek, '_submitted_phase_record', None)) else 'None'}"
-        f" pending={_has_pending_submission}",
-        flush=True,
-    )
     # P0.1: immediate admission — initialized before branch so it's always available
     _admission_result = None
 
