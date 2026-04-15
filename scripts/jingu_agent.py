@@ -920,16 +920,28 @@ class JinguAgent:
 
         _monitor = self._state
         if _monitor is None:
+            print(f"    [attempt-end] skip: no monitor state", flush=True)
             return
+
+        # p241: attempt-end telemetry — observable signal for every attempt termination
+        _cp_phase = "unknown"
+        if self._cp_state_holder:
+            _cp_phase = self._cp_state_holder[0].phase
+        _has_submission = bool(submission)
 
         cid = getattr(getattr(agent_self, "env", None), "container_id", None)
         if not cid:
+            print(f"    [attempt-end] phase={_cp_phase} submission={_has_submission}"
+                  f" cv_triggered=false cv_skip_reason=no_container_id", flush=True)
             return
         submitted = submission or ""
         if not submitted:
+            print(f"    [attempt-end] phase={_cp_phase} submission=false"
+                  f" cv_triggered=false cv_skip_reason=no_submission", flush=True)
             return
 
-        print(f"    [controlled-verify] final verify on container {cid[:12]}...", flush=True)
+        print(f"    [attempt-end] phase={_cp_phase} submission=true"
+              f" cv_triggered=true container={cid[:12]}", flush=True)
 
         cp_state_holder = self._cp_state_holder if self._cp_state_holder else None
 
@@ -2616,7 +2628,25 @@ class JinguDefaultAgent(ProgressTrackingAgent):
         return result
 
     def run(self, *args: Any, **kwargs: Any) -> dict:
-        result = super().run(*args, **kwargs)
+        from step_monitor_state import StopExecution
+
+        try:
+            result = super().run(*args, **kwargs)
+        except StopExecution:
+            # p241: StopExecution bypassed on_attempt_end → controlled_verify never ran.
+            # Extract submission from agent messages (if agent submitted before budget exhausted).
+            submission = ""
+            for msg in reversed(self.messages):
+                extra = msg.get("extra", {})
+                if isinstance(extra, dict) and extra.get("submission"):
+                    submission = extra["submission"]
+                    break
+            print(f"    [governance] StopExecution caught in JinguDefaultAgent.run()"
+                  f" — running forced on_attempt_end (submission={'yes' if submission else 'no'})",
+                  flush=True)
+            self.jingu_agent.on_attempt_end(self, submission)
+            raise  # re-raise so outer handler (run_attempt line 1162) still works
+
         submission = result.get("submission", "") if isinstance(result, dict) else ""
         self.jingu_agent.on_attempt_end(self, submission)
         return result
