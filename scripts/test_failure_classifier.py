@@ -133,22 +133,22 @@ class TestGetRouting(unittest.TestCase):
 
     def test_wrong_direction_routing(self):
         r = get_routing("wrong_direction")
-        self.assertEqual(r["next_phase"], "analysis")
+        self.assertEqual(r["next_phase"], "ANALYZE")
         self.assertIn("causal_grounding", r["required_principals"])
 
     def test_incomplete_fix_routing(self):
         r = get_routing("incomplete_fix")
-        self.assertEqual(r["next_phase"], "design")
+        self.assertEqual(r["next_phase"], "DESIGN")
         self.assertIn("minimal_change", r["required_principals"])
 
     def test_verify_gap_routing(self):
         r = get_routing("verify_gap")
-        self.assertEqual(r["next_phase"], "judge")
+        self.assertEqual(r["next_phase"], "JUDGE")
         self.assertIn("evidence_linkage", r["required_principals"])
 
     def test_execution_error_routing(self):
         r = get_routing("execution_error")
-        self.assertEqual(r["next_phase"], "execution")
+        self.assertEqual(r["next_phase"], "EXECUTE")
         self.assertIn("action_grounding", r["required_principals"])
 
     def test_all_failure_types_have_routing(self):

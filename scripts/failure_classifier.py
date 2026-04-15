@@ -125,7 +125,7 @@ FailureLayer = Literal[
     "unknown",
 ]
 
-PhaseOfFailure = Literal["analysis", "decision", "design", "execution", "judge"]
+PhaseOfFailure = Literal["ANALYZE", "DECIDE", "DESIGN", "EXECUTE", "JUDGE"]
 
 SignalQuality = Literal[
     "true_positive",   # signal correctly indicated success
@@ -238,7 +238,7 @@ def classify_failure_layer(
         return FailureRecord(
             instance_id=instance_id,
             failure_layer="unknown",
-            phase_of_failure="analysis",
+            phase_of_failure="ANALYZE",
             signal_quality=SignalQualityRecord(),
             confidence=0.0,
             reasoning="No controlled_verify data available",
@@ -279,14 +279,14 @@ def classify_failure_layer(
         return FailureRecord(
             instance_id=instance_id,
             failure_layer="execution_error",
-            phase_of_failure="execution",
+            phase_of_failure="EXECUTE",
             signal_quality=SignalQualityRecord(
                 controlled_verify="true_negative",
             ),
             confidence=0.95,
             reasoning="Patch apply or docker execution failure",
             recommended_actions=[
-                GateAction(type="retry_phase", phase="execution",
+                GateAction(type="retry_phase", phase="EXECUTE",
                            reason="Fix execution issues without changing direction"),
             ],
             signals=raw_signals,
@@ -302,7 +302,7 @@ def classify_failure_layer(
         return FailureRecord(
             instance_id=instance_id,
             failure_layer="target_only_success_with_regression",
-            phase_of_failure="judge",
+            phase_of_failure="JUDGE",
             signal_quality=sq,
             confidence=0.95,
             reasoning=(
@@ -313,7 +313,7 @@ def classify_failure_layer(
             recommended_actions=[
                 GateAction(type="require_regression_sentinel",
                            reason="Quick judge must check P2P sentinel tests, not just target"),
-                GateAction(type="retry_phase", phase="design",
+                GateAction(type="retry_phase", phase="DESIGN",
                            reason="Redesign fix to preserve invariants (clone vs mutate)"),
                 GateAction(type="enforce_principals",
                            principals=["invariant_preservation", "minimal_change"],
@@ -336,7 +336,7 @@ def classify_failure_layer(
             return FailureRecord(
                 instance_id=instance_id,
                 failure_layer="near_miss_semantic_insufficiency",
-                phase_of_failure="execution",
+                phase_of_failure="EXECUTE",
                 signal_quality=sq,
                 confidence=0.85,
                 reasoning=(
@@ -345,7 +345,7 @@ def classify_failure_layer(
                     f"No P2P regression."
                 ),
                 recommended_actions=[
-                    GateAction(type="retry_phase", phase="execution",
+                    GateAction(type="retry_phase", phase="EXECUTE",
                                reason="Patch is close — fix remaining edge cases"),
                     GateAction(type="require_design_expansion",
                                reason="Check uncovered F2P cases for missing semantic coverage"),
@@ -363,7 +363,7 @@ def classify_failure_layer(
             return FailureRecord(
                 instance_id=instance_id,
                 failure_layer="multi_site_fix_incomplete",
-                phase_of_failure="design",
+                phase_of_failure="DESIGN",
                 signal_quality=sq,
                 confidence=0.80,
                 reasoning=(
@@ -374,7 +374,7 @@ def classify_failure_layer(
                 recommended_actions=[
                     GateAction(type="require_affected_surface_enumeration",
                                reason="Design must enumerate all affected files/components"),
-                    GateAction(type="retry_phase", phase="design",
+                    GateAction(type="retry_phase", phase="DESIGN",
                                reason="Expand design to cover all required change sites"),
                     GateAction(type="enforce_principals",
                                principals=["evidence_linkage", "minimal_change"],
@@ -390,7 +390,7 @@ def classify_failure_layer(
             return FailureRecord(
                 instance_id=instance_id,
                 failure_layer="target_missing_due_to_test_resolution",
-                phase_of_failure="judge",
+                phase_of_failure="JUDGE",
                 signal_quality=SignalQualityRecord(
                     quick_judge_target="no_signal",
                     quick_judge_overall="no_signal",
@@ -404,7 +404,7 @@ def classify_failure_layer(
                 recommended_actions=[
                     GateAction(type="require_test_resolution_fix",
                                reason="Quick judge cannot resolve target test — fix canonicalization"),
-                    GateAction(type="retry_phase", phase="analysis",
+                    GateAction(type="retry_phase", phase="ANALYZE",
                                reason="Re-analyze with correct test identity"),
                 ],
                 signals=raw_signals,
@@ -416,7 +416,7 @@ def classify_failure_layer(
             return FailureRecord(
                 instance_id=instance_id,
                 failure_layer="insufficient_design_depth",
-                phase_of_failure="analysis",
+                phase_of_failure="ANALYZE",
                 signal_quality=SignalQualityRecord(
                     quick_judge_target="true_negative",
                     quick_judge_overall="true_negative",
@@ -433,7 +433,7 @@ def classify_failure_layer(
                                reason="Problem requires deeper mechanism understanding"),
                     GateAction(type="require_design_expansion",
                                reason="Must enumerate internal components and invariants before patching"),
-                    GateAction(type="retry_phase", phase="analysis",
+                    GateAction(type="retry_phase", phase="ANALYZE",
                                reason="Return to analysis — current design insufficient"),
                     GateAction(type="enforce_principals",
                                principals=["causal_grounding", "evidence_linkage"],
@@ -446,14 +446,14 @@ def classify_failure_layer(
         return FailureRecord(
             instance_id=instance_id,
             failure_layer="wrong_direction",
-            phase_of_failure="analysis",
+            phase_of_failure="ANALYZE",
             signal_quality=SignalQualityRecord(
                 controlled_verify="true_negative",
             ),
             confidence=0.70,
             reasoning=f"Zero F2P progress ({f2p_total} tests failed). Fundamentally wrong approach.",
             recommended_actions=[
-                GateAction(type="retry_phase", phase="analysis",
+                GateAction(type="retry_phase", phase="ANALYZE",
                            reason="Completely re-analyze the problem"),
                 GateAction(type="enforce_principals",
                            principals=["causal_grounding"],
@@ -467,7 +467,7 @@ def classify_failure_layer(
         return FailureRecord(
             instance_id=instance_id,
             failure_layer="near_miss_semantic_insufficiency",
-            phase_of_failure="judge",
+            phase_of_failure="JUDGE",
             signal_quality=SignalQualityRecord(
                 quick_judge_target="true_positive" if qj_has_target_passed else "no_signal",
                 controlled_verify="true_negative",
@@ -475,7 +475,7 @@ def classify_failure_layer(
             confidence=0.65,
             reasoning="All F2P pass, no P2P regression detected, but eval says not resolved. Verify gap.",
             recommended_actions=[
-                GateAction(type="retry_phase", phase="judge",
+                GateAction(type="retry_phase", phase="JUDGE",
                            reason="Verification scope may be insufficient"),
             ],
             signals=raw_signals,
@@ -485,7 +485,7 @@ def classify_failure_layer(
     return FailureRecord(
         instance_id=instance_id,
         failure_layer="unknown",
-        phase_of_failure="analysis",
+        phase_of_failure="ANALYZE",
         signal_quality=SignalQualityRecord(),
         confidence=0.0,
         reasoning="Insufficient signal to classify failure layer",
@@ -509,12 +509,9 @@ def route_from_failure(record: FailureRecord) -> dict:
     enforce_principals: list[str] = []
     next_phase = "ANALYZE"  # default (canonical name)
 
-    _phase_canon = {"analysis": "ANALYZE", "execution": "EXECUTE",
-                     "observation": "OBSERVE", "planning": "DESIGN"}
     for action in record.recommended_actions:
         if action.type == "retry_phase" and action.phase:
-            _ap = action.phase.upper()
-            next_phase = _phase_canon.get(action.phase.lower(), _ap)
+            next_phase = action.phase  # already canonical from FailureRecord
         elif action.type == "enforce_principals":
             enforce_principals.extend(action.principals)
         elif action.type == "require_design_expansion":
