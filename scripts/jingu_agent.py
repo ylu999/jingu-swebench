@@ -371,6 +371,28 @@ class JinguAgent:
         # Stash for on_step_end
         self._last_observe_result = (text, snippet, env_error)
 
+        # P0.4: QJ ack detection — check if agent acknowledged corrective QJ
+        if (self._state is not None
+                and self._state.quick_judge_history
+                and text):
+            _last_qj = self._state.quick_judge_history[-1]
+            if (_last_qj.get("acknowledged") is None
+                    and _last_qj.get("signal_kind") == "corrective"):
+                try:
+                    from quick_judge import detect_acknowledged
+                    from types import SimpleNamespace
+                    _qj_ns = SimpleNamespace(**_last_qj)
+                    _ack = detect_acknowledged(_qj_ns, text, [])
+                    _last_qj["acknowledged"] = _ack
+                    if not _ack:
+                        self._state._qj_corrective_ignored = True
+                        print(f"    [qj-ack] corrective QJ IGNORED by agent", flush=True)
+                    else:
+                        self._state._qj_corrective_ignored = False
+                        print(f"    [qj-ack] corrective QJ acknowledged by agent", flush=True)
+                except Exception as _ack_exc:
+                    print(f"    [qj-ack] detection error (non-fatal): {_ack_exc}", flush=True)
+
         # Accumulate text per phase for PhaseRecord extraction (p221)
         if self._state is not None and text:
             _cp = (

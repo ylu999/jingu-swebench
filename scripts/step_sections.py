@@ -294,6 +294,31 @@ def admit_phase_record(
             )
             state.required_next_phase = None
 
+    # ── Gate 0.5: QJ corrective signal enforcement (P0.4) ────────────
+    # If agent ignored a corrective QJ signal, soft-reject the submission.
+    if getattr(state, '_qj_corrective_ignored', False):
+        _last_qj = state.quick_judge_history[-1] if state.quick_judge_history else {}
+        _test_info = _last_qj.get("target_test_id", "unknown")
+        print(
+            f"    [immediate-admission] Gate 0.5 REJECT:"
+            f" corrective QJ ignored (test={_test_info})",
+            flush=True,
+        )
+        # Clear flag so agent gets one more chance after seeing this message
+        state._qj_corrective_ignored = False
+        _result.admitted = False
+        _result.retry_messages.append({
+            "role": "user",
+            "content": (
+                f"[QJ SIGNAL IGNORED]\n"
+                f"A quick judge test showed your patch has issues "
+                f"(test: {_test_info}).\n"
+                f"You must address this test result before proceeding.\n"
+                f"Review the test output above and adjust your approach."
+            ),
+        })
+        return _result
+
     # ── Gate 1: Record Acquisition ──────────────────────────────────────
     # Gate 0 passed (or no routing constraint). Now consume the record.
     _pr = None
