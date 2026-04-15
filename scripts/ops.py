@@ -1391,6 +1391,114 @@ def _run_replay_gate() -> bool:
     return True
 
 
+def _diagnose_unresolved(s3_client, batch_name: str, unresolved_ids: list[str]) -> dict[str, dict]:
+    """Diagnose root cause for each unresolved instance.
+
+    Reads step_events.jsonl and decisions.jsonl from S3 for the last attempt,
+    classifies the failure, and returns a dict of {instance_id: diagnosis}.
+
+    Diagnosis keys:
+        cause: str — failure category
+        detail: str — human-readable explanation
+        last_phase: str — phase when agent stopped
+        total_steps: int — steps taken
+        patch_generated: bool — whether a non-empty patch existed
+        phases_reached: list[str] — phases entered during the run
+    """
+    diagnoses: dict[str, dict] = {}
+    for iid in unresolved_ids:
+        diag = {"cause": "unknown", "detail": "", "last_phase": "?",
+                "total_steps": 0, "patch_generated": False, "phases_reached": []}
+        try:
+            # Find last attempt by listing attempt dirs
+            prefix = f"{batch_name}/{iid}/attempt_"
+            resp = s3_client.list_objects_v2(Bucket=S3_BUCKET, Prefix=prefix, Delimiter="/")
+            attempt_prefixes = sorted(
+                [p["Prefix"] for p in resp.get("CommonPrefixes", [])],
+                key=lambda p: int(p.rstrip("/").rsplit("_", 1)[-1]),
+            )
+            if not attempt_prefixes:
+                diag["cause"] = "no_attempt_data"
+                diag["detail"] = "no attempt directories found in S3"
+                diagnoses[iid] = diag
+                continue
+
+            last_attempt_prefix = attempt_prefixes[-1]
+
+            # Read step_events.jsonl
+            events = []
+            try:
+                obj = s3_client.get_object(Bucket=S3_BUCKET, Key=f"{last_attempt_prefix}step_events.jsonl")
+                for line in obj["Body"].read().decode().strip().split("\n"):
+                    if line.strip():
+                        events.append(json.loads(line))
+            except Exception:
+                pass
+
+            # Read decisions.jsonl
+            decisions = []
+            try:
+                obj = s3_client.get_object(Bucket=S3_BUCKET, Key=f"{last_attempt_prefix}decisions.jsonl")
+                for line in obj["Body"].read().decode().strip().split("\n"):
+                    if line.strip():
+                        decisions.append(json.loads(line))
+            except Exception:
+                pass
+
+            if not events:
+                diag["cause"] = "no_step_events"
+                diag["detail"] = "step_events.jsonl empty or missing"
+                diagnoses[iid] = diag
+                continue
+
+            # Extract signals
+            phases_seen = []
+            for e in events:
+                p = e.get("phase", "")
+                if p and (not phases_seen or phases_seen[-1] != p):
+                    phases_seen.append(p)
+            last_event = events[-1]
+            last_phase = last_event.get("phase", "?")
+            total_steps = last_event.get("step_n", len(events))
+            patch_non_empty = any(e.get("patch_non_empty", False) for e in events)
+            env_errors = [e for e in events if e.get("env_error", False)]
+
+            diag["last_phase"] = last_phase
+            diag["total_steps"] = total_steps
+            diag["patch_generated"] = patch_non_empty
+            diag["phases_reached"] = phases_seen
+
+            # Classify
+            if env_errors:
+                diag["cause"] = "env_failure"
+                diag["detail"] = f"{len(env_errors)} steps with env_error; last_phase={last_phase}"
+            elif not patch_non_empty:
+                diag["cause"] = "no_patch"
+                diag["detail"] = f"no patch generated; stuck in {last_phase} after {total_steps} steps"
+            elif last_phase in ("OBSERVE", "ANALYZE", "DECIDE", "DESIGN"):
+                diag["cause"] = f"phase_stuck_{last_phase}"
+                diag["detail"] = f"patch exists but never reached EXECUTE; stuck in {last_phase}"
+            elif last_phase == "EXECUTE":
+                # Patch exists, reached EXECUTE — probably wrong patch
+                cp = last_event.get("cp_state_snapshot", {})
+                phase_steps = cp.get("step", 0)
+                diag["cause"] = "wrong_patch"
+                diag["detail"] = f"patch generated, EXECUTE reached ({phase_steps} steps in phase), eval failed"
+            elif last_phase == "JUDGE":
+                diag["cause"] = "wrong_patch"
+                diag["detail"] = f"reached JUDGE but eval failed — patch incorrect"
+            else:
+                diag["cause"] = "unknown"
+                diag["detail"] = f"last_phase={last_phase} steps={total_steps} patch={'yes' if patch_non_empty else 'no'}"
+
+        except Exception as exc:
+            diag["cause"] = "diagnosis_error"
+            diag["detail"] = str(exc)[:200]
+
+        diagnoses[iid] = diag
+    return diagnoses
+
+
 def cmd_pipeline(args) -> None:
     """
     Full automated pipeline:
@@ -1398,6 +1506,7 @@ def cmd_pipeline(args) -> None:
       1. Smoke test (1 instance) — verify new behavior present
       2. Batch run (30 instances)
       3. Eval (SWE-bench official)
+      3.5. Root cause analysis (unresolved instances)
       4. Store results to S3 pipeline-results/history.json
     """
     batch_name = args.batch_name
@@ -1521,6 +1630,26 @@ def cmd_pipeline(args) -> None:
                 }
                 _write_instance_record(s3_client, iid, record_data)
 
+        # Root cause analysis for unresolved
+        unresolved_diagnoses_eo: dict[str, dict] = {}
+        if unresolved_ids:
+            print(f"\n[pipeline] root cause analysis ({len(unresolved_ids)} unresolved)", flush=True)
+            unresolved_diagnoses_eo = _diagnose_unresolved(s3_client, batch_name, unresolved_ids)
+            cause_counts_eo: dict[str, int] = {}
+            print(f"\n{'Instance':<45} {'Cause':<22} {'Phase':<10} {'Steps':>5} {'Patch':>5}  Detail", flush=True)
+            print("─" * 130, flush=True)
+            for iid in unresolved_ids:
+                d = unresolved_diagnoses_eo.get(iid, {})
+                cause = d.get("cause", "unknown")
+                cause_counts_eo[cause] = cause_counts_eo.get(cause, 0) + 1
+                print(
+                    f"{iid:<45} {cause:<22} {d.get('last_phase', '?'):<10} "
+                    f"{d.get('total_steps', 0):>5} {'yes' if d.get('patch_generated') else 'no':>5}  "
+                    f"{d.get('detail', '')[:60]}",
+                    flush=True,
+                )
+            print(f"\n[pipeline] cause breakdown: {dict(sorted(cause_counts_eo.items(), key=lambda x: -x[1]))}", flush=True)
+
         # Store pipeline history
         record = {
             "timestamp": timestamp,
@@ -1537,7 +1666,11 @@ def cmd_pipeline(args) -> None:
             "eval_exit": eval_exit,
             "resolved_ids": resolved_ids,
             "eval_only": True,
+            "unresolved_causes": {},
         }
+        for d in unresolved_diagnoses_eo.values():
+            c = d.get("cause", "unknown")
+            record["unresolved_causes"][c] = record["unresolved_causes"].get(c, 0) + 1
         _append_pipeline_history(record)
 
         rate_str = f"{resolved}/{total} ({100*resolved/total:.1f}%)" if resolved >= 0 and total > 0 else "unknown"
@@ -1696,6 +1829,39 @@ def cmd_pipeline(args) -> None:
 
     print(f"[pipeline] per-instance records written ({len(resolved_ids)} resolved, {len(unresolved_ids)} unresolved)", flush=True)
 
+    # ── Step 3.5: Root cause analysis for unresolved instances ────────────────
+    unresolved_diagnoses: dict[str, dict] = {}
+    if unresolved_ids:
+        print(f"\n[pipeline] STEP 3.5: root cause analysis ({len(unresolved_ids)} unresolved)", flush=True)
+        unresolved_diagnoses = _diagnose_unresolved(s3_client, batch_name, unresolved_ids)
+
+        # Print summary table
+        cause_counts: dict[str, int] = {}
+        print(f"\n{'Instance':<45} {'Cause':<22} {'Phase':<10} {'Steps':>5} {'Patch':>5}  Detail", flush=True)
+        print("─" * 130, flush=True)
+        for iid in unresolved_ids:
+            d = unresolved_diagnoses.get(iid, {})
+            cause = d.get("cause", "unknown")
+            cause_counts[cause] = cause_counts.get(cause, 0) + 1
+            print(
+                f"{iid:<45} {cause:<22} {d.get('last_phase', '?'):<10} "
+                f"{d.get('total_steps', 0):>5} {'yes' if d.get('patch_generated') else 'no':>5}  "
+                f"{d.get('detail', '')[:60]}",
+                flush=True,
+            )
+        print(f"\n[pipeline] cause breakdown: {dict(sorted(cause_counts.items(), key=lambda x: -x[1]))}", flush=True)
+
+        # Update per-instance records with diagnosis
+        for iid, diag in unresolved_diagnoses.items():
+            existing = _read_instance_record(s3_client, iid)
+            if existing and existing.get("runs"):
+                existing["runs"][-1]["unresolved_cause"] = diag.get("cause")
+                existing["runs"][-1]["unresolved_detail"] = diag.get("detail")
+                existing["runs"][-1]["last_phase"] = diag.get("last_phase")
+                existing["runs"][-1]["total_steps"] = diag.get("total_steps")
+                existing["runs"][-1]["patch_generated"] = diag.get("patch_generated")
+                _write_instance_record(s3_client, iid, existing)
+
     # ── Store pipeline history ─────────────────────────────────────────────────
     record = {
         "timestamp": timestamp,
@@ -1711,13 +1877,22 @@ def cmd_pipeline(args) -> None:
         "eval_task_id": eval_task_id,
         "eval_exit": eval_exit,
         "resolved_ids": resolved_ids,
+        "unresolved_causes": {d.get("cause", "unknown"): 0 for d in unresolved_diagnoses.values()},
     }
+    # Count causes properly
+    for d in unresolved_diagnoses.values():
+        c = d.get("cause", "unknown")
+        record["unresolved_causes"][c] = record["unresolved_causes"].get(c, 0) + 1
     _append_pipeline_history(record)
 
     rate_str = f"{resolved}/{total} ({100*resolved/total:.1f}%)" if resolved >= 0 and total > 0 else "unknown"
     print(f"\n[pipeline] ══════════════════════════════════════════", flush=True)
     print(f"[pipeline] DONE  batch={batch_name}  commit={git_commit}", flush=True)
     print(f"[pipeline] resolved={rate_str}  cost=${cost_usd:.2f}", flush=True)
+    if unresolved_diagnoses:
+        cause_summary = ", ".join(f"{c}={n}" for c, n in sorted(
+            record["unresolved_causes"].items(), key=lambda x: -x[1]) if n > 0)
+        print(f"[pipeline] unresolved causes: {cause_summary}", flush=True)
     print(f"[pipeline] stored in s3://{S3_BUCKET}/{PIPELINE_HISTORY_KEY}", flush=True)
     print(f"[pipeline] ══════════════════════════════════════════", flush=True)
 
