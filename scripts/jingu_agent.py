@@ -1112,11 +1112,13 @@ class JinguAgent:
 
         self._state = _monitor
         # P0.2: cross-attempt routing enforcement
-        # If routing directed this attempt to a specific phase (attempt > 1),
-        # enforce that the first submission must match that phase.
+        # _monitor IS self._state — the same StepMonitorState object that gets
+        # passed as state= to admit_phase_record() and all step sections.
+        # Writing self._state.required_next_phase here is the SAME as writing
+        # state.required_next_phase that Gate 0 reads in admit_phase_record().
         _routed_phase = str(cp_state_holder[0].phase).upper() if cp_state_holder else "OBSERVE"
         if attempt > 1 and _routed_phase != "OBSERVE":
-            _monitor.required_next_phase = _routed_phase
+            self._state.required_next_phase = _routed_phase
             print(
                 f"    [routing-enforcement] attempt={attempt}"
                 f" required_next_phase={_routed_phase}",
