@@ -1635,6 +1635,16 @@ def _step_verify_if_needed(
                     # Format message for agent injection (consumed by jingu_agent.py)
                     state._pending_quick_judge_message = format_agent_message(qj_result)
 
+                    # P0.3: QJ result triggers EXECUTE → JUDGE advance
+                    if qj_result.target_status in ("pass", "fail"):
+                        state._qj_advance_ready = True
+                        print(
+                            f"    [qj-advance] QJ result available:"
+                            f" target_status={qj_result.target_status}"
+                            f" → EXECUTE->JUDGE trigger armed",
+                            flush=True,
+                        )
+
                 except Exception as _qj_exc:
                     print(f"    [quick-judge] ERROR (non-fatal): {_qj_exc}", flush=True)
 
@@ -1871,6 +1881,16 @@ def _step_cp_update_and_verdict(
                 f" phase={_current_phase_str} to={_submission_next}",
                 flush=True,
             )
+
+    # ── Phase 2b: QJ-triggered EXECUTE → JUDGE advance (P0.3) ───────
+    # When quick-judge returns target_status pass/fail, arm the flag.
+    # Consume it here to trigger EXECUTE → JUDGE transition.
+    if (isinstance(_step_verdict, VerdictContinue)
+            and _current_phase_str == "EXECUTE"
+            and state._qj_advance_ready):
+        _step_verdict = VerdictAdvance(to="JUDGE", source="quick_judge", reason="qj_result_available")
+        state._qj_advance_ready = False
+        print(f"    [qj-advance] EXECUTE->JUDGE triggered by quick judge result", flush=True)
 
     # ── RC-1: Fail-closed admission ──────────────────────────────────
     # VerdictAdvance requires an admitted phase record. If agent hasn't
