@@ -17,22 +17,22 @@ FailureType = Literal["wrong_direction", "incomplete_fix", "verify_gap", "execut
 
 FAILURE_ROUTING_RULES: dict = {
     "wrong_direction": {
-        "next_phase": "analysis",
+        "next_phase": "ANALYZE",  # canonical name (not "analysis")
         "repair_goal": "Re-analyze the actual root cause before proposing any fix.",
         "required_principals": ["causal_grounding", "evidence_linkage"],
     },
     "incomplete_fix": {
-        "next_phase": "design",
+        "next_phase": "DESIGN",
         "repair_goal": "Refine the design to cover remaining failing scenarios.",
         "required_principals": ["minimal_change", "evidence_linkage"],
     },
     "verify_gap": {
-        "next_phase": "judge",
+        "next_phase": "JUDGE",
         "repair_goal": "Determine whether verification scope is insufficient or evidence is incomplete.",
         "required_principals": ["evidence_linkage"],
     },
     "execution_error": {
-        "next_phase": "execution",
+        "next_phase": "EXECUTE",  # canonical name (not "execution")
         "repair_goal": "Fix execution issues without changing solution direction.",
         "required_principals": ["minimal_change", "action_grounding"],
     },
@@ -507,11 +507,14 @@ def route_from_failure(record: FailureRecord) -> dict:
     """
     instructions: list[str] = []
     enforce_principals: list[str] = []
-    next_phase = "analysis"  # default
+    next_phase = "ANALYZE"  # default (canonical name)
 
+    _phase_canon = {"analysis": "ANALYZE", "execution": "EXECUTE",
+                     "observation": "OBSERVE", "planning": "DESIGN"}
     for action in record.recommended_actions:
         if action.type == "retry_phase" and action.phase:
-            next_phase = action.phase
+            _ap = action.phase.upper()
+            next_phase = _phase_canon.get(action.phase.lower(), _ap)
         elif action.type == "enforce_principals":
             enforce_principals.extend(action.principals)
         elif action.type == "require_design_expansion":

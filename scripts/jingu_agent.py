@@ -1611,6 +1611,11 @@ class JinguAgent:
             # (p-fix: without this, cp_state.phase retains attempt N's final phase
             #  while the prompt says "REPAIR PHASE: X" — 100% mismatch on attempt 2+)
             if attempt > 1:
+                # Normalize alias → canonical phase name (defense-in-depth)
+                _PHASE_CANON = {"ANALYSIS": "ANALYZE", "EXECUTION": "EXECUTE",
+                                "OBSERVATION": "OBSERVE", "PLANNING": "DESIGN"}
+                _next_attempt_start_phase = _PHASE_CANON.get(
+                    _next_attempt_start_phase, _next_attempt_start_phase)
                 cp_state_holder[0] = initial_reasoning_state(_next_attempt_start_phase)
                 print(f"    [cp-reset] attempt={attempt} start_phase={_next_attempt_start_phase}", flush=True)
                 _next_attempt_start_phase = "OBSERVE"  # reset for next iteration
