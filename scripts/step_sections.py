@@ -250,52 +250,63 @@ def admit_phase_record(
     _result = AdmissionResult()
     _cp_s = cp_state_holder[0] if cp_state_holder is not None else state.cp_state
 
+    # ── Gate 0: Routing enforcement (P0.2) ──────────────────────────────
+    # Peek submitted record WITHOUT consuming. If routing set
+    # required_next_phase, reject on mismatch (record stays unconsumed
+    # so agent can re-examine and resubmit the correct phase).
+    _model = getattr(agent_self, "model", None)
+    _peeked = None
+    if _model is not None and hasattr(_model, "_submitted_phase_record"):
+        _peeked = _model._submitted_phase_record  # peek, not pop
+
+    if _peeked is None:
+        # No record submitted — caller handles this
+        return _result
+
+    if state.required_next_phase is not None:
+        _submitted_phase = (_peeked.get("phase") or "").upper()
+        _required = state.required_next_phase.upper()
+        if _submitted_phase != _required:
+            print(
+                f"    [immediate-admission] ROUTING REJECT:"
+                f" required={_required} submitted={_submitted_phase}"
+                f" — record NOT consumed (agent can retry)",
+                flush=True,
+            )
+            _result.admitted = False
+            _result.retry_messages.append({
+                "role": "user",
+                "content": (
+                    f"[ROUTING ENFORCEMENT]\n"
+                    f"The system requires you to submit a {_required} record.\n"
+                    f"You submitted {_submitted_phase}. This does not match.\n"
+                    f"Return to {_required} phase and submit the correct record."
+                ),
+            })
+            return _result
+        else:
+            # Match — clear the routing constraint
+            print(
+                f"    [immediate-admission] routing match:"
+                f" required={_required} submitted={_submitted_phase}"
+                f" — constraint cleared",
+                flush=True,
+            )
+            state.required_next_phase = None
+
     # ── Gate 1: Record Acquisition ──────────────────────────────────────
+    # Gate 0 passed (or no routing constraint). Now consume the record.
     _pr = None
     _pr_source = "none"
     _pr_foreign_phase = ""
     try:
-        _model = getattr(agent_self, "model", None)
         _tool_submitted = None
         if _model is not None and hasattr(_model, "pop_submitted_phase_record"):
             _tool_submitted = _model.pop_submitted_phase_record()
 
         if _tool_submitted is None:
-            # No record submitted — caller handles this
+            # Should not happen — we peeked a record above. Defensive.
             return _result
-
-        # ── Gate 0: Routing enforcement (P0.2) ───────────────────────────
-        # If routing set required_next_phase, only that phase is accepted.
-        # Mismatch → reject (record consumed/discarded, agent must resubmit).
-        if state.required_next_phase is not None:
-            _submitted_phase = (_tool_submitted.get("phase") or "").upper()
-            if _submitted_phase != state.required_next_phase:
-                print(
-                    f"    [immediate-admission] ROUTING REJECT:"
-                    f" required={state.required_next_phase}"
-                    f" submitted={_submitted_phase}",
-                    flush=True,
-                )
-                _result.admitted = False
-                _result.retry_messages.append({
-                    "role": "user",
-                    "content": (
-                        f"[ROUTING ENFORCEMENT]\n"
-                        f"The system requires you to submit a {state.required_next_phase} record.\n"
-                        f"You submitted {_submitted_phase}. This does not match.\n"
-                        f"Return to {state.required_next_phase} phase and submit the correct record."
-                    ),
-                })
-                return _result
-            else:
-                # Match — clear the routing constraint
-                print(
-                    f"    [immediate-admission] routing match:"
-                    f" required={state.required_next_phase} submitted={_submitted_phase}"
-                    f" — constraint cleared",
-                    flush=True,
-                )
-                state.required_next_phase = None
 
         _pr = build_phase_record_from_structured(
             _tool_submitted, str(old_phase) if old_phase else str(eval_phase)
