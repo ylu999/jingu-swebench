@@ -91,6 +91,22 @@ class TransitionEvaluation:
     tolerated_gate: str = ""  # which gate was force-advanced (e.g. "design_gate")
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+# P0.1: AdmissionResult — immediate admission at submit time
+# ══════════════════════════════════════════════════════════════════════════════
+
+@dataclass
+class AdmissionResult:
+    """Result of immediate admission at submit time."""
+    admitted: bool = False
+    record: object = None           # PhaseRecord if admitted
+    source: str = ""                # "tool_submitted" | "structured" | ...
+    retry_messages: list = dc_field(default_factory=list)
+    stop: bool = False              # True = protocol violation
+    stop_reason: str = ""
+    extraction_telemetry: dict = dc_field(default_factory=dict)
+
+
 # ── Phase 4.5: Rejection Policy Table ─────────────────────────────────────
 # Single source of truth for all rejection → verdict escalation.
 #
@@ -212,6 +228,185 @@ def _route_blocked(eval_phase: str, reason: str, occurrence: int = 0) -> Routing
     )
 
 
+def admit_phase_record(
+    agent_self,
+    *,
+    state: "StepMonitorState",
+    cp_state_holder: "list | None" = None,
+    eval_phase: str,
+    old_phase: str = "",
+    latest_assistant_text: str = "",
+) -> AdmissionResult:
+    """P0.1: Immediate admission — validate and store record at submit time.
+
+    Runs Gate 1 (Record Acquisition) and Gate 3 (Cognition Validation) from
+    evaluate_transition(). Does NOT run phase-specific gates or Principal Gate.
+
+    Returns AdmissionResult:
+      admitted=True  → record appended to state.phase_records
+      admitted=False → retry_messages populated for caller to inject
+      stop=True      → protocol violation, caller should raise StopExecution
+    """
+    _result = AdmissionResult()
+    _cp_s = cp_state_holder[0] if cp_state_holder is not None else state.cp_state
+
+    # ── Gate 1: Record Acquisition ──────────────────────────────────────
+    _pr = None
+    _pr_source = "none"
+    _pr_foreign_phase = ""
+    try:
+        _model = getattr(agent_self, "model", None)
+        _tool_submitted = None
+        if _model is not None and hasattr(_model, "pop_submitted_phase_record"):
+            _tool_submitted = _model.pop_submitted_phase_record()
+
+        if _tool_submitted is None:
+            # No record submitted — caller handles this
+            return _result
+
+        _pr = build_phase_record_from_structured(
+            _tool_submitted, str(old_phase) if old_phase else str(eval_phase)
+        )
+        _pr_source = "tool_submitted"
+        if hasattr(state, "_extraction_tool_submitted"):
+            state._extraction_tool_submitted += 1
+        _declared_phase = (_tool_submitted.get("phase") or "").upper()
+        _foreign = bool(_declared_phase and _declared_phase != eval_phase)
+        print(
+            f"    [immediate-admission] extraction_method=tool_submitted"
+            f" fields={list(_tool_submitted.keys())}"
+            f" phase={eval_phase}",
+            flush=True,
+        )
+        if _foreign:
+            _pr_foreign_phase = _declared_phase
+            _PHASE_ORDER = ["UNDERSTAND", "OBSERVE", "ANALYZE", "DECIDE", "DESIGN", "EXECUTE", "JUDGE"]
+            try:
+                _eval_idx = _PHASE_ORDER.index(eval_phase)
+                _decl_idx = _PHASE_ORDER.index(_declared_phase)
+                _align = "declared_ahead" if _decl_idx > _eval_idx else "declared_behind"
+                _align_delta = _decl_idx - _eval_idx
+            except (ValueError, AttributeError):
+                _align = "unknown_phase"
+                _align_delta = 0
+            print(
+                f"    [immediate-admission] foreign_phase_declared:"
+                f" eval_phase={eval_phase} declared_phase={_declared_phase}"
+                f" alignment={_align} delta={_align_delta}",
+                flush=True,
+            )
+
+        # C-09: Parallel extract_phase_output() for unified telemetry
+        try:
+            _extraction_schema = None
+            try:
+                from jingu_onboard import onboard as _onboard_fn
+                _gov = _onboard_fn()
+                _extraction_schema = _gov.get_constrained_schema(eval_phase)
+            except Exception:
+                pass
+
+            _schema_fields: list[str] = []
+            if _extraction_schema is not None:
+                _schema_props = _extraction_schema.get("properties", {})
+                _schema_fields = [k for k in _schema_props if k not in ("phase", "subtype")]
+
+            _epo_record, _epo_meta = extract_phase_output(
+                tool_submitted=_tool_submitted,
+                structured_parsed=None,
+                agent_message=latest_assistant_text,
+                phase=str(old_phase) if old_phase else str(eval_phase),
+                schema_fields=_schema_fields,
+            )
+
+            if not hasattr(state, "extraction_telemetry"):
+                state.extraction_telemetry = {}
+            state.extraction_telemetry[eval_phase] = {
+                "extraction_source": _epo_meta.source,
+                "schema_field_count": len(_epo_meta.fields_in_schema),
+                "extracted_count": len(_epo_meta.fields_extracted),
+                "missing_count": len(_epo_meta.fields_missing),
+                "fields_extracted": _epo_meta.fields_extracted,
+                "fields_missing": _epo_meta.fields_missing,
+            }
+            _result.extraction_telemetry = state.extraction_telemetry[eval_phase]
+            print(
+                f"    [immediate-admission] extraction phase={eval_phase}"
+                f" source={_epo_meta.source}"
+                f" extracted={len(_epo_meta.fields_extracted)}"
+                f" missing={len(_epo_meta.fields_missing)}",
+                flush=True,
+            )
+        except Exception as _epo_exc:
+            print(f"    [immediate-admission] telemetry error (non-fatal): {_epo_exc}", flush=True)
+
+    except Exception as _pr_exc:
+        print(f"    [immediate-admission] record acquisition error (non-fatal): {_pr_exc}", flush=True)
+        return _result
+
+    if _pr is None:
+        return _result
+
+    # ── Gate 3: Cognition Validation ────────────────────────────────────
+    try:
+        from cognition_prompts import COGNITION_EXECUTION_ENABLED as _COG_ENABLED
+        if _COG_ENABLED:
+            from cognition_prompts import CognitionLoader as _CogLoader
+            from phase_validator import (
+                validate_phase_record as _validate_pr,
+                build_validation_feedback as _build_cog_feedback,
+            )
+            import json as _json_cog
+            import os as _os_cog
+            from pathlib import Path as _Path_cog
+            _bundle_path_cog = _os_cog.environ.get(
+                "JINGU_BUNDLE_PATH",
+                str(_Path_cog(__file__).parent.parent / "bundle.json"),
+            )
+            with open(_bundle_path_cog) as _f_cog:
+                _cog_bundle = _json_cog.load(_f_cog)
+            _cog_loader = _CogLoader(_cog_bundle)
+            _cog_errors = _validate_pr(_pr, _cog_loader)
+            if _cog_errors:
+                _cog_codes = [e.code for e in _cog_errors]
+                print(
+                    f"    [immediate-admission] cognition_validator REJECT errors={_cog_codes}",
+                    flush=True,
+                )
+                _cog_feedback = _build_cog_feedback(_cog_errors, _pr, _cog_loader)
+                _result.admitted = False
+                _result.retry_messages.append({
+                    "role": "user",
+                    "content": (
+                        f"[Cognition Validation Failed]\n\n"
+                        f"{_cog_feedback}\n\n"
+                        f"Fix the issues above and resubmit for phase {eval_phase}."
+                    ),
+                })
+                return _result
+            else:
+                print(
+                    f"    [immediate-admission] cognition_validator PASS phase={_pr.phase}"
+                    f" subtype={_pr.subtype}",
+                    flush=True,
+                )
+    except Exception as _cog_exc:
+        print(f"    [immediate-admission] cognition_validator error (non-fatal): {_cog_exc}", flush=True)
+
+    # ── Admission success: append to state.phase_records ────────────────
+    state.phase_records.append(_pr)
+    _result.admitted = True
+    _result.record = _pr
+    _result.source = _pr_source
+    print(
+        f"    [immediate-admission] ADMITTED phase={eval_phase}"
+        f" record_phase={_pr.phase} source={_pr_source}"
+        f" subtype={_pr.subtype} principals={_pr.principals}",
+        flush=True,
+    )
+    return _result
+
+
 def evaluate_transition(
     agent_self,
     *,
@@ -238,10 +433,33 @@ def evaluate_transition(
     result = TransitionEvaluation()
 
     # ══════════════════════════════════════════════════════════════════
-    # Gate 1: Phase Record Acquisition (Plan-B STRONG)
+    # P0.1: Check if record was already admitted at submit time
+    # If so, skip Gates 1-3 entirely.
     # ══════════════════════════════════════════════════════════════════
-    _pr = None
-    _pr_source = "none"
+    _already_admitted = False
+    for _existing in reversed(state.phase_records):
+        if hasattr(_existing, 'phase') and _existing.phase.upper() == eval_phase:
+            _pr = _existing
+            _pr_source = "pre_admitted"
+            _already_admitted = True
+            print(
+                f"    [evaluate_transition] using pre-admitted record"
+                f" phase={eval_phase} source=pre_admitted",
+                flush=True,
+            )
+            break
+
+    # ══════════════════════════════════════════════════════════════════
+    # Gate 1: Phase Record Acquisition (Plan-B STRONG)
+    # P0.1: If already admitted at submit time, _pr/_pr_source are set
+    # from the pre-admitted check above. Gate 1's pop will return None
+    # (already consumed by admit_phase_record), so _tool_submitted stays
+    # None and the tool_submitted branch is skipped. _pr remains set.
+    # Gate 2 sees _pr is not None → passes. Gate 3 re-validates (safe).
+    # ══════════════════════════════════════════════════════════════════
+    if not _already_admitted:
+        _pr = None
+        _pr_source = "none"
     _pr_foreign_phase = ""
     _diagnostic_pr = None
     try:
@@ -1649,9 +1867,33 @@ def _step_cp_update_and_verdict(
         and hasattr(_model_peek, "_submitted_phase_record")
         and _model_peek._submitted_phase_record is not None
     )
+    # P0.1: immediate admission — initialized before branch so it's always available
+    _admission_result = None
+
     if _has_pending_submission:
         state._steps_without_submission = 0
         state._submission_escalation_level = 0
+
+        # P0.1: immediate admission — validate and store at submit time
+        _admission_result = admit_phase_record(
+            agent_self,
+            state=state,
+            cp_state_holder=cp_state_holder,
+            eval_phase=_current_phase_str,
+            old_phase=_current_phase_str,
+            latest_assistant_text=latest_assistant_text,
+        )
+        if _admission_result.stop:
+            state.early_stop_verdict = VerdictStop(reason=_admission_result.stop_reason)
+            raise StopExecution(_admission_result.stop_reason)
+        elif not _admission_result.admitted:
+            for _retry_msg in _admission_result.retry_messages:
+                agent_self.messages.append(_retry_msg)
+            print(f"    [immediate-admission] REJECTED phase={_current_phase_str}", flush=True)
+        else:
+            state._last_admitted_phase = _current_phase_str
+            print(f"    [immediate-admission] ADMITTED phase={_current_phase_str}"
+                  f" source={_admission_result.source}", flush=True)
     else:
         state._steps_without_submission += 1
 
@@ -1753,15 +1995,15 @@ def _step_cp_update_and_verdict(
             pass  # non-critical — don't crash on hash check failure
 
     # ── Phase 2: Submission-triggered advance ─────────────────────────
-    # If decide_next() returned CONTINUE but agent submitted a phase record,
-    # upgrade to VerdictAdvance. This makes admission the authority for
-    # phase advance — agent demonstrates readiness via submitted record,
-    # gates validate, control plane commits.
-    # EXECUTE excluded: EXECUTE→JUDGE driven by verify signal (task_success),
-    # not by submission. UNDERSTAND excluded: no contract, no submission expected.
+    # P0.1: Now driven by immediate admission result, not raw submission peek.
+    # Only advance if the record was actually admitted (Gates 1+3 passed).
+    # EXECUTE excluded: EXECUTE→JUDGE driven by verify signal (task_success).
+    # UNDERSTAND excluded: no contract, no submission expected.
+    _IMMEDIATE_ADVANCE_PHASES = frozenset({"OBSERVE", "ANALYZE", "DECIDE", "DESIGN"})
     if (isinstance(_step_verdict, VerdictContinue)
-            and _has_pending_submission
-            and _current_phase_str not in ("EXECUTE", "UNDERSTAND")):
+            and _admission_result is not None
+            and _admission_result.admitted
+            and _current_phase_str in _IMMEDIATE_ADVANCE_PHASES):
         from control.reasoning_state import _ADVANCE_TABLE as _adv_tbl
         _submission_next = _adv_tbl.get(_current_phase_str)
         if _submission_next is not None:

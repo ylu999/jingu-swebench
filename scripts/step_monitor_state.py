@@ -153,6 +153,14 @@ class StepMonitorState:
         self._steps_without_submission: int = 0
         self._submission_escalation_level: int = 0  # 0=none, 1=reminder, 2=warning, 3=forced
         self._last_submission_phase: str = ""  # phase at last submission (to detect phase change)
+        # P0.1: immediate admission state
+        self._last_admitted_phase: str = ""           # phase of last admitted record
+        # P0.2: hard routing constraint
+        self.required_next_phase: str | None = None   # set by routing, cleared on match
+        # P0.3: QJ advance trigger
+        self._qj_advance_ready: bool = False          # QJ result available, EXECUTE->JUDGE armed
+        # P0.4: QJ ack enforcement
+        self._qj_corrective_ignored: bool = False     # True when corrective QJ was ignored
         # Telemetry
         self._phase_record_force_total: int = 0
         self._phase_record_admit_total: int = 0
