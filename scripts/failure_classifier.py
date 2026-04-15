@@ -27,9 +27,9 @@ FAILURE_ROUTING_RULES: dict = {
         "required_principals": ["minimal_change", "evidence_linkage"],
     },
     "verify_gap": {
-        "next_phase": "JUDGE",
-        "repair_goal": "Determine whether verification scope is insufficient or evidence is incomplete.",
-        "required_principals": ["evidence_linkage"],
+        "next_phase": "EXECUTE",
+        "repair_goal": "All targeted tests pass but evaluation still fails. Check for P2P regressions, missing updates, formatting issues, or edge cases not covered by F2P tests.",
+        "required_principals": ["evidence_linkage", "minimal_change"],
     },
     "execution_error": {
         "next_phase": "EXECUTE",  # canonical name (not "execution")
