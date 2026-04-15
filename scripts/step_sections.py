@@ -264,6 +264,39 @@ def admit_phase_record(
             # No record submitted — caller handles this
             return _result
 
+        # ── Gate 0: Routing enforcement (P0.2) ───────────────────────────
+        # If routing set required_next_phase, only that phase is accepted.
+        # Mismatch → reject (record consumed/discarded, agent must resubmit).
+        if state.required_next_phase is not None:
+            _submitted_phase = (_tool_submitted.get("phase") or "").upper()
+            if _submitted_phase != state.required_next_phase:
+                print(
+                    f"    [immediate-admission] ROUTING REJECT:"
+                    f" required={state.required_next_phase}"
+                    f" submitted={_submitted_phase}",
+                    flush=True,
+                )
+                _result.admitted = False
+                _result.retry_messages.append({
+                    "role": "user",
+                    "content": (
+                        f"[ROUTING ENFORCEMENT]\n"
+                        f"The system requires you to submit a {state.required_next_phase} record.\n"
+                        f"You submitted {_submitted_phase}. This does not match.\n"
+                        f"Return to {state.required_next_phase} phase and submit the correct record."
+                    ),
+                })
+                return _result
+            else:
+                # Match — clear the routing constraint
+                print(
+                    f"    [immediate-admission] routing match:"
+                    f" required={state.required_next_phase} submitted={_submitted_phase}"
+                    f" — constraint cleared",
+                    flush=True,
+                )
+                state.required_next_phase = None
+
         _pr = build_phase_record_from_structured(
             _tool_submitted, str(old_phase) if old_phase else str(eval_phase)
         )
@@ -1059,6 +1092,13 @@ def evaluate_transition(
                     )
                     if isinstance(_pv_verdict, VerdictRedirect):
                         _pg_redirect_phase = _pv_verdict.to
+                        # P0.2: within-attempt routing enforcement
+                        state.required_next_phase = _pg_redirect_phase
+                        print(
+                            f"    [routing-enforcement] principal gate redirect:"
+                            f" required_next_phase={_pg_redirect_phase}",
+                            flush=True,
+                        )
                         result.pending_messages.append({
                             "role": "user",
                             "content": (
