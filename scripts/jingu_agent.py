@@ -1600,15 +1600,23 @@ class JinguAgent:
         _strategy_entries: list[dict] = []
         _past_approach_summaries: list[str] = []  # WS-4: track approach directions across attempts
         _test_counts_by_attempt: dict[int, int] = {}
+        _next_attempt_start_phase: str = "OBSERVE"  # p-fix: repair routing target for next attempt
         cp_state_holder: list = [initial_reasoning_state("OBSERVE")]
         self._cp_state_holder = cp_state_holder
 
         for attempt in range(1, self._max_attempts + 1):
             print(f"  [attempt {attempt}/{self._max_attempts}] {instance_id}")
 
-            # Clear principal_violation at attempt boundary
-            import dataclasses as _dc_boundary
-            cp_state_holder[0] = _dc_boundary.replace(cp_state_holder[0], principal_violation="")
+            # Reset cp_state at attempt boundary — phase must match repair routing target
+            # (p-fix: without this, cp_state.phase retains attempt N's final phase
+            #  while the prompt says "REPAIR PHASE: X" — 100% mismatch on attempt 2+)
+            if attempt > 1:
+                cp_state_holder[0] = initial_reasoning_state(_next_attempt_start_phase)
+                print(f"    [cp-reset] attempt={attempt} start_phase={_next_attempt_start_phase}", flush=True)
+                _next_attempt_start_phase = "OBSERVE"  # reset for next iteration
+            else:
+                import dataclasses as _dc_boundary
+                cp_state_holder[0] = _dc_boundary.replace(cp_state_holder[0], principal_violation="")
 
             # NBR enforcement: No Blind Retry
             if attempt > 1 and not last_failure.strip() and self._mode != "baseline":
@@ -1671,6 +1679,9 @@ class JinguAgent:
                             "(control-plane verdict=STOP no_signal). "
                             "Change your approach entirely — avoid repeated reads without writing code."
                         )
+                    # p-fix: propagate phase_result routing target to next attempt cp_state
+                    if _pr_target:
+                        _next_attempt_start_phase = _pr_target.upper()
                 if _esv.reason == "task_success":
                     _mon_ts = _attempt_monitor
                     _tr_ts = (jingu_body or {}).get("test_results", {})
@@ -2300,6 +2311,8 @@ class JinguAgent:
                             if _jb_ft and _jb_routing:
                                 _repair = build_repair_prompt(_jb_ft, _jb_cv, _jb_routing)
                                 last_failure = _repair + "\n\n" + last_failure
+                                # p-fix: propagate repair routing target to next attempt cp_state
+                                _next_attempt_start_phase = _jb_routing['next_phase'].upper()
                                 print(f"    [repair-route] attempt={attempt} failure_type={_jb_ft} "
                                       f"next_phase={_jb_routing['next_phase']}", flush=True)
                             if is_data_driven_routing_enabled():
@@ -2310,6 +2323,8 @@ class JinguAgent:
                                         _p216_next, _p216_strategy = route_failure_p216(_p216_phase, _p216_principal)
                                         _p216_prompt = get_strategy_prompt(_p216_strategy)
                                         last_failure = _p216_prompt + "\n\n" + last_failure
+                                        # p-fix: data-driven routing overrides repair routing target
+                                        _next_attempt_start_phase = _p216_next.upper()
                                         print(f"    [p216-routing] attempt={attempt} phase={_p216_phase} "
                                               f"principal={_p216_principal} -> next={_p216_next} "
                                               f"strategy={_p216_strategy}", flush=True)
@@ -2340,6 +2355,8 @@ class JinguAgent:
                             if _jb_ft and _jb_routing:
                                 _repair = build_repair_prompt(_jb_ft, _jb_cv, _jb_routing)
                                 last_failure = _repair + "\n\n" + last_failure
+                                # p-fix: propagate repair routing target to next attempt cp_state
+                                _next_attempt_start_phase = _jb_routing['next_phase'].upper()
                                 print(f"    [repair-route] attempt={attempt} failure_type={_jb_ft} "
                                       f"next_phase={_jb_routing['next_phase']}", flush=True)
                             if is_data_driven_routing_enabled():
@@ -2350,6 +2367,8 @@ class JinguAgent:
                                         _p216_next, _p216_strategy = route_failure_p216(_p216_phase, _p216_principal)
                                         _p216_prompt = get_strategy_prompt(_p216_strategy)
                                         last_failure = _p216_prompt + "\n\n" + last_failure
+                                        # p-fix: data-driven routing overrides repair routing target
+                                        _next_attempt_start_phase = _p216_next.upper()
                                         print(f"    [p216-routing] attempt={attempt} phase={_p216_phase} "
                                               f"principal={_p216_principal} -> next={_p216_next} "
                                               f"strategy={_p216_strategy}", flush=True)
