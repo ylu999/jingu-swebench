@@ -1662,6 +1662,8 @@ class JinguAgent:
         total_llm_calls = 0
         _strategy_entries: list[dict] = []
         _past_approach_summaries: list[str] = []  # WS-4: track approach directions across attempts
+        self._prev_files_written: set[str] = set()  # P0.1: L2 same-files detection
+        self._prev_failure_mode: str | None = None  # P0.2: environment_failure early terminate
         _test_counts_by_attempt: dict[int, int] = {}
         _next_attempt_start_phase: str = "OBSERVE"  # p-fix: repair routing target for next attempt
         _last_failure_type: str = ""  # telemetry: which failure_type drove the routing
@@ -2341,6 +2343,69 @@ class JinguAgent:
                             except Exception:
                                 pass
 
+                            # ── P0.2: environment_failure early terminate ─────────
+                            _fm_now = (jingu_body or {}).get("failure_mode")
+                            if _fm_now == "environment_failure" and attempt > 1:
+                                _prev_fm = getattr(self, '_prev_failure_mode', None)
+                                if _prev_fm == "environment_failure":
+                                    print(f"    [env-early-terminate] consecutive environment_failure "
+                                          f"(attempt {attempt-1}→{attempt}) — STOPPING (non-retryable)",
+                                          flush=True)
+                                    jingu_body["no_progress_repeat"] = "environment_failure_consecutive"
+                                    break
+                            self._prev_failure_mode = _fm_now
+
+                            # ── P0.1: no_progress_repeat_gate ──────────────────────
+                            # Hard enforcement: identical patch = STOP (no more retry).
+                            # Same files + different patch = forced direction change.
+                            _curr_patch_hash = patch_content_hash(patch) if patch else "empty"
+                            _prev_patch_hash = patch_content_hash(_prev_raw_patch) if _prev_raw_patch else None
+                            _curr_files = set((jingu_body or {}).get("files_written", []))
+                            _prev_files = set()  # populated from previous attempt below
+                            if attempt > 1 and _prev_raw_patch and patch:
+                                # L1: identical patch → STOP
+                                if _prev_patch_hash is not None and _curr_patch_hash == _prev_patch_hash:
+                                    print(f"    [no-progress-repeat] L1 IDENTICAL PATCH detected "
+                                          f"hash={_curr_patch_hash} — STOPPING (retry is futile)",
+                                          flush=True)
+                                    jingu_body["no_progress_repeat"] = "L1_identical_patch"
+                                    break
+                                # L2: same files written → forced direction change
+                                # (uses files_written from both attempts)
+                                if hasattr(self, '_prev_files_written') and _curr_files and self._prev_files_written:
+                                    if _curr_files == self._prev_files_written:
+                                        print(f"    [no-progress-repeat] L2 SAME FILES detected "
+                                              f"files={_curr_files} — forcing HARD direction change",
+                                              flush=True)
+                                        jingu_body["no_progress_repeat"] = "L2_same_files"
+                                        retry_plan = RetryPlan(
+                                            root_causes=retry_plan.root_causes + ["no_progress_repeat=L2_same_files"],
+                                            must_do=[
+                                                "You MUST change which file(s) you modify",
+                                                "You MUST form a NEW root cause hypothesis",
+                                                "Re-read the failing test to find what you missed",
+                                            ],
+                                            must_not_do=[
+                                                f"Do NOT modify {', '.join(sorted(_curr_files))} again",
+                                                "Do NOT reuse any part of your previous patch approach",
+                                            ],
+                                            validation_requirement="Patch must target DIFFERENT files than previous attempt",
+                                            next_attempt_prompt=(
+                                                "HARD DIRECTION CHANGE REQUIRED: You modified the exact same files "
+                                                "as your previous attempt and still failed. Your hypothesis about "
+                                                "WHERE the bug is located is wrong. "
+                                                "You MUST: (1) identify a DIFFERENT root cause in DIFFERENT files, "
+                                                "(2) re-read the failing test to understand what it actually checks, "
+                                                "(3) write a fix targeting different code. "
+                                                f"BANNED files: {', '.join(sorted(_curr_files))}"
+                                            )[:600],
+                                            control_action="ADJUST",
+                                            principal_violations=retry_plan.principal_violations,
+                                        )
+                            # Store files_written for next attempt L2 comparison
+                            self._prev_files_written = _curr_files
+                            # ── end no_progress_repeat_gate ────────────────────────
+
                             _prev_raw_patch = patch
                             # WS-4: Track approach direction for exploration enforcement
                             _approach_summary = _extract_approach_summary(jingu_body, patch, fp)
@@ -2467,6 +2532,28 @@ class JinguAgent:
                                               f"strategy={_p216_strategy}", flush=True)
                                 except Exception as _p216_exc:
                                     print(f"    [p216-routing] error (non-fatal): {_p216_exc}", flush=True)
+                            # ── P0.1/P0.2 (else branch): same gates apply ──────
+                            _fm_now_e = (jingu_body or {}).get("failure_mode")
+                            if _fm_now_e == "environment_failure" and attempt > 1:
+                                _prev_fm_e = getattr(self, '_prev_failure_mode', None)
+                                if _prev_fm_e == "environment_failure":
+                                    print(f"    [env-early-terminate] consecutive environment_failure "
+                                          f"(attempt {attempt-1}→{attempt}) — STOPPING",
+                                          flush=True)
+                                    jingu_body["no_progress_repeat"] = "environment_failure_consecutive"
+                                    break
+                            self._prev_failure_mode = _fm_now_e
+                            _curr_ph_e = patch_content_hash(patch) if patch else "empty"
+                            _prev_ph_e = patch_content_hash(_prev_raw_patch) if _prev_raw_patch else None
+                            if attempt > 1 and _prev_raw_patch and patch:
+                                if _prev_ph_e is not None and _curr_ph_e == _prev_ph_e:
+                                    print(f"    [no-progress-repeat] L1 IDENTICAL PATCH (else branch) "
+                                          f"hash={_curr_ph_e} — STOPPING", flush=True)
+                                    jingu_body["no_progress_repeat"] = "L1_identical_patch"
+                                    break
+                            _curr_files_e = set((jingu_body or {}).get("files_written", []))
+                            self._prev_files_written = _curr_files_e
+                            _prev_raw_patch = patch
                             # WS-4: Exploration enforcement (else branch — no retry_plan)
                             if len(_past_approach_summaries) >= 2:
                                 _last_approach = _past_approach_summaries[-1]
