@@ -1994,6 +1994,45 @@ def _parse_traj_for_accepted(traj: dict) -> tuple[bool, int, float, int]:
     return accepted, attempt_count, cost_usd, api_calls
 
 
+def _extract_jingu_body_summary(traj: dict) -> dict:
+    """Extract key fields from traj.jingu_body for per-instance records.
+
+    Returns a flat dict with CV and failure classification fields.
+    Returns empty dict if jingu_body is absent (older batches).
+    """
+    jb = traj.get("jingu_body")
+    if not jb:
+        return {}
+    summary: dict = {}
+    # Controlled verify
+    cv = jb.get("controlled_verify")
+    if cv:
+        summary["cv_eval_resolved"] = cv.get("eval_resolved")
+        summary["cv_f2p_passed"] = cv.get("f2p_passed")
+        summary["cv_f2p_failed"] = cv.get("f2p_failed")
+        summary["cv_p2p_passed"] = cv.get("p2p_passed")
+        summary["cv_p2p_failed"] = cv.get("p2p_failed")
+        summary["cv_kind"] = cv.get("verification_kind")
+    elif jb.get("controlled_verify_result") == "skipped":
+        summary["cv_eval_resolved"] = None
+        summary["cv_kind"] = "skipped"
+    # Failure classification
+    ft = jb.get("failure_type")
+    if ft is not None:
+        summary["failure_type"] = ft
+    fr = jb.get("failure_routing")
+    if fr:
+        summary["failure_next_phase"] = fr.get("next_phase")
+    fl = jb.get("failure_layer")
+    if fl:
+        summary["failure_layer"] = fl
+    # Verify history count
+    vh = jb.get("verify_history")
+    if vh:
+        summary["verify_history_len"] = len(vh)
+    return summary
+
+
 def _get_run_report_meta(s3, batch_name: str) -> dict:
     """Read commit + cost from run_report.json for a batch. Returns {} on miss."""
     try:
@@ -2083,6 +2122,7 @@ def cmd_backfill(args) -> None:
 
         # Load traj files for this batch
         traj_data: dict[str, tuple[bool, int, float, int]] = {}  # iid → (accepted, attempts, cost, calls)
+        jingu_body_data: dict[str, dict] = {}  # iid → jingu_body summary
         paginator = s3.get_paginator("list_objects_v2")
         for attempt_prefix_page in paginator.paginate(
             Bucket=S3_BUCKET, Prefix=f"{batch_name}/attempt_1/"
@@ -2101,6 +2141,9 @@ def cmd_backfill(args) -> None:
                     traj = json.loads(traj_obj["Body"].read())
                     accepted, attempts, cost, calls = _parse_traj_for_accepted(traj)
                     traj_data[iid] = (accepted, attempts, cost, calls)
+                    jb_summary = _extract_jingu_body_summary(traj)
+                    if jb_summary:
+                        jingu_body_data[iid] = jb_summary
                 except Exception as e:
                     print(f"[backfill]   warning: could not read traj for {iid}: {e}", flush=True)
 
@@ -2126,6 +2169,10 @@ def cmd_backfill(args) -> None:
                 "cost_usd": round(inst_cost, 4),
                 "api_calls": inst_calls,
             }
+            # Merge jingu_body summary (CV, failure classification) into run entry
+            jb_sum = jingu_body_data.get(iid, {})
+            if jb_sum:
+                run_entry.update(jb_sum)
 
             if iid not in records:
                 records[iid] = {
@@ -2147,6 +2194,12 @@ def cmd_backfill(args) -> None:
                 # eval_resolved: use latest known value
                 if eval_resolved is not None:
                     records[iid]["eval_resolved"] = eval_resolved
+            # Top-level CV summary from latest run (overwrite with latest)
+            if jb_sum:
+                for _cv_key in ("cv_eval_resolved", "failure_type", "failure_layer",
+                                "failure_next_phase", "cv_kind"):
+                    if _cv_key in jb_sum:
+                        records[iid][_cv_key] = jb_sum[_cv_key]
 
     # Apply known eval results (batch-level → per-instance, approximate)
     # For batches where we know resolved/total, mark accepted instances as resolved
