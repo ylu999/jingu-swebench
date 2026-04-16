@@ -2012,7 +2012,7 @@ def _extract_jingu_body_summary(traj: dict) -> dict:
     elif jb.get("controlled_verify_result") == "skipped":
         summary["cv_eval_resolved"] = None
         summary["cv_kind"] = "skipped"
-    # Failure classification
+    # Failure classification (dual-layer)
     ft = jb.get("failure_type")
     if ft is not None:
         summary["failure_type"] = ft
@@ -2022,6 +2022,13 @@ def _extract_jingu_body_summary(traj: dict) -> dict:
     fl = jb.get("failure_layer")
     if fl:
         summary["failure_layer"] = fl
+    # Behavioral failure mode (full coverage)
+    fm = jb.get("failure_mode")
+    if fm:
+        summary["failure_mode"] = fm
+    fs = jb.get("failure_source")
+    if fs:
+        summary["failure_source"] = fs
     # Verify history count
     vh = jb.get("verify_history")
     if vh:
@@ -2193,7 +2200,8 @@ def cmd_backfill(args) -> None:
             # Top-level CV summary from latest run (overwrite with latest)
             if jb_sum:
                 for _cv_key in ("cv_eval_resolved", "failure_type", "failure_layer",
-                                "failure_next_phase", "cv_kind"):
+                                "failure_next_phase", "cv_kind",
+                                "failure_mode", "failure_source"):
                     if _cv_key in jb_sum:
                         records[iid][_cv_key] = jb_sum[_cv_key]
 

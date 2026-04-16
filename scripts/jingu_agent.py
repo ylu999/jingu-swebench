@@ -1072,7 +1072,7 @@ class JinguAgent:
             extract_jingu_body, classify_failure, get_failure_routing,
             parse_pytest_output,
         )
-        from failure_classifier import classify_failure_layer, route_from_failure
+        from failure_classifier import classify_failure_layer, route_from_failure, derive_failure_mode
         from step_monitor_state import StepMonitorState, StopExecution
 
         instance = self._instance
@@ -1491,6 +1491,21 @@ class JinguAgent:
                     jingu_body["verify_skipped"] = True
                     jingu_body["verify_skip_reason"] = getattr(_monitor, "_verify_skip_reason", "unknown")
                     jingu_body["controlled_verify_result"] = "skipped"
+                # ── Dual-layer failure classification ──────────────────────
+                # failure_mode: behavioral (full coverage, all attempts)
+                # failure_type: semantic (CV-based, high confidence only)
+                # failure_source: provenance marker
+                _fm = derive_failure_mode(jingu_body)
+                jingu_body["failure_mode"] = _fm
+                if jingu_body.get("failure_type") is not None:
+                    jingu_body["failure_source"] = "cv_based"
+                elif _cv_source is None:
+                    jingu_body["failure_source"] = "behavioral_fallback"
+                else:
+                    # CV existed but classify_failure returned None (success)
+                    jingu_body["failure_source"] = "cv_based"
+                print(f"    [failure-mode] mode={_fm} source={jingu_body['failure_source']}"
+                      f" type={jingu_body.get('failure_type', 'none')}", flush=True)
                 # Write jingu_body back into traj.json so gate_runner.js can read it
                 traj["jingu_body"] = jingu_body
                 traj_path.write_text(json.dumps(traj, indent=2, default=str))

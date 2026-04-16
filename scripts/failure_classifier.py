@@ -494,6 +494,49 @@ def classify_failure_layer(
     )
 
 
+# ── Behavioral Failure Mode (full coverage) ──────────────────────────────────
+
+FailureMode = Literal[
+    "no_patch",
+    "no_test_run",
+    "patch_no_progress",
+    "environment_failure",
+    "unknown_failure",
+]
+
+
+def derive_failure_mode(jingu_body: dict) -> FailureMode:
+    """Derive behavioral failure mode from jingu_body signals.
+
+    This runs for ALL attempts (with or without CV) to ensure full coverage.
+    Classification is based on observable execution behavior, not semantic
+    diagnosis. Priority order avoids ambiguity.
+
+    Returns one of FailureMode values.
+    """
+    exit_status = jingu_body.get("exit_status", "")
+    test_results = jingu_body.get("test_results", {})
+    tests_ran = test_results.get("ran_tests", False)
+    files_written = jingu_body.get("files_written", [])
+    patch_summary = jingu_body.get("patch_summary", {})
+    patch_size = (patch_summary.get("lines_added", 0) or 0) + (patch_summary.get("lines_removed", 0) or 0)
+
+    # P1: environment failure — abnormal exit, no patch, no tests
+    if exit_status not in ("Submitted", "") and not tests_ran and not files_written:
+        return "environment_failure"
+
+    # P2: no patch — agent didn't produce any code change
+    if patch_size == 0 or not files_written:
+        return "no_patch"
+
+    # P3: patch exists but tests never ran
+    if not tests_ran:
+        return "no_test_run"
+
+    # P4: patch exists, tests ran — coarse bucket (not semantic diagnosis)
+    return "patch_no_progress"
+
+
 # ── Routing from FailureRecord ───────────────────────────────────────────────
 
 def route_from_failure(record: FailureRecord) -> dict:
