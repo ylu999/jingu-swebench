@@ -1934,31 +1934,27 @@ def cmd_history(args) -> None:
 # ── backfill ───────────────────────────────────────────────────────────────────
 
 # All production batch prefixes to backfill (chronological order)
-_BACKFILL_BATCHES = [
-    "batch-p8-verified-b1",
-    "batch-p9-admission-b1",
-    "batch-p10-scan-fixed",
-    "batch-p11-gd8",
-    "batch-p11-gov-pack",
-    "batch-p12-gd9",
-    "batch-p13-gd9b",
-    "batch-p14-gd10",
-    "batch-p15-ylite",
-    "batch-p16-ylite",
-    "batch-p18-attempt-terminal",
-    "batch-p19-bugABC",
-    "batch-p20",
-    "batch-p21",
-    "batch-p22",
-    "batch-p25-b2",
-    "batch-p25-b3",
-    "batch-p25-b4",
-    "batch-p25-b5",
-    "batch-p25-b6",
-    "batch-p25-b7",
-    "batch-p25-b8",
-    "batch-p25-b10",
-]
+def _discover_backfill_batches(s3=None) -> list[str]:
+    """Auto-discover all batch prefixes in S3 that have predictions.jsonl.
+
+    Replaces the old hardcoded _BACKFILL_BATCHES list. Excludes eval-* prefixes
+    and smoke-* prefixes (single-instance tests, not full batches).
+    """
+    if s3 is None:
+        s3 = boto3.client("s3", region_name=REGION)
+    batches: list[str] = []
+    paginator = s3.get_paginator("list_objects_v2")
+    for page in paginator.paginate(Bucket=S3_BUCKET):
+        for obj in page.get("Contents", []):
+            key = obj["Key"]
+            if not key.endswith("predictions.jsonl"):
+                continue
+            batch = key.split("/")[0]
+            if batch.startswith("eval-"):
+                continue
+            batches.append(batch)
+    batches.sort()
+    return batches
 
 # Eval results known from CloudWatch (batch → resolved/total)
 _KNOWN_EVAL_RESULTS: dict[str, tuple[int, int]] = {
@@ -2075,7 +2071,7 @@ def cmd_backfill(args) -> None:
     s3 = boto3.client("s3", region_name=REGION)
     dry_run = getattr(args, "dry_run", False)
 
-    batches = getattr(args, "batches", None) or _BACKFILL_BATCHES
+    batches = getattr(args, "batches", None) or _discover_backfill_batches(s3)
     print(f"[backfill] processing {len(batches)} batches...", flush=True)
     if dry_run:
         print("[backfill] DRY RUN — no writes", flush=True)
