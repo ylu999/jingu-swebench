@@ -685,7 +685,9 @@ BASE_CONFIG = {
             # Setting None suppresses the param entirely, which works correctly.
             "parallel_tool_calls": None,
             # Extended thinking via Bedrock: temperature must be 1 (Bedrock requirement)
+            # max_tokens must be > budget_tokens (Bedrock validation, enforced ~2026-04-16)
             "thinking": {"type": "enabled", "budget_tokens": 10000},
+            "max_tokens": 16000,
             "temperature": 1,
         },
     },
