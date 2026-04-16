@@ -1595,7 +1595,7 @@ class JinguAgent:
             GATE_MODE, RETRY_CONTROLLER_ENABLED, STRUCTURED_OUTPUT_ENABLED,
             STRATEGY_LOG_PATH, STRATEGY_TABLE_PATH,
             _try_parse_structured_output,
-            classify_admission, patch_fingerprint, patch_content_hash,
+            classify_admission, patch_fingerprint, patch_content_hash, patch_similarity,
             score_patch, normalize_patch, extract_test_counts,
             check_test_progress_invariant, compute_attempt_delta,
             build_execution_feedback, extract_principal_violation_codes,
@@ -1880,10 +1880,44 @@ class JinguAgent:
                             f"BANNED files: {', '.join(sorted(_nprg_curr_files))}"
                         )[:600]
 
+            # ── Dual-patch hard similarity check (Exp H Step 3) ──────────────
+            # After attempt 2+, measure Jaccard similarity between current and previous
+            # patch. If > 0.7 threshold, the agent failed to diversify — log it and
+            # escalate the prompt for the next attempt (if available).
+            _dp_sim = -1.0
+            if attempt > 1 and patch and _prev_raw_patch:
+                _dp_sim = patch_similarity(_prev_raw_patch, patch)
+                _dp_threshold = 0.7
+                _dp_too_similar = _dp_sim > _dp_threshold
+                print(f"    [dual-patch-check] attempt={attempt} similarity={_dp_sim:.3f} "
+                      f"threshold={_dp_threshold} too_similar={_dp_too_similar}",
+                      flush=True)
+                if jingu_body:
+                    jingu_body["dual_patch_similarity"] = round(_dp_sim, 3)
+                    jingu_body["dual_patch_too_similar"] = _dp_too_similar
+                # If too similar AND more attempts remain, escalate the prompt
+                if _dp_too_similar and attempt < self._max_attempts:
+                    _nprg_prompt = (
+                        "SIMILARITY REJECTION: Your patch is {:.0f}% similar to the previous "
+                        "attempt — this does NOT count as a different approach.\n\n"
+                        "Your previous patch:\n```diff\n{}\n```\n\n"
+                        "You MUST produce a FUNDAMENTALLY different patch:\n"
+                        "- Target a DIFFERENT root cause\n"
+                        "- Modify DIFFERENT functions or code paths\n"
+                        "- Do NOT make cosmetic changes to the same fix\n"
+                        "The similarity check will reject patches >70% similar."
+                    ).format(
+                        _dp_sim * 100,
+                        (_prev_raw_patch[:1200] + "\n... [truncated]")
+                        if len(_prev_raw_patch) > 1200 else _prev_raw_patch
+                    )
+                    print(f"    [dual-patch-check] ESCALATED prompt for attempt {attempt + 1}",
+                          flush=True)
+
             self._prev_files_written = _nprg_curr_files
             _prev_raw_patch = patch or _prev_raw_patch  # preserve previous if current empty
-            # persist nprg fields into traj (pre-gate runs in run(), not _run_attempt())
-            if jingu_body and (_nprg_l1_pre or _nprg_l2_pre):
+            # persist nprg/dual-patch fields into traj
+            if jingu_body and (_nprg_l1_pre or _nprg_l2_pre or _dp_sim >= 0):
                 _nprg_traj_path = (self._output_dir / f"attempt_{attempt}"
                                    / instance_id / f"{instance_id}.traj.json")
                 if _nprg_traj_path.exists():
@@ -2626,26 +2660,44 @@ class JinguAgent:
                 last_failure = ""
                 agent_exit = None
 
+            # ── Dual-patch forced exploration (Exp H) ──────────────────────────
+            # After attempt 1 fails CV: inject the FULL patch diff into the prompt.
+            # This is structural information — the agent sees exactly what it produced
+            # and is told to produce something different. This controls the output space,
+            # not reasoning.
+            _dual_patch_enabled = __import__("os").environ.get("DUAL_PATCH", "1") != "0"
+            if _dual_patch_enabled and attempt == 1 and patch and last_failure:
+                _cv_dp = (jingu_body or {}).get("controlled_verify", {})
+                _cv_resolved_dp = _cv_dp.get("eval_resolved", False)
+                if not _cv_resolved_dp and _nprg_curr_files:
+                    # Truncate patch to fit in context (max 1500 chars of diff)
+                    _patch_preview = patch[:1500]
+                    if len(patch) > 1500:
+                        _patch_preview += "\n... [truncated]"
+                    _dual_patch_prompt = (
+                        "DUAL-PATCH EXPLORATION REQUIRED.\n\n"
+                        "Your previous attempt produced this EXACT patch that FAILED:\n"
+                        "```diff\n"
+                        f"{_patch_preview}\n"
+                        "```\n\n"
+                        "This patch DID NOT fix the issue. The test still fails.\n\n"
+                        "You MUST now produce a STRUCTURALLY DIFFERENT patch:\n"
+                        "- Modify DIFFERENT lines of code (not the same lines with minor variations)\n"
+                        "- Consider a DIFFERENT root cause hypothesis\n"
+                        "- If possible, fix the bug in a DIFFERENT file or function\n\n"
+                        f"BANNED: Do not reproduce the changes above. Files previously modified: "
+                        f"{', '.join(sorted(_nprg_curr_files))}\n"
+                        "If you believe the same file needs modification, you must change "
+                        "DIFFERENT lines or use a FUNDAMENTALLY different approach.\n"
+                    )
+                    last_failure = _dual_patch_prompt + "\n" + last_failure
+                    print(f"    [dual-patch] attempt=1 injected full patch diff ({len(_patch_preview)}c) "
+                          f"+ ban files={sorted(_nprg_curr_files)}", flush=True)
+
             # ── NPRG deferred injection: prepend NPRG prompt AFTER retry controller ──
             # Two modes:
             # 1. Reactive (attempt>1): _nprg_prompt set by L1/L2 detection earlier
-            # 2. Preemptive (attempt=1): if attempt 1 failed CV and produced a patch,
-            #    preemptively ban same-file same-approach for attempt 2
-            if not _nprg_prompt and _nprg_enabled_pre and attempt == 1 and patch and last_failure:
-                _cv_pre = (jingu_body or {}).get("controlled_verify", {})
-                _cv_resolved_pre = _cv_pre.get("eval_resolved", False)
-                if not _cv_resolved_pre and _nprg_curr_files:
-                    _nprg_prompt = (
-                        "WARNING: Your previous attempt modified "
-                        f"{', '.join(sorted(_nprg_curr_files))} but FAILED all fail-to-pass tests. "
-                        "You MUST try a COMPLETELY different approach this time. "
-                        "Re-read the failing test output below carefully — understand what the test "
-                        "ACTUALLY checks, not what you assumed. Consider whether the bug is in a "
-                        "DIFFERENT file or requires a DIFFERENT type of fix. "
-                        "Do NOT repeat the same change pattern."
-                    )[:600]
-                    print(f"    [nprg_preemptive] attempt=1 failed_cv, injecting direction hint "
-                          f"files={sorted(_nprg_curr_files)}", flush=True)
+            # 2. Preemptive (attempt=1): same-approach ban (now superseded by dual-patch above)
             if _nprg_prompt and last_failure:
                 last_failure = _nprg_prompt + "\n\n" + last_failure
                 print(f"    [nprg_inject] prepended NPRG prompt ({len(_nprg_prompt)}c) to last_failure", flush=True)

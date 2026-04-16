@@ -408,6 +408,17 @@ def patch_content_hash(patch: str) -> str:
     return hashlib.sha256(fingerprint_str.encode()).hexdigest()[:16]
 
 
+def patch_similarity(p1: str, p2: str) -> float:
+    """Jaccard similarity on patch lines. 1.0 = identical, 0.0 = no overlap."""
+    if not p1 or not p2:
+        return 0.0
+    lines1 = set(p1.splitlines())
+    lines2 = set(p2.splitlines())
+    if not lines1 or not lines2:
+        return 0.0
+    return len(lines1 & lines2) / len(lines1 | lines2)
+
+
 # p225-02: LAYER 1 (signal extraction) moved to signal_extraction.py
 
 
