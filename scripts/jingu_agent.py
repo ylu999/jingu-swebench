@@ -1873,6 +1873,10 @@ class JinguAgent:
 
             self._prev_files_written = _nprg_curr_files
             _prev_raw_patch = patch or _prev_raw_patch  # preserve previous if current empty
+            # persist nprg fields into traj (pre-gate runs before gate write)
+            if jingu_body and (_nprg_l1_pre or _nprg_l2_pre):
+                traj["jingu_body"] = jingu_body
+                traj_path.write_text(json.dumps(traj, indent=2, default=str))
             # ── end NPRG pre-gate ──
 
             if not patch:
