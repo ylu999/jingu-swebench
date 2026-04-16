@@ -212,6 +212,8 @@ def print_activation_proof(identity: dict) -> None:
     from control.reasoning_state import NO_PROGRESS_THRESHOLD as _NPT
     print(f"[init] verdict_routing_enabled=True")
     print(f"[init] no_progress_threshold={_NPT}")
+    _nprg_on = __import__("os").environ.get("NPRG_ENABLED", "1") != "0"
+    print(f"[init] nprg_enabled={_nprg_on}")
     # p189: stage-aware prompt injection — activation proof (RT4)
     print(f"[init] phase_injection_enabled=True")
     # p191: in-loop judge — activation proof (RT4)
