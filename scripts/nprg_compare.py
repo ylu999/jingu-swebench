@@ -43,7 +43,8 @@ def load_traj_pairs(batch: str) -> dict:
             obj = s3.get_object(Bucket=S3_BUCKET, Key=key)
             traj = json.loads(obj["Body"].read())
             jb = traj.get("jingu_body", {})
-            patch = jb.get("patch", "") or ""
+            # patch lives in traj.info.submission, NOT jingu_body (which has no patch field)
+            patch = traj.get("info", {}).get("submission", "") or ""
             files_written = sorted(jb.get("files_written", []))
             patch_hash = hashlib.md5(patch.encode()).hexdigest()[:8] if patch else "empty"
 
