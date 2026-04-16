@@ -462,6 +462,87 @@ def admit_phase_record(
     except Exception as _cog_exc:
         print(f"    [immediate-admission] cognition_validator error (non-fatal): {_cog_exc}", flush=True)
 
+    # ── Gate 4: ANALYZE Quality Gate (trajectory collapse prevention) ──
+    # Reject ANALYZE submissions that lack grounded root cause, alternative
+    # hypotheses, or evidence refs. Forces the agent to explore multiple
+    # hypotheses before committing to a single analysis path.
+    if eval_phase == "ANALYZE" and _pr is not None:
+        _aq_failures: list[str] = []
+
+        # Check 1: root_cause must reference code (file path or function name)
+        _rc = getattr(_pr, "root_cause", "") or ""
+        _rc_has_grounding = bool(
+            _rc
+            and len(_rc) >= 10
+            and any(
+                sig in _rc
+                for sig in ("/", ".py", ".js", ".ts", "def ", "class ", "function ", "()", "::")
+            )
+        )
+        if not _rc_has_grounding:
+            _aq_failures.append(
+                "ROOT_CAUSE lacks code grounding. "
+                "Point to the exact file, function, or line causing the issue."
+            )
+
+        # Check 2: at least 1 alternative hypothesis
+        _alt = getattr(_pr, "alternative_hypotheses", []) or []
+        _alt_valid = [
+            h for h in _alt
+            if isinstance(h, dict) and (h.get("hypothesis") or h.get("description") or "").strip()
+        ]
+        if len(_alt_valid) < 1:
+            _aq_failures.append(
+                "No alternative hypotheses provided. "
+                "You MUST consider at least 1 alternative cause and explain "
+                "why it was ruled out. This prevents premature commitment to "
+                "a single analysis path."
+            )
+
+        # Check 3: evidence_refs non-empty
+        _ev = getattr(_pr, "evidence_refs", []) or []
+        if len(_ev) < 1:
+            _aq_failures.append(
+                "No evidence references. Cite at least one file:line or test name "
+                "that supports your analysis."
+            )
+
+        if _aq_failures:
+            # Track rejection count to avoid infinite ANALYZE loops
+            if not hasattr(state, "_analyze_quality_rejections"):
+                state._analyze_quality_rejections = 0
+            state._analyze_quality_rejections += 1
+
+            # Allow max 2 rejections — after that, let it through to avoid deadlock
+            if state._analyze_quality_rejections <= 2:
+                _aq_msg = "\n".join(f"  - {f}" for f in _aq_failures)
+                print(
+                    f"    [immediate-admission] ANALYZE QUALITY REJECT"
+                    f" ({state._analyze_quality_rejections}/2)"
+                    f" failures={len(_aq_failures)}: {_aq_failures}",
+                    flush=True,
+                )
+                _result.admitted = False
+                _result.retry_messages.append({
+                    "role": "user",
+                    "content": (
+                        f"[ANALYZE QUALITY GATE — REJECTED]\n\n"
+                        f"Your analysis submission was rejected for quality issues:\n"
+                        f"{_aq_msg}\n\n"
+                        f"IMPORTANT: Do NOT proceed to a fix. Go back and deepen your "
+                        f"analysis. Consider alternative root causes. Look at the code "
+                        f"more carefully. What else could explain the test failure?\n\n"
+                        f"Resubmit your ANALYZE record with the issues fixed."
+                    ),
+                })
+                return _result
+            else:
+                print(
+                    f"    [immediate-admission] ANALYZE QUALITY: bypassed"
+                    f" (max rejections reached, allowing through)",
+                    flush=True,
+                )
+
     # ── Admission success: append to state.phase_records ────────────────
     state.phase_records.append(_pr)
     _result.admitted = True

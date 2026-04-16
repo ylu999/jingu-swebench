@@ -82,8 +82,8 @@ FIELD_SPECS: list[FieldSpec] = [
     ),
     FieldSpec(
         name="alternative_hypotheses",
-        description="At least 2 hypotheses with rejection reasoning for non-chosen",
-        required=False,
+        description="At least 1 alternative hypothesis with rejection reasoning — prevents premature trajectory collapse",
+        required=True,
         semantic_check="multiple_distinct_hypotheses",
     ),
     FieldSpec(
