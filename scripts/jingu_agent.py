@@ -2627,8 +2627,25 @@ class JinguAgent:
                 agent_exit = None
 
             # ── NPRG deferred injection: prepend NPRG prompt AFTER retry controller ──
-            # NPRG detection runs early (pre-gate), but last_failure injection must happen
-            # AFTER the retry controller sets last_failure, otherwise it gets overwritten.
+            # Two modes:
+            # 1. Reactive (attempt>1): _nprg_prompt set by L1/L2 detection earlier
+            # 2. Preemptive (attempt=1): if attempt 1 failed CV and produced a patch,
+            #    preemptively ban same-file same-approach for attempt 2
+            if not _nprg_prompt and _nprg_enabled_pre and attempt == 1 and patch and last_failure:
+                _cv_pre = (jingu_body or {}).get("controlled_verify", {})
+                _cv_resolved_pre = _cv_pre.get("eval_resolved", False)
+                if not _cv_resolved_pre and _nprg_curr_files:
+                    _nprg_prompt = (
+                        "WARNING: Your previous attempt modified "
+                        f"{', '.join(sorted(_nprg_curr_files))} but FAILED all fail-to-pass tests. "
+                        "You MUST try a COMPLETELY different approach this time. "
+                        "Re-read the failing test output below carefully — understand what the test "
+                        "ACTUALLY checks, not what you assumed. Consider whether the bug is in a "
+                        "DIFFERENT file or requires a DIFFERENT type of fix. "
+                        "Do NOT repeat the same change pattern."
+                    )[:600]
+                    print(f"    [nprg_preemptive] attempt=1 failed_cv, injecting direction hint "
+                          f"files={sorted(_nprg_curr_files)}", flush=True)
             if _nprg_prompt and last_failure:
                 last_failure = _nprg_prompt + "\n\n" + last_failure
                 print(f"    [nprg_inject] prepended NPRG prompt ({len(_nprg_prompt)}c) to last_failure", flush=True)
