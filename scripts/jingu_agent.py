@@ -1821,6 +1821,7 @@ class JinguAgent:
 
             # ── NPRG pre-gate: runs BEFORE patch check (L2 uses files_written, not patch) ──
             _nprg_enabled_pre = __import__("os").environ.get("NPRG_ENABLED", "1") != "0"
+            _nprg_prompt = ""  # deferred: applied AFTER retry controller sets last_failure
             _nprg_curr_files = set((jingu_body or {}).get("files_written", []))
             _nprg_prev_files = getattr(self, '_prev_files_written', set())
             _nprg_curr_hash = patch_content_hash(patch) if patch else "empty"
@@ -1852,9 +1853,9 @@ class JinguAgent:
                         print(f"    [nprg_triggered] level=L1 action=FORCE_NEW_APPROACH", flush=True)
                         if jingu_body:
                             jingu_body["no_progress_repeat"] = "L1_identical_patch"
-                        # L1: identical patch → inject strong direction change into last_failure
-                        # (L1 STOP via break is useless when max_attempts=2 because attempt already ran)
-                        last_failure = (
+                        # L1: store prompt for deferred injection AFTER retry controller
+                        # (setting last_failure here gets overwritten by retry controller at line ~2441)
+                        _nprg_prompt = (
                             "CRITICAL: Your patch is IDENTICAL to your previous attempt — "
                             "exact same diff, zero progress. Your entire approach is wrong. "
                             "You MUST: (1) re-read the failing test output carefully, "
@@ -1868,8 +1869,8 @@ class JinguAgent:
                               f"files={sorted(_nprg_curr_files)}", flush=True)
                         if jingu_body:
                             jingu_body["no_progress_repeat"] = "L2_same_files"
-                        # L2 modifies last_failure to force direction change
-                        last_failure = (
+                        # L2: store prompt for deferred injection AFTER retry controller
+                        _nprg_prompt = (
                             "HARD DIRECTION CHANGE REQUIRED: You modified the exact same files "
                             "as your previous attempt and still failed. Your hypothesis about "
                             "WHERE the bug is located is wrong. "
@@ -2624,6 +2625,16 @@ class JinguAgent:
                                     "gate_code": "STRUCTURAL_OK"})
                 last_failure = ""
                 agent_exit = None
+
+            # ── NPRG deferred injection: prepend NPRG prompt AFTER retry controller ──
+            # NPRG detection runs early (pre-gate), but last_failure injection must happen
+            # AFTER the retry controller sets last_failure, otherwise it gets overwritten.
+            if _nprg_prompt and last_failure:
+                last_failure = _nprg_prompt + "\n\n" + last_failure
+                print(f"    [nprg_inject] prepended NPRG prompt ({len(_nprg_prompt)}c) to last_failure", flush=True)
+            elif _nprg_prompt and not last_failure:
+                last_failure = _nprg_prompt
+                print(f"    [nprg_inject] set last_failure to NPRG prompt ({len(_nprg_prompt)}c)", flush=True)
 
         t_inst.stop()
 
