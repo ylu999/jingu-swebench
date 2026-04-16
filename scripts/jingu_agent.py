@@ -1818,6 +1818,63 @@ class JinguAgent:
             _test_counts_by_attempt[attempt] = extract_test_counts(jingu_body)
 
             t_gate = Timer(f"jingu gate attempt={attempt}", parent=t_inst)
+
+            # ── NPRG pre-gate: runs BEFORE patch check (L2 uses files_written, not patch) ──
+            _nprg_enabled_pre = __import__("os").environ.get("NPRG_ENABLED", "1") != "0"
+            _nprg_curr_files = set((jingu_body or {}).get("files_written", []))
+            _nprg_prev_files = getattr(self, '_prev_files_written', set())
+            _nprg_curr_hash = patch_content_hash(patch) if patch else "empty"
+            _nprg_prev_hash = patch_content_hash(_prev_raw_patch) if _prev_raw_patch else None
+
+            _nprg_l1_pre = (attempt > 1 and _nprg_prev_hash is not None
+                            and _nprg_curr_hash != "empty"
+                            and _nprg_curr_hash == _nprg_prev_hash)
+            _nprg_l2_pre = (attempt > 1 and _nprg_curr_files and _nprg_prev_files
+                            and _nprg_curr_files == _nprg_prev_files
+                            and not _nprg_l1_pre)
+
+            if attempt > 1:
+                print(f"    [nprg_state] attempt={attempt} "
+                      f"curr_files={sorted(_nprg_curr_files)} prev_files={sorted(_nprg_prev_files)} "
+                      f"curr_hash={_nprg_curr_hash} prev_hash={_nprg_prev_hash} "
+                      f"l1={_nprg_l1_pre} l2={_nprg_l2_pre} enabled={_nprg_enabled_pre}",
+                      flush=True)
+
+            if _nprg_l1_pre or _nprg_l2_pre:
+                _nprg_level_pre = "L1_identical_patch" if _nprg_l1_pre else "L2_same_files"
+                print(f"    [nprg_detected] attempt={attempt} level={_nprg_level_pre} "
+                      f"enabled={_nprg_enabled_pre}", flush=True)
+                if jingu_body:
+                    jingu_body["nprg_detected"] = _nprg_level_pre
+
+                if _nprg_enabled_pre:
+                    if _nprg_l1_pre and _prev_raw_patch and patch:
+                        print(f"    [nprg_triggered] level=L1 action=STOP", flush=True)
+                        if jingu_body:
+                            jingu_body["no_progress_repeat"] = "L1_identical_patch"
+                        self._prev_files_written = _nprg_curr_files
+                        _prev_raw_patch = patch
+                        break
+                    if _nprg_l2_pre:
+                        print(f"    [nprg_triggered] level=L2 action=FORCE_DIRECTION_CHANGE "
+                              f"files={sorted(_nprg_curr_files)}", flush=True)
+                        if jingu_body:
+                            jingu_body["no_progress_repeat"] = "L2_same_files"
+                        # L2 modifies last_failure to force direction change
+                        last_failure = (
+                            "HARD DIRECTION CHANGE REQUIRED: You modified the exact same files "
+                            "as your previous attempt and still failed. Your hypothesis about "
+                            "WHERE the bug is located is wrong. "
+                            "You MUST: (1) identify a DIFFERENT root cause in DIFFERENT files, "
+                            "(2) re-read the failing test to understand what it actually checks, "
+                            "(3) write a fix targeting different code. "
+                            f"BANNED files: {', '.join(sorted(_nprg_curr_files))}"
+                        )[:600]
+
+            self._prev_files_written = _nprg_curr_files
+            _prev_raw_patch = patch or _prev_raw_patch  # preserve previous if current empty
+            # ── end NPRG pre-gate ──
+
             if not patch:
                 print(f"    [gate] EMPTY — no submission (exit={agent_exit})")
                 attempts_log.append({
@@ -2355,81 +2412,9 @@ class JinguAgent:
                                     break
                             self._prev_failure_mode = _fm_now
 
-                            # ── P0.1: no_progress_repeat_gate ──────────────────────
-                            # A/B flag: NPRG_ENABLED=0 disables gate actions (detection still logged)
-                            _nprg_enabled = __import__("os").environ.get("NPRG_ENABLED", "1") != "0"
-                            _curr_patch_hash = patch_content_hash(patch) if patch else "empty"
-                            _prev_patch_hash = patch_content_hash(_prev_raw_patch) if _prev_raw_patch else None
-                            _curr_files = set((jingu_body or {}).get("files_written", []))
-                            _prev_files_w = getattr(self, '_prev_files_written', set())
+                            # P0.1 (no_progress_repeat_gate) now runs in pre-gate section
+                            # before `if not patch:` check — see "NPRG pre-gate" above.
 
-                            # Signal 0: always log state for debugging
-                            if attempt > 1:
-                                print(f"    [nprg_state] attempt={attempt} "
-                                      f"curr_files={sorted(_curr_files)} prev_files={sorted(_prev_files_w)} "
-                                      f"curr_hash={_curr_patch_hash} prev_hash={_prev_patch_hash} "
-                                      f"jb_keys={sorted((jingu_body or {}).keys())[:5]}",
-                                      flush=True)
-
-                            # Signal 1: detection (always logged, even when gate OFF)
-                            _nprg_l1 = (attempt > 1 and _prev_patch_hash is not None
-                                        and _curr_patch_hash != "empty"
-                                        and _curr_patch_hash == _prev_patch_hash)
-                            _nprg_l2 = (attempt > 1 and _curr_files and _prev_files_w
-                                        and _curr_files == _prev_files_w
-                                        and not _nprg_l1)
-                            if _nprg_l1 or _nprg_l2:
-                                _nprg_level = "L1_identical_patch" if _nprg_l1 else "L2_same_files"
-                                print(f"    [nprg_detected] attempt={attempt} level={_nprg_level} "
-                                      f"enabled={_nprg_enabled} "
-                                      f"prev_hash={_prev_patch_hash} curr_hash={_curr_patch_hash} "
-                                      f"prev_files={sorted(_prev_files_w)} curr_files={sorted(_curr_files)}",
-                                      flush=True)
-                                jingu_body["nprg_detected"] = _nprg_level
-
-                            if attempt > 1 and _nprg_enabled:
-                                # L1: identical patch → STOP (requires both patches non-empty)
-                                if _nprg_l1 and _prev_raw_patch and patch:
-                                    print(f"    [nprg_triggered] level=L1 action=STOP "
-                                          f"hash={_curr_patch_hash}", flush=True)
-                                    jingu_body["no_progress_repeat"] = "L1_identical_patch"
-                                    break
-                                # L2: same files written → forced direction change (files-based, no patch needed)
-                                if _nprg_l2:
-                                    print(f"    [nprg_triggered] level=L2 action=FORCE_DIRECTION_CHANGE "
-                                          f"files={sorted(_curr_files)}", flush=True)
-                                    jingu_body["no_progress_repeat"] = "L2_same_files"
-                                    # Signal 3: post-gate state
-                                    print(f"    [nprg_post_gate] prev_phase={retry_plan.control_action if retry_plan else 'none'} "
-                                          f"new_phase=ADJUST forced=true", flush=True)
-                                    retry_plan = RetryPlan(
-                                        root_causes=retry_plan.root_causes + ["no_progress_repeat=L2_same_files"],
-                                        must_do=[
-                                            "You MUST change which file(s) you modify",
-                                            "You MUST form a NEW root cause hypothesis",
-                                            "Re-read the failing test to find what you missed",
-                                        ],
-                                        must_not_do=[
-                                            f"Do NOT modify {', '.join(sorted(_curr_files))} again",
-                                            "Do NOT reuse any part of your previous patch approach",
-                                        ],
-                                        validation_requirement="Patch must target DIFFERENT files than previous attempt",
-                                        next_attempt_prompt=(
-                                            "HARD DIRECTION CHANGE REQUIRED: You modified the exact same files "
-                                            "as your previous attempt and still failed. Your hypothesis about "
-                                            "WHERE the bug is located is wrong. "
-                                            "You MUST: (1) identify a DIFFERENT root cause in DIFFERENT files, "
-                                            "(2) re-read the failing test to understand what it actually checks, "
-                                            "(3) write a fix targeting different code. "
-                                            f"BANNED files: {', '.join(sorted(_curr_files))}"
-                                        )[:600],
-                                        control_action="ADJUST",
-                                        principal_violations=retry_plan.principal_violations,
-                                    )
-                            self._prev_files_written = _curr_files
-                            # ── end no_progress_repeat_gate ────────────────────────
-
-                            _prev_raw_patch = patch
                             # WS-4: Track approach direction for exploration enforcement
                             _approach_summary = _extract_approach_summary(jingu_body, patch, fp)
                             if _approach_summary:
@@ -2566,48 +2551,8 @@ class JinguAgent:
                                     jingu_body["no_progress_repeat"] = "environment_failure_consecutive"
                                     break
                             self._prev_failure_mode = _fm_now_e
-                            _nprg_enabled_e = __import__("os").environ.get("NPRG_ENABLED", "1") != "0"
-                            _curr_ph_e = patch_content_hash(patch) if patch else "empty"
-                            _prev_ph_e = patch_content_hash(_prev_raw_patch) if _prev_raw_patch else None
-                            _curr_files_e = set((jingu_body or {}).get("files_written", []))
-                            _prev_files_e = getattr(self, '_prev_files_written', set())
-
-                            # Signal 0: debug state (else branch)
-                            if attempt > 1:
-                                print(f"    [nprg_state] attempt={attempt} branch=else "
-                                      f"curr_files={sorted(_curr_files_e)} prev_files={sorted(_prev_files_e)} "
-                                      f"curr_hash={_curr_ph_e} prev_hash={_prev_ph_e}",
-                                      flush=True)
-
-                            # Signal 1: detection (else branch)
-                            _nprg_l1_e = (attempt > 1 and _prev_ph_e is not None
-                                          and _curr_ph_e != "empty"
-                                          and _curr_ph_e == _prev_ph_e)
-                            _nprg_l2_e = (attempt > 1 and _curr_files_e and _prev_files_e
-                                          and _curr_files_e == _prev_files_e
-                                          and not _nprg_l1_e)
-                            if _nprg_l1_e or _nprg_l2_e:
-                                _nprg_lvl_e = "L1_identical_patch" if _nprg_l1_e else "L2_same_files"
-                                print(f"    [nprg_detected] attempt={attempt} level={_nprg_lvl_e} "
-                                      f"enabled={_nprg_enabled_e} branch=else "
-                                      f"prev_hash={_prev_ph_e} curr_hash={_curr_ph_e} "
-                                      f"prev_files={sorted(_prev_files_e)} curr_files={sorted(_curr_files_e)}",
-                                      flush=True)
-                                jingu_body["nprg_detected"] = _nprg_lvl_e
-
-                            if attempt > 1 and _nprg_enabled_e:
-                                if _nprg_l1_e and _prev_raw_patch and patch:
-                                    print(f"    [nprg_triggered] level=L1 action=STOP branch=else "
-                                          f"hash={_curr_ph_e}", flush=True)
-                                    jingu_body["no_progress_repeat"] = "L1_identical_patch"
-                                    break
-                                # L2 in else branch: no retry_plan to modify, just record
-                                if _nprg_l2_e:
-                                    print(f"    [nprg_triggered] level=L2 action=RECORD_ONLY branch=else "
-                                          f"files={sorted(_curr_files_e)}", flush=True)
-                                    jingu_body["no_progress_repeat"] = "L2_same_files"
-                            self._prev_files_written = _curr_files_e
-                            _prev_raw_patch = patch
+                            # P0.1 (no_progress_repeat_gate) now runs in pre-gate section
+                            # before `if not patch:` check — see "NPRG pre-gate" above.
                             # WS-4: Exploration enforcement (else branch — no retry_plan)
                             if len(_past_approach_summaries) >= 2:
                                 _last_approach = _past_approach_summaries[-1]
