@@ -2379,14 +2379,14 @@ class JinguAgent:
                                       flush=True)
                                 jingu_body["nprg_detected"] = _nprg_level
 
-                            if attempt > 1 and _nprg_enabled and _prev_raw_patch and patch:
-                                # L1: identical patch → STOP
-                                if _nprg_l1:
+                            if attempt > 1 and _nprg_enabled:
+                                # L1: identical patch → STOP (requires both patches non-empty)
+                                if _nprg_l1 and _prev_raw_patch and patch:
                                     print(f"    [nprg_triggered] level=L1 action=STOP "
                                           f"hash={_curr_patch_hash}", flush=True)
                                     jingu_body["no_progress_repeat"] = "L1_identical_patch"
                                     break
-                                # L2: same files written → forced direction change
+                                # L2: same files written → forced direction change (files-based, no patch needed)
                                 if _nprg_l2:
                                     print(f"    [nprg_triggered] level=L2 action=FORCE_DIRECTION_CHANGE "
                                           f"files={sorted(_curr_files)}", flush=True)
@@ -2580,8 +2580,8 @@ class JinguAgent:
                                       flush=True)
                                 jingu_body["nprg_detected"] = _nprg_lvl_e
 
-                            if attempt > 1 and _nprg_enabled_e and _prev_raw_patch and patch:
-                                if _nprg_l1_e:
+                            if attempt > 1 and _nprg_enabled_e:
+                                if _nprg_l1_e and _prev_raw_patch and patch:
                                     print(f"    [nprg_triggered] level=L1 action=STOP branch=else "
                                           f"hash={_curr_ph_e}", flush=True)
                                     jingu_body["no_progress_repeat"] = "L1_identical_patch"
