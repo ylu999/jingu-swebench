@@ -2363,6 +2363,14 @@ class JinguAgent:
                             _curr_files = set((jingu_body or {}).get("files_written", []))
                             _prev_files_w = getattr(self, '_prev_files_written', set())
 
+                            # Signal 0: always log state for debugging
+                            if attempt > 1:
+                                print(f"    [nprg_state] attempt={attempt} "
+                                      f"curr_files={sorted(_curr_files)} prev_files={sorted(_prev_files_w)} "
+                                      f"curr_hash={_curr_patch_hash} prev_hash={_prev_patch_hash} "
+                                      f"jb_keys={sorted((jingu_body or {}).keys())[:5]}",
+                                      flush=True)
+
                             # Signal 1: detection (always logged, even when gate OFF)
                             _nprg_l1 = (attempt > 1 and _prev_patch_hash is not None
                                         and _curr_patch_hash != "empty"
@@ -2563,6 +2571,13 @@ class JinguAgent:
                             _prev_ph_e = patch_content_hash(_prev_raw_patch) if _prev_raw_patch else None
                             _curr_files_e = set((jingu_body or {}).get("files_written", []))
                             _prev_files_e = getattr(self, '_prev_files_written', set())
+
+                            # Signal 0: debug state (else branch)
+                            if attempt > 1:
+                                print(f"    [nprg_state] attempt={attempt} branch=else "
+                                      f"curr_files={sorted(_curr_files_e)} prev_files={sorted(_prev_files_e)} "
+                                      f"curr_hash={_curr_ph_e} prev_hash={_prev_ph_e}",
+                                      flush=True)
 
                             # Signal 1: detection (else branch)
                             _nprg_l1_e = (attempt > 1 and _prev_ph_e is not None
