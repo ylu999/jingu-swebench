@@ -1159,6 +1159,7 @@ def _wait_for_task(task_id: str, label: str, poll_interval: int = 30, timeout_s:
 
 def _launch_ecs_task(batch_name: str, instance_ids: list[str], max_attempts: int,
                      workers: int, mode: str = "jingu", model: str | None = None,
+                     extra_env: list[dict] | None = None,
                      max_retries: int = 10, retry_interval: int = 120) -> str:
     """Launch an ECS run task and return task_id. Retries on resource failures."""
     ecs = boto3.client("ecs", region_name=REGION)
@@ -1178,6 +1179,8 @@ def _launch_ecs_task(batch_name: str, instance_ids: list[str], max_attempts: int
     ]
     if model:
         env.append({"name": "JINGU_MODEL", "value": model})
+    if extra_env:
+        env.extend(extra_env)
     overrides = {"containerOverrides": [{"name": "runner", "command": cmd_parts, "environment": env}]}
 
     for attempt in range(max_retries + 1):
@@ -1517,6 +1520,7 @@ def cmd_pipeline(args) -> None:
     model = getattr(args, "model", None)
     skip_smoke = args.skip_smoke
     eval_only = getattr(args, "eval_only", False)
+    extra_env = _parse_env_args(args)
 
     # ── Step 0: Replay gate (always runs, even in eval-only mode) ──────────
     if not _run_replay_gate():
@@ -1692,7 +1696,8 @@ def cmd_pipeline(args) -> None:
     if not skip_smoke:
         print(f"\n[pipeline] STEP 1/3: smoke test ({smoke_instance})", flush=True)
         smoke_task_id = _launch_ecs_task(
-            smoke_batch, [smoke_instance], max_attempts=2, workers=3, model=model
+            smoke_batch, [smoke_instance], max_attempts=2, workers=3, model=model,
+            extra_env=extra_env,
         )
         print(f"[pipeline] smoke task_id={smoke_task_id}", flush=True)
         smoke_task = _wait_for_task(smoke_task_id, "smoke", poll_interval=20, timeout_s=1800)
@@ -1739,7 +1744,8 @@ def cmd_pipeline(args) -> None:
     # ── Step 2: Batch run ─────────────────────────────────────────────────────
     print(f"\n[pipeline] STEP 2/3: batch run ({len(instance_ids)} instances)", flush=True)
     batch_task_id = _launch_ecs_task(
-        batch_name, instance_ids, max_attempts=max_attempts, workers=workers, model=model
+        batch_name, instance_ids, max_attempts=max_attempts, workers=workers, model=model,
+        extra_env=extra_env,
     )
     print(f"[pipeline] batch task_id={batch_task_id}", flush=True)
     print(f"[pipeline] monitor: python scripts/ops.py logs --task-id {batch_task_id}", flush=True)
@@ -2841,6 +2847,8 @@ def main():
                             help="Skip smoke + batch; eval existing S3 predictions only")
     p_pipeline.add_argument("--eval-workers", type=int, default=4,
                             help="Number of workers for eval task (default: 4)")
+    p_pipeline.add_argument("--env", nargs="+", default=None,
+                            help="Extra env vars: KEY=VALUE (passed to ECS task)")
     p_pipeline.add_argument("--runbook-ack", action="store_true",
                             help="Required: confirms runbook was read this session")
 
