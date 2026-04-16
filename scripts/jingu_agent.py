@@ -1072,7 +1072,7 @@ class JinguAgent:
             extract_jingu_body, classify_failure, get_failure_routing,
             parse_pytest_output,
         )
-        from failure_classifier import classify_failure_layer, route_from_failure, derive_failure_mode
+        from failure_classifier import classify_failure_layer, route_from_failure, derive_failure_mode, route_from_failure_mode
         from step_monitor_state import StepMonitorState, StopExecution
 
         instance = self._instance
@@ -1606,6 +1606,7 @@ class JinguAgent:
         from failure_classifier import (
             classify_failure, get_routing as get_failure_routing,
             classify_failure_layer, route_from_failure,
+            route_from_failure_mode,
         )
         from repair_prompts import build_repair_prompt
         from failure_routing import route_failure as route_failure_p216, is_data_driven_routing_enabled
@@ -2382,6 +2383,17 @@ class JinguAgent:
                                 _last_failure_type = _jb_ft or ""
                                 print(f"    [repair-route] attempt={attempt} failure_type={_jb_ft} "
                                       f"next_phase={_jb_routing['next_phase']}", flush=True)
+                            elif not _jb_ft:
+                                # P1 fallback: route from failure_mode when CV absent
+                                _jb_fm = (jingu_body or {}).get("failure_mode")
+                                if _jb_fm:
+                                    _fm_routing = route_from_failure_mode(_jb_fm)
+                                    _fm_hint = f"[FAILURE MODE: {_jb_fm}] {_fm_routing['repair_goal']}"
+                                    last_failure = _fm_hint + "\n\n" + last_failure
+                                    _next_attempt_start_phase = _fm_routing['next_phase'].upper()
+                                    _last_failure_type = f"fm:{_jb_fm}"
+                                    print(f"    [repair-route-fm] attempt={attempt} failure_mode={_jb_fm} "
+                                          f"next_phase={_fm_routing['next_phase']}", flush=True)
                             if is_data_driven_routing_enabled():
                                 try:
                                     _p216_phase = (jingu_body or {}).get("last_phase", "ANALYZE").upper()
@@ -2428,6 +2440,17 @@ class JinguAgent:
                                 _last_failure_type = _jb_ft or ""
                                 print(f"    [repair-route] attempt={attempt} failure_type={_jb_ft} "
                                       f"next_phase={_jb_routing['next_phase']}", flush=True)
+                            elif not _jb_ft:
+                                # P1 fallback: route from failure_mode when CV absent
+                                _jb_fm = (jingu_body or {}).get("failure_mode")
+                                if _jb_fm:
+                                    _fm_routing = route_from_failure_mode(_jb_fm)
+                                    _fm_hint = f"[FAILURE MODE: {_jb_fm}] {_fm_routing['repair_goal']}"
+                                    last_failure = _fm_hint + "\n\n" + last_failure
+                                    _next_attempt_start_phase = _fm_routing['next_phase'].upper()
+                                    _last_failure_type = f"fm:{_jb_fm}"
+                                    print(f"    [repair-route-fm] attempt={attempt} failure_mode={_jb_fm} "
+                                          f"next_phase={_fm_routing['next_phase']}", flush=True)
                             if is_data_driven_routing_enabled():
                                 try:
                                     _p216_phase = (jingu_body or {}).get("last_phase", "ANALYZE").upper()

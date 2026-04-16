@@ -537,6 +537,46 @@ def derive_failure_mode(jingu_body: dict) -> FailureMode:
     return "patch_no_progress"
 
 
+# ── Routing from FailureMode (behavioral fallback) ───────────────────────────
+
+FAILURE_MODE_ROUTING: dict[str, dict] = {
+    "no_patch": {
+        "next_phase": "ANALYZE",
+        "repair_goal": "No code changes were produced. Re-analyze the problem: identify the exact file and function to modify before writing any code.",
+        "required_principals": ["causal_grounding", "evidence_linkage"],
+    },
+    "no_test_run": {
+        "next_phase": "EXECUTE",
+        "repair_goal": "A patch was written but tests were never executed. Ensure the patch compiles, run the failing tests, and verify the fix.",
+        "required_principals": ["action_grounding"],
+    },
+    "patch_no_progress": {
+        "next_phase": "DESIGN",
+        "repair_goal": "A patch was written and tests ran but did not pass. The fix direction may be wrong or incomplete. Re-examine which code path the failing tests exercise.",
+        "required_principals": ["causal_grounding", "minimal_change"],
+    },
+    "environment_failure": {
+        "next_phase": "EXECUTE",
+        "repair_goal": "The execution environment failed (abnormal exit, no output). Focus on producing a clean patch and running tests.",
+        "required_principals": ["action_grounding"],
+    },
+    "unknown_failure": {
+        "next_phase": "ANALYZE",
+        "repair_goal": "Insufficient signal to diagnose. Start from scratch: read the failing tests, identify the root cause, design a minimal fix.",
+        "required_principals": ["causal_grounding", "evidence_linkage"],
+    },
+}
+
+
+def route_from_failure_mode(failure_mode: FailureMode) -> dict:
+    """Get routing for a behavioral failure mode.
+
+    Used as FALLBACK when failure_type (CV-based) is not available.
+    Returns dict with next_phase, repair_goal, required_principals.
+    """
+    return FAILURE_MODE_ROUTING.get(failure_mode, FAILURE_MODE_ROUTING["unknown_failure"])
+
+
 # ── Routing from FailureRecord ───────────────────────────────────────────────
 
 def route_from_failure(record: FailureRecord) -> dict:
