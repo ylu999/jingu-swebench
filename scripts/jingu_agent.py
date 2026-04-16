@@ -1849,12 +1849,20 @@ class JinguAgent:
 
                 if _nprg_enabled_pre:
                     if _nprg_l1_pre and _prev_raw_patch and patch:
-                        print(f"    [nprg_triggered] level=L1 action=STOP", flush=True)
+                        print(f"    [nprg_triggered] level=L1 action=FORCE_NEW_APPROACH", flush=True)
                         if jingu_body:
                             jingu_body["no_progress_repeat"] = "L1_identical_patch"
-                        self._prev_files_written = _nprg_curr_files
-                        _prev_raw_patch = patch
-                        break
+                        # L1: identical patch → inject strong direction change into last_failure
+                        # (L1 STOP via break is useless when max_attempts=2 because attempt already ran)
+                        last_failure = (
+                            "CRITICAL: Your patch is IDENTICAL to your previous attempt — "
+                            "exact same diff, zero progress. Your entire approach is wrong. "
+                            "You MUST: (1) re-read the failing test output carefully, "
+                            "(2) identify what the test ACTUALLY checks (not what you assumed), "
+                            "(3) try a COMPLETELY different fix strategy targeting different logic. "
+                            f"BANNED: Do not touch {', '.join(sorted(_nprg_curr_files))} "
+                            "with the same change pattern."
+                        )[:600]
                     if _nprg_l2_pre:
                         print(f"    [nprg_triggered] level=L2 action=FORCE_DIRECTION_CHANGE "
                               f"files={sorted(_nprg_curr_files)}", flush=True)
