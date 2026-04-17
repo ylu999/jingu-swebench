@@ -363,3 +363,90 @@ class TestRepairTargetConsistency:
             target = get_repair_target(phase)
             assert target == phase, \
                 f"{phase} repair_target should be {phase}, got {target}"
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 6. P1.3': EXECUTE → ANALYZE wrong direction redirect
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TestDetectQjWrongDirection:
+    """P1.3': detect_qj_wrong_direction() on StepMonitorState."""
+
+    def _make_state(self):
+        from step_monitor_state import StepMonitorState
+        return StepMonitorState("test__test-0001", attempt=1, instance={
+            "instance_id": "test__test-0001", "repo": "test/test",
+            "base_commit": "abc", "problem_statement": "test",
+        })
+
+    def test_no_qj_history_returns_false(self):
+        state = self._make_state()
+        should, reason = state.detect_qj_wrong_direction()
+        assert not should
+
+    def test_single_qj_returns_false(self):
+        state = self._make_state()
+        state.quick_judge_history = [
+            {"target_status": "error", "direction": "first_signal"},
+        ]
+        should, reason = state.detect_qj_wrong_direction()
+        assert not should
+
+    def test_two_errors_triggers_redirect(self):
+        state = self._make_state()
+        state.quick_judge_history = [
+            {"target_status": "error", "direction": "first_signal"},
+            {"target_status": "error", "direction": "inconclusive"},
+        ]
+        should, reason = state.detect_qj_wrong_direction()
+        assert should
+        assert "qj_wrong_direction" in reason
+
+    def test_two_failed_triggers_redirect(self):
+        state = self._make_state()
+        state.quick_judge_history = [
+            {"target_status": "failed", "direction": "first_signal"},
+            {"target_status": "failed", "direction": "unchanged"},
+        ]
+        should, reason = state.detect_qj_wrong_direction()
+        assert should
+
+    def test_second_passed_cancels_redirect(self):
+        state = self._make_state()
+        state.quick_judge_history = [
+            {"target_status": "error", "direction": "first_signal"},
+            {"target_status": "passed", "direction": "improved"},
+        ]
+        should, reason = state.detect_qj_wrong_direction()
+        assert not should
+
+    def test_improved_direction_cancels_redirect(self):
+        state = self._make_state()
+        state.quick_judge_history = [
+            {"target_status": "failed", "direction": "first_signal"},
+            {"target_status": "failed", "direction": "improved"},
+        ]
+        should, reason = state.detect_qj_wrong_direction()
+        assert not should
+
+    def test_only_fires_once_per_attempt(self):
+        state = self._make_state()
+        state.quick_judge_history = [
+            {"target_status": "error", "direction": "first_signal"},
+            {"target_status": "error", "direction": "inconclusive"},
+        ]
+        should1, _ = state.detect_qj_wrong_direction()
+        assert should1
+        # Mark as used
+        state._execute_analyze_redirect_used = True
+        should2, _ = state.detect_qj_wrong_direction()
+        assert not should2
+
+    def test_mixed_error_and_missing_triggers(self):
+        state = self._make_state()
+        state.quick_judge_history = [
+            {"target_status": "error", "direction": "first_signal"},
+            {"target_status": "missing", "direction": "inconclusive"},
+        ]
+        should, reason = state.detect_qj_wrong_direction()
+        assert should

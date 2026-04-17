@@ -162,6 +162,8 @@ class StepMonitorState:
         self._protocol_routing_reason: str = ""
         # P0.3: QJ advance trigger
         self._qj_advance_ready: bool = False          # QJ result available, EXECUTE->JUDGE armed
+        # P1.3': EXECUTE→ANALYZE redirect on wrong direction (max 1 per attempt)
+        self._execute_analyze_redirect_used: bool = False
         # P0.4: QJ ack enforcement
         self._qj_corrective_ignored: bool = False     # True when corrective QJ was ignored
         # Telemetry
@@ -387,6 +389,42 @@ class StepMonitorState:
                 f"target={_target}",
                 flush=True,
             )
+
+    def detect_qj_wrong_direction(self) -> tuple[bool, str]:
+        """P1.3': Detect repeated QJ failure signal indicating wrong patch direction.
+
+        Returns (should_redirect, reason) where should_redirect=True means
+        EXECUTE should redirect to ANALYZE for re-analysis.
+
+        Trigger: >= 2 consecutive QJ results where target_status is NOT 'passed'
+        and direction is NOT 'improved'. This indicates the agent is patching
+        in the wrong direction and needs to re-analyze the root cause.
+
+        Safety: only fires once per attempt (_execute_analyze_redirect_used).
+        """
+        if self._execute_analyze_redirect_used:
+            return (False, "")
+        if len(self.quick_judge_history) < 2:
+            return (False, "")
+
+        # Check last 2 QJ results
+        recent = self.quick_judge_history[-2:]
+        for qj in recent:
+            target = qj.get("target_status", "unknown")
+            direction = qj.get("direction", "unknown")
+            if target == "passed":
+                return (False, "")
+            if direction == "improved":
+                return (False, "")
+
+        # Both recent QJ results show non-passing, non-improving signals
+        statuses = [qj.get("target_status", "?") for qj in recent]
+        directions = [qj.get("direction", "?") for qj in recent]
+        reason = (
+            f"qj_wrong_direction: last 2 QJ target_status={statuses}"
+            f" direction={directions} — patch not converging on target test"
+        )
+        return (True, reason)
 
     def should_trigger_quick_judge(self, current_patch_hash: str, *, current_phase: str | None = None) -> bool:
         """Check all trigger conditions for quick judge.

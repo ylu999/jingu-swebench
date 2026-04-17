@@ -2154,6 +2154,29 @@ def _step_cp_update_and_verdict(
                     flush=True,
                 )
 
+    # ── Phase 2b-pre: P1.3' EXECUTE → ANALYZE redirect on wrong direction ──
+    # Before QJ-triggered EXECUTE→JUDGE, check if QJ signals show wrong
+    # patch direction. If so, redirect to ANALYZE for re-analysis instead
+    # of advancing to JUDGE with a wrong patch.
+    # Safety: max 1 redirect per attempt (detect_qj_wrong_direction checks flag).
+    if (isinstance(_step_verdict, VerdictContinue)
+            and _current_phase_str == "EXECUTE"):
+        _wd_redirect, _wd_reason = state.detect_qj_wrong_direction()
+        if _wd_redirect:
+            state._execute_analyze_redirect_used = True
+            state._qj_advance_ready = False  # cancel any pending QJ→JUDGE advance
+            _step_verdict = VerdictRedirect(
+                to="ANALYZE", source="qj_wrong_direction",
+                reason="execute_wrong_direction",
+            )
+            # Set routing enforcement so agent MUST submit ANALYZE record
+            state.required_next_phase = "ANALYZE"
+            print(
+                f"    [P1.3'] EXECUTE→ANALYZE redirect triggered:"
+                f" {_wd_reason}",
+                flush=True,
+            )
+
     # ── Phase 2b: QJ-triggered EXECUTE → JUDGE advance (P0.3) ───────
     # When quick-judge returns target_status pass/fail, arm the flag.
     # Consume it here to trigger EXECUTE → JUDGE transition.
@@ -2245,7 +2268,33 @@ def _step_cp_update_and_verdict(
         state.pending_redirect_hint = f"[REDIRECT:{_step_verdict.to}] {_step_verdict.reason}"
         # Phase Submission Enforcement: enriched redirect with cognition context
         _redirect_content = ""
-        if _step_verdict.reason == "execute_no_progress":
+        if _step_verdict.reason == "execute_wrong_direction":
+            # P1.3': EXECUTE→ANALYZE redirect — patch direction wrong
+            _last_rc = state.last_analyze_root_cause or ""
+            _qj_summary = ""
+            if state.quick_judge_history:
+                _recent_qj = state.quick_judge_history[-1]
+                _qj_summary = (
+                    f" Quick judge shows target_status={_recent_qj.get('target_status', '?')},"
+                    f" direction={_recent_qj.get('direction', '?')}."
+                )
+            _redirect_content = (
+                f"[EXECUTE → ANALYZE: WRONG PATCH DIRECTION]\n"
+                f"Your patch is not fixing the target test.{_qj_summary}\n"
+                f"The target test still fails after multiple patch iterations.\n\n"
+                f"Your previous root cause analysis may be incorrect or incomplete.\n"
+                f"Return to ANALYZE phase and:\n"
+                f"1. Re-read the failing test to understand EXACTLY what it expects\n"
+                f"2. Identify what your patch is NOT addressing\n"
+                f"3. Consider alternative root causes\n"
+                f"4. Submit a new ANALYZE record with revised root_cause"
+            )
+            if _last_rc:
+                _redirect_content += (
+                    f"\n\nYour previous root cause was: \"{_last_rc[:200]}\"\n"
+                    f"This analysis led to a patch that does not pass the test. Revise it."
+                )
+        elif _step_verdict.reason == "execute_no_progress":
             _last_rc = state.last_analyze_root_cause or ""
             _rc_hint = ""
             if _last_rc:
