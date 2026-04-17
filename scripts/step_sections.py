@@ -2640,6 +2640,12 @@ def _step_inject_phase(agent_self, *, cp_state_holder: "list | None", state: "St
         from phase_prompt import build_phase_prefix as _build_phase_prefix
         _cp_s = cp_state_holder[0] if cp_state_holder is not None else state.cp_state
         _phase_str = str(_cp_s.phase)
+        # P1.3' fix: when required_next_phase is set (e.g. EXECUTE->ANALYZE redirect),
+        # inject the TARGET phase's prompt, not the current phase's prompt.
+        # Without this, agent gets contradictory signals: redirect says "go to ANALYZE"
+        # but prompt says "write the patch" (EXECUTE).
+        if state.required_next_phase is not None:
+            _phase_str = state.required_next_phase.upper()
         _phase_prefix = _build_phase_prefix(_phase_str)
         if _phase_prefix:
             _phase_content = _phase_prefix.rstrip("\n")
@@ -2659,6 +2665,9 @@ def _step_inject_phase(agent_self, *, cp_state_holder: "list | None", state: "St
         if _model is not None and hasattr(_model, "set_current_phase"):
             _cp_s_b = cp_state_holder[0] if cp_state_holder is not None else state.cp_state
             _phase_b = str(_cp_s_b.phase).upper()
+            # P1.3' fix: same override for plan-b schema injection
+            if state.required_next_phase is not None:
+                _phase_b = state.required_next_phase.upper()
             _schema_b = None
             try:
                 from jingu_onboard import onboard as _onboard_b

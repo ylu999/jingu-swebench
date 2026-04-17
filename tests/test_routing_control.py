@@ -450,3 +450,70 @@ class TestDetectQjWrongDirection:
         ]
         should, reason = state.detect_qj_wrong_direction()
         assert should
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# P1.3' prompt conflict regression: when required_next_phase is set,
+# phase prompt must come from the target phase, not current phase.
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TestPromptFollowsRequiredNextPhase:
+    """Phase prompt injection must use required_next_phase when set."""
+
+    def _make_state(self):
+        from step_monitor_state import StepMonitorState
+        return StepMonitorState("test__test-0001", attempt=1, instance={
+            "instance_id": "test__test-0001", "repo": "test/test",
+            "base_commit": "abc", "problem_statement": "test",
+        })
+
+    def _make_fake_agent(self):
+        """Minimal agent-like object with messages list."""
+        class FakeAgent:
+            def __init__(self):
+                self.messages = []
+                self.n_calls = 5
+                self.model = None
+        return FakeAgent()
+
+    def test_normal_phase_uses_current_phase(self):
+        """Without required_next_phase, prompt comes from current cp_state.phase."""
+        from step_sections import _step_inject_phase
+        state = self._make_state()
+        state.required_next_phase = None  # no redirect
+        agent = self._make_fake_agent()
+        # Set cp_state phase to EXECUTE
+        class FakeCp:
+            phase = "EXECUTE"
+        _step_inject_phase(agent, cp_state_holder=[FakeCp()], state=state)
+        # Should have injected EXECUTE prompt
+        injected = [m for m in agent.messages if "[Phase: EXECUTE]" in m.get("content", "")]
+        assert len(injected) == 1, f"Expected EXECUTE prompt, got {[m['content'][:50] for m in agent.messages]}"
+
+    def test_redirect_uses_target_phase(self):
+        """When required_next_phase=ANALYZE, prompt must be ANALYZE, not EXECUTE."""
+        from step_sections import _step_inject_phase
+        state = self._make_state()
+        state.required_next_phase = "ANALYZE"  # redirect active
+        agent = self._make_fake_agent()
+        class FakeCp:
+            phase = "EXECUTE"  # current phase is still EXECUTE
+        _step_inject_phase(agent, cp_state_holder=[FakeCp()], state=state)
+        # Should have injected ANALYZE prompt, NOT EXECUTE
+        all_content = " ".join(m.get("content", "") for m in agent.messages)
+        assert "[Phase: ANALYZE]" in all_content, \
+            f"Expected ANALYZE prompt when required_next_phase=ANALYZE, got: {all_content[:200]}"
+        assert "[Phase: EXECUTE]" not in all_content, \
+            f"EXECUTE prompt should NOT appear when required_next_phase=ANALYZE"
+
+    def test_redirect_cleared_uses_current_phase_again(self):
+        """After required_next_phase is consumed (set to None), use current phase."""
+        from step_sections import _step_inject_phase
+        state = self._make_state()
+        state.required_next_phase = None  # cleared after agent submitted ANALYZE
+        agent = self._make_fake_agent()
+        class FakeCp:
+            phase = "ANALYZE"  # now actually in ANALYZE
+        _step_inject_phase(agent, cp_state_holder=[FakeCp()], state=state)
+        injected = [m for m in agent.messages if "[Phase: ANALYZE]" in m.get("content", "")]
+        assert len(injected) == 1
