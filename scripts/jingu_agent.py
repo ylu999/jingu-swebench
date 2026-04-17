@@ -1658,6 +1658,7 @@ class JinguAgent:
         attempts_log: list[dict] = []
         last_failure = ""
         _prev_raw_patch = ""
+        _prev_root_cause = ""  # dual-cause: persist attempt 1's root cause for attempt 2 prompt
         _no_progress_streak = 0
         total_llm_calls = 0
         _strategy_entries: list[dict] = []
@@ -1916,6 +1917,12 @@ class JinguAgent:
 
             self._prev_files_written = _nprg_curr_files
             _prev_raw_patch = patch or _prev_raw_patch  # preserve previous if current empty
+            # dual-cause: save root cause from this attempt for next attempt's prompt
+            _jb_dc = jingu_body or {}
+            _phase_recs_dc = _jb_dc.get("phase_records", [])
+            _analyze_rec_dc = next((r for r in _phase_recs_dc if r.get("phase") == "ANALYZE"), None)
+            if _analyze_rec_dc and _analyze_rec_dc.get("root_cause"):
+                _prev_root_cause = _analyze_rec_dc["root_cause"]
             # persist nprg/dual-patch fields into traj
             if jingu_body and (_nprg_l1_pre or _nprg_l2_pre or _dp_sim >= 0):
                 _nprg_traj_path = (self._output_dir / f"attempt_{attempt}"
@@ -2660,39 +2667,57 @@ class JinguAgent:
                 last_failure = ""
                 agent_exit = None
 
-            # ── Dual-patch forced exploration (Exp H) ──────────────────────────
-            # After attempt 1 fails CV: inject the FULL patch diff into the prompt.
-            # This is structural information — the agent sees exactly what it produced
-            # and is told to produce something different. This controls the output space,
-            # not reasoning.
+            # ── Dual-cause + dual-patch forced exploration (Exp I) ─────────────
+            # After attempt 1 fails CV: inject BOTH the root cause analysis AND the
+            # patch diff. Require a DIFFERENT causal hypothesis, not just a different patch.
+            # This controls at the hypothesis level, not just the output level.
             _dual_patch_enabled = __import__("os").environ.get("DUAL_PATCH", "1") != "0"
             if _dual_patch_enabled and attempt == 1 and patch and last_failure:
                 _cv_dp = (jingu_body or {}).get("controlled_verify", {})
                 _cv_resolved_dp = _cv_dp.get("eval_resolved", False)
                 if not _cv_resolved_dp and _nprg_curr_files:
-                    # Truncate patch to fit in context (max 1500 chars of diff)
                     _patch_preview = patch[:1500]
                     if len(patch) > 1500:
                         _patch_preview += "\n... [truncated]"
+
+                    # Build the cause section if we have the root cause
+                    _cause_section = ""
+                    if _prev_root_cause:
+                        _rc_preview = _prev_root_cause[:800]
+                        _cause_section = (
+                            f"Your previous ROOT CAUSE HYPOTHESIS (PROVEN WRONG):\n"
+                            f'"{_rc_preview}"\n\n'
+                            "This hypothesis led to a patch that FAILED all tests. "
+                            "The root cause analysis itself is wrong or incomplete.\n\n"
+                        )
+
                     _dual_patch_prompt = (
-                        "DUAL-PATCH EXPLORATION REQUIRED.\n\n"
-                        "Your previous attempt produced this EXACT patch that FAILED:\n"
+                        "DUAL-CAUSE EXPLORATION REQUIRED.\n\n"
+                        + _cause_section
+                        + "Your previous patch based on that hypothesis:\n"
                         "```diff\n"
                         f"{_patch_preview}\n"
                         "```\n\n"
                         "This patch DID NOT fix the issue. The test still fails.\n\n"
-                        "You MUST now produce a STRUCTURALLY DIFFERENT patch:\n"
-                        "- Modify DIFFERENT lines of code (not the same lines with minor variations)\n"
-                        "- Consider a DIFFERENT root cause hypothesis\n"
-                        "- If possible, fix the bug in a DIFFERENT file or function\n\n"
-                        f"BANNED: Do not reproduce the changes above. Files previously modified: "
-                        f"{', '.join(sorted(_nprg_curr_files))}\n"
-                        "If you believe the same file needs modification, you must change "
-                        "DIFFERENT lines or use a FUNDAMENTALLY different approach.\n"
+                        "You MUST now:\n"
+                        "1. DISCARD your previous root cause hypothesis entirely\n"
+                        "2. Re-read the FAILING TEST output to understand what it ACTUALLY checks\n"
+                        "3. Form a DIFFERENT causal explanation for WHY the test fails\n"
+                        "4. Produce a patch that follows from your NEW hypothesis\n\n"
+                        "CRITICAL RULES:\n"
+                        "- Your new root cause MUST differ from the previous one — "
+                        "not just rewording, but a genuinely different causal story\n"
+                        "- Your patch MUST target different code (different lines, "
+                        "different functions, or a fundamentally different approach)\n"
+                        f"- Files previously modified: {', '.join(sorted(_nprg_curr_files))}\n"
+                        "- If modifying the same file, you MUST change DIFFERENT lines "
+                        "with a DIFFERENT rationale\n"
                     )
                     last_failure = _dual_patch_prompt + "\n" + last_failure
-                    print(f"    [dual-patch] attempt=1 injected full patch diff ({len(_patch_preview)}c) "
-                          f"+ ban files={sorted(_nprg_curr_files)}", flush=True)
+                    _has_cause = "with cause" if _prev_root_cause else "no cause"
+                    print(f"    [dual-cause] attempt=1 injected ({_has_cause}, "
+                          f"patch={len(_patch_preview)}c) "
+                          f"ban files={sorted(_nprg_curr_files)}", flush=True)
 
             # ── NPRG deferred injection: prepend NPRG prompt AFTER retry controller ──
             # Two modes:
