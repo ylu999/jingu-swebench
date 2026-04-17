@@ -563,14 +563,26 @@ def admit_phase_record(
                 f" phase={eval_phase} missing_fields={_proto_missing}",
                 flush=True,
             )
+            # Build field-specific repair hints from protocol specs
+            _field_hints = []
+            _spec_map = {s.name: s for s in _proto_specs if s.phase == eval_phase}
+            for _mf in _proto_missing:
+                _fs = _spec_map.get(_mf)
+                if _fs and _fs.prompt_instruction:
+                    _field_hints.append(f"  - {_mf}: {_fs.prompt_instruction}")
+                elif _fs and _fs.field_type == "enum" and _fs.enum_values:
+                    _field_hints.append(f"  - {_mf}: choose one of [{', '.join(_fs.enum_values)}]")
+                else:
+                    _field_hints.append(f"  - {_mf}: required field, must be non-empty")
+            _hint_block = "\n".join(_field_hints)
             _result.admitted = False
             _result.retry_messages.append({
                 "role": "user",
                 "content": (
                     f"[PROTOCOL VIOLATION — INCOMPLETE SUBMISSION]\n\n"
                     f"Your submission is missing required protocol fields: {_proto_msg}\n\n"
-                    f"ALL required fields must be present in submit_phase_record.\n"
-                    f"Resubmit with the missing fields filled in."
+                    f"Fix these fields:\n{_hint_block}\n\n"
+                    f"Resubmit with ALL required fields. Missing fields = REJECTED."
                 ),
             })
             return _result

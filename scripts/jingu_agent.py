@@ -2782,6 +2782,50 @@ class JinguAgent:
                 last_failure = _nprg_prompt
                 print(f"    [nprg_inject] set last_failure to NPRG prompt ({len(_nprg_prompt)}c)", flush=True)
 
+            # ── Protocol-driven routing: override next_phase based on missing fields ──
+            # If ANALYZE record is incomplete (missing protocol fields), route back
+            # to ANALYZE regardless of what failure_routing says. Protocol > heuristic.
+            try:
+                from protocol_compiler import validate_record_protocol, _get_protocol_specs
+                _proto_specs = _get_protocol_specs()
+                _jb_proto = jingu_body or {}
+                _proto_recs = _jb_proto.get("phase_records", [])
+                _proto_analyze = next((r for r in _proto_recs if r.get("phase") == "ANALYZE"), None)
+                if _proto_analyze:
+                    _proto_missing = validate_record_protocol(_proto_analyze, "ANALYZE", _proto_specs)
+                    if _proto_missing:
+                        _old_route = _next_attempt_start_phase
+                        _next_attempt_start_phase = "ANALYZE"
+                        _proto_hint = (
+                            f"[PROTOCOL ROUTING] Your ANALYZE record is incomplete. "
+                            f"Missing fields: {', '.join(_proto_missing)}. "
+                            f"You must return to ANALYZE and provide these fields."
+                        )
+                        last_failure = _proto_hint + "\n\n" + (last_failure or "")
+                        print(
+                            f"    [protocol-route] OVERRIDE: {_old_route} -> ANALYZE "
+                            f"missing={_proto_missing}",
+                            flush=True,
+                        )
+                elif not _proto_analyze and _proto_recs:
+                    # Had phase records but no ANALYZE — route to ANALYZE
+                    _old_route = _next_attempt_start_phase
+                    _next_attempt_start_phase = "ANALYZE"
+                    _proto_hint = (
+                        "[PROTOCOL ROUTING] No ANALYZE record found. "
+                        "You must complete ANALYZE phase first with all required fields."
+                    )
+                    last_failure = _proto_hint + "\n\n" + (last_failure or "")
+                    print(
+                        f"    [protocol-route] OVERRIDE: {_old_route} -> ANALYZE "
+                        f"reason=no_analyze_record",
+                        flush=True,
+                    )
+            except ImportError:
+                pass
+            except Exception as _proto_route_exc:
+                print(f"    [protocol-route] error (non-fatal): {_proto_route_exc}", flush=True)
+
         t_inst.stop()
 
         inst_usage = _usage_tracker.per_instance().get(instance_id, {})
