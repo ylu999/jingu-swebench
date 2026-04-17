@@ -276,16 +276,37 @@ def _build_repair_templates(definition: ModuleType) -> dict:
 
 
 def _build_routing(definition: ModuleType) -> dict:
-    """Build the routing section."""
+    """Build the routing section.
+
+    principal_routes must cover ALL required + expected principals (S4 check).
+    Each entry maps principal_name -> {next_phase, strategy}.
+    Gate rules provide strategy hints; principals without a gate rule get
+    a generic strategy derived from the repair target.
+    """
     gate_rules: list[GateRule] = definition.GATE_RULES
     repair_target = getattr(definition, "REPAIR_TARGET", definition.PHASE)
 
-    principal_routes: dict[str, str] = {}
+    # Build gate rule lookup: rule.name -> repair_hint
+    gate_hint: dict[str, str] = {}
     for rule in gate_rules:
-        principal_routes[rule.name] = rule.field
+        gate_hint[rule.name] = rule.repair_hint
+
+    # All principals that need routing entries
+    all_principals: list[str] = list(definition.REQUIRED_PRINCIPALS) + list(definition.EXPECTED_PRINCIPALS)
+
+    principal_routes: dict[str, dict] = {}
+    for p in all_principals:
+        hint = gate_hint.get(p)
+        principal_routes[p] = {
+            "next_phase": repair_target,
+            "strategy": hint if hint else f"redirect to {repair_target} for repair",
+        }
 
     return {
-        "default_route": repair_target,
+        "default_route": {
+            "next_phase": repair_target,
+            "strategy": f"redirect to {repair_target} for repair",
+        },
         "principal_routes": principal_routes,
     }
 

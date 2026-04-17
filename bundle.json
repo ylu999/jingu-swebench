@@ -1,7 +1,7 @@
 {
   "version": "1.0.0",
   "compiler_version": "0.1.0",
-  "generated_at": "2026-04-17T02:52:32.307439+00:00",
+  "generated_at": "2026-04-17T03:02:09.625361+00:00",
   "generator_commit": "1ffc8dc",
   "capabilities": [
     "prompt_only",
@@ -22,7 +22,7 @@
     "observation.fact_gathering": {
       "phase": "OBSERVE",
       "subtype": "observation.fact_gathering",
-      "compiled_at": "2026-04-17T02:52:32.305135+00:00",
+      "compiled_at": "2026-04-17T03:02:09.622742+00:00",
       "phase_spec": {
         "name": "OBSERVE",
         "goal": "Gather evidence from the environment: read files, traces, logs, tests.",
@@ -147,14 +147,30 @@
       "prompt": "## Phase: OBSERVE\nGoal: Gather evidence from the environment: read files, traces, logs, tests.\nSubtype: observation.fact_gathering (fact_gathering)\n\n## Required Fields\n- observations\n- evidence_refs\n\n## Forbidden Moves\n- do not analyze or hypothesize (that is ANALYZE)\n- do not propose solutions\n- do not write code\n\n## Forbidden Principals\nDo NOT declare: action_grounding, minimal_change\n\n## Guidance\nGather facts from the codebase. Do NOT hypothesize or propose fixes yet.\n\nRules:\n1. Read the relevant code and document what you observe.\n2. Reference specific files and line numbers.\n3. Do NOT jump to conclusions about root cause.",
       "repair_templates": {},
       "routing": {
-        "default_route": "OBSERVE",
-        "principal_routes": {}
+        "default_route": {
+          "next_phase": "OBSERVE",
+          "strategy": "redirect to OBSERVE for repair"
+        },
+        "principal_routes": {
+          "ontology_alignment": {
+            "next_phase": "OBSERVE",
+            "strategy": "redirect to OBSERVE for repair"
+          },
+          "phase_boundary_discipline": {
+            "next_phase": "OBSERVE",
+            "strategy": "redirect to OBSERVE for repair"
+          },
+          "evidence_completeness": {
+            "next_phase": "OBSERVE",
+            "strategy": "redirect to OBSERVE for repair"
+          }
+        }
       }
     },
     "analysis.root_cause": {
       "phase": "ANALYZE",
       "subtype": "analysis.root_cause",
-      "compiled_at": "2026-04-17T02:52:32.306027+00:00",
+      "compiled_at": "2026-04-17T03:02:09.623748+00:00",
       "phase_spec": {
         "name": "ANALYZE",
         "goal": "Root-cause analysis: connect evidence to a causal hypothesis.",
@@ -391,19 +407,46 @@
         }
       },
       "routing": {
-        "default_route": "OBSERVE",
+        "default_route": {
+          "next_phase": "OBSERVE",
+          "strategy": "redirect to OBSERVE for repair"
+        },
         "principal_routes": {
-          "code_grounding": "root_cause",
-          "alternative_hypothesis": "alternative_hypotheses",
-          "causal_chain": "causal_chain",
-          "invariant_capture": "root_cause"
+          "causal_grounding": {
+            "next_phase": "OBSERVE",
+            "strategy": "redirect to OBSERVE for repair"
+          },
+          "evidence_linkage": {
+            "next_phase": "OBSERVE",
+            "strategy": "redirect to OBSERVE for repair"
+          },
+          "ontology_alignment": {
+            "next_phase": "OBSERVE",
+            "strategy": "redirect to OBSERVE for repair"
+          },
+          "phase_boundary_discipline": {
+            "next_phase": "OBSERVE",
+            "strategy": "redirect to OBSERVE for repair"
+          },
+          "alternative_hypothesis_check": {
+            "next_phase": "OBSERVE",
+            "strategy": "redirect to OBSERVE for repair"
+          },
+          "uncertainty_honesty": {
+            "next_phase": "OBSERVE",
+            "strategy": "redirect to OBSERVE for repair"
+          },
+          "invariant_capture": {
+            "next_phase": "OBSERVE",
+            "strategy": "Identify the behavioral constraint your fix must preserve: what property, contract, or boundary must remain unchanged? What invalid behavior must still be rejected? What valid behavior must remain accepted?"
+          }
         }
       }
     },
     "decision.fix_direction": {
       "phase": "DECIDE",
       "subtype": "decision.fix_direction",
-      "compiled_at": "2026-04-17T02:52:32.306372+00:00",
+      "compiled_at": "2026-04-17T03:02:09.624140+00:00",
       "phase_spec": {
         "name": "DECIDE",
         "goal": "Choose the fix direction based on analysis.",
@@ -553,18 +596,26 @@
         }
       },
       "routing": {
-        "default_route": "DECIDE",
+        "default_route": {
+          "next_phase": "DECIDE",
+          "strategy": "redirect to DECIDE for repair"
+        },
         "principal_routes": {
-          "option_comparison": "options",
-          "selection_justified": "rationale",
-          "chosen_matches_option": "chosen"
+          "option_comparison": {
+            "next_phase": "DECIDE",
+            "strategy": "List at least 2 options with pros and cons"
+          },
+          "constraint_satisfaction": {
+            "next_phase": "DECIDE",
+            "strategy": "redirect to DECIDE for repair"
+          }
         }
       }
     },
     "design.solution_shape": {
       "phase": "DESIGN",
       "subtype": "design.solution_shape",
-      "compiled_at": "2026-04-17T02:52:32.306746+00:00",
+      "compiled_at": "2026-04-17T03:02:09.624607+00:00",
       "phase_spec": {
         "name": "DESIGN",
         "goal": "Design the solution shape before writing code.",
@@ -719,18 +770,26 @@
         }
       },
       "routing": {
-        "default_route": "DESIGN",
+        "default_route": {
+          "next_phase": "DESIGN",
+          "strategy": "redirect to DESIGN for repair"
+        },
         "principal_routes": {
-          "scope_bounded": "files_to_modify",
-          "invariants_identified": "invariants",
-          "constraint_encoding": "scope_boundary"
+          "ontology_alignment": {
+            "next_phase": "DESIGN",
+            "strategy": "redirect to DESIGN for repair"
+          },
+          "constraint_satisfaction": {
+            "next_phase": "DESIGN",
+            "strategy": "redirect to DESIGN for repair"
+          }
         }
       }
     },
     "execution.code_patch": {
       "phase": "EXECUTE",
       "subtype": "execution.code_patch",
-      "compiled_at": "2026-04-17T02:52:32.307096+00:00",
+      "compiled_at": "2026-04-17T03:02:09.624976+00:00",
       "phase_spec": {
         "name": "EXECUTE",
         "goal": "Write the minimal code patch that fixes the issue.",
@@ -848,18 +907,26 @@
         }
       },
       "routing": {
-        "default_route": "EXECUTE",
+        "default_route": {
+          "next_phase": "EXECUTE",
+          "strategy": "redirect to EXECUTE for repair"
+        },
         "principal_routes": {
-          "patch_described": "patch_description",
-          "causal_grounding": "patch_description",
-          "scope_bounded": "files_modified"
+          "minimal_change": {
+            "next_phase": "EXECUTE",
+            "strategy": "redirect to EXECUTE for repair"
+          },
+          "action_grounding": {
+            "next_phase": "EXECUTE",
+            "strategy": "redirect to EXECUTE for repair"
+          }
         }
       }
     },
     "judge.verification": {
       "phase": "JUDGE",
       "subtype": "judge.verification",
-      "compiled_at": "2026-04-17T02:52:32.307424+00:00",
+      "compiled_at": "2026-04-17T03:02:09.625351+00:00",
       "phase_spec": {
         "name": "JUDGE",
         "goal": "Verify the fix: run tests, check correctness, assess completeness.",
@@ -1027,12 +1094,19 @@
         }
       },
       "routing": {
-        "default_route": "JUDGE",
+        "default_route": {
+          "next_phase": "JUDGE",
+          "strategy": "redirect to JUDGE for repair"
+        },
         "principal_routes": {
-          "test_results_present": "test_results",
-          "criteria_verified": "success_criteria_met",
-          "risks_acknowledged": "residual_risks",
-          "verdict_consistent": "test_results"
+          "result_verification": {
+            "next_phase": "JUDGE",
+            "strategy": "redirect to JUDGE for repair"
+          },
+          "uncertainty_honesty": {
+            "next_phase": "JUDGE",
+            "strategy": "redirect to JUDGE for repair"
+          }
         }
       }
     }
