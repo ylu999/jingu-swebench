@@ -216,12 +216,22 @@ def lookup_rejection_policy(reason: str, occurrence: int) -> tuple[str, str, str
 def _route_blocked(eval_phase: str, reason: str, occurrence: int = 0) -> RoutingDecision:
     """Phase 4.5: produce a typed RoutingDecision for a blocked transition.
 
-    Consults _REJECTION_POLICY for strategy and repair hint.
-    RoutingDecision is telemetry-only — verdict is set by the caller.
+    P1.1: routing is now CONTROL, not just telemetry.
+    Uses contract repair_target for cross-phase routing when available.
+    Falls back to eval_phase (stay in current phase) when no repair_target.
     """
     _verdict_type, _strategy, _hint = lookup_rejection_policy(reason, occurrence)
+    # P1.1: derive next_phase from contract repair_target
+    _next_phase = eval_phase  # default: stay in current phase
+    try:
+        from subtype_contracts import get_repair_target
+        _repair = get_repair_target(eval_phase)
+        if _repair:
+            _next_phase = _repair
+    except Exception:
+        pass
     return RoutingDecision(
-        next_phase=eval_phase,
+        next_phase=_next_phase,
         strategy=_strategy,
         repair_hints=[_hint] if _hint else [],
         source="rejection_policy",
@@ -967,10 +977,15 @@ def evaluate_transition(
         if result.verdict == "stop":
             return result
         if _analysis_gate_rejected:
-            result.verdict = "retry"
             result.source = "gate_rejection"
             result.reason = "analysis_gate_rejected"
             result.routing = _route_blocked(eval_phase, result.reason)
+            # P1.1: redirect when routing says different phase, retry otherwise
+            if result.routing.next_phase and result.routing.next_phase != eval_phase:
+                result.verdict = "redirect"
+                result.next_phase = result.routing.next_phase
+            else:
+                result.verdict = "retry"
             return result
 
     # ── Design Gate ──
@@ -989,10 +1004,14 @@ def evaluate_transition(
         if result.verdict == "stop":
             return result
         if _design_gate_rejected:
-            result.verdict = "retry"
             result.source = "gate_rejection"
             result.reason = "design_gate_rejected"
             result.routing = _route_blocked(eval_phase, result.reason)
+            if result.routing.next_phase and result.routing.next_phase != eval_phase:
+                result.verdict = "redirect"
+                result.next_phase = result.routing.next_phase
+            else:
+                result.verdict = "retry"
             return result
 
     # ── Decide Gate ──
@@ -1011,10 +1030,14 @@ def evaluate_transition(
         if result.verdict == "stop":
             return result
         if _decide_gate_rejected:
-            result.verdict = "retry"
             result.source = "gate_rejection"
             result.reason = "decide_gate_rejected"
             result.routing = _route_blocked(eval_phase, result.reason)
+            if result.routing.next_phase and result.routing.next_phase != eval_phase:
+                result.verdict = "redirect"
+                result.next_phase = result.routing.next_phase
+            else:
+                result.verdict = "retry"
             return result
 
     # ── Execute Gate ──
@@ -1033,10 +1056,14 @@ def evaluate_transition(
         if result.verdict == "stop":
             return result
         if _execute_gate_rejected:
-            result.verdict = "retry"
             result.source = "gate_rejection"
             result.reason = "execute_gate_rejected"
             result.routing = _route_blocked(eval_phase, result.reason)
+            if result.routing.next_phase and result.routing.next_phase != eval_phase:
+                result.verdict = "redirect"
+                result.next_phase = result.routing.next_phase
+            else:
+                result.verdict = "retry"
             return result
 
     # ── Judge Gate ──
@@ -1055,10 +1082,14 @@ def evaluate_transition(
         if result.verdict == "stop":
             return result
         if _judge_gate_rejected:
-            result.verdict = "retry"
             result.source = "gate_rejection"
             result.reason = "judge_gate_rejected"
             result.routing = _route_blocked(eval_phase, result.reason)
+            if result.routing.next_phase and result.routing.next_phase != eval_phase:
+                result.verdict = "redirect"
+                result.next_phase = result.routing.next_phase
+            else:
+                result.verdict = "retry"
             return result
 
     # ══════════════════════════════════════════════════════════════════
@@ -2366,6 +2397,16 @@ def _step_cp_update_and_verdict(
                 state.cp_state = _dc_redir.replace(
                     state.cp_state, phase=_redir_target, phase_steps=0
                 )
+            # P1.1: inject redirect reason + repair hints into agent context
+            _redir_hints = "; ".join(_rt.repair_hints) if _rt and _rt.repair_hints else ""
+            _redir_msg = (
+                f"[GATE REDIRECT: {_transition.reason}]\n"
+                f"Your {_eval_phase} submission did not pass the quality gate.\n"
+                f"The system is redirecting you to {_redir_target} phase."
+            )
+            if _redir_hints:
+                _redir_msg += f"\nRepair guidance: {_redir_hints}"
+            agent_self.messages.append({"role": "user", "content": _redir_msg})
             print(
                 f"    [Plan-A] phase_advance BLOCKED + REDIRECT:"
                 f" {_old_phase} → {_redir_target}"
@@ -2376,6 +2417,16 @@ def _step_cp_update_and_verdict(
 
         else:
             # verdict == "retry" — blocked, stay in current phase
+            # P1.1: inject repair hints into agent context so retry is informed
+            _retry_hints = "; ".join(_rt.repair_hints) if _rt and _rt.repair_hints else ""
+            _retry_msg = (
+                f"[GATE RETRY: {_transition.reason}]\n"
+                f"Your {_eval_phase} submission did not pass the quality gate.\n"
+                f"Stay in {_eval_phase} phase and resubmit with improvements."
+            )
+            if _retry_hints:
+                _retry_msg += f"\nRepair guidance: {_retry_hints}"
+            agent_self.messages.append({"role": "user", "content": _retry_msg})
             print(
                 f"    [Plan-A] phase_advance BLOCKED: {_old_phase} → {_new_phase}"
                 f" source={_transition.source} reason={_transition.reason}"
