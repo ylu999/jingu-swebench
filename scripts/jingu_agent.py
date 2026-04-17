@@ -1881,39 +1881,47 @@ class JinguAgent:
                             f"BANNED files: {', '.join(sorted(_nprg_curr_files))}"
                         )[:600]
 
-            # ── Dual-patch hard similarity check (Exp H Step 3) ──────────────
+            # ── Exp J: Hard similarity rejection (upgraded from Exp H) ─────────
             # After attempt 2+, measure Jaccard similarity between current and previous
-            # patch. If > 0.7 threshold, the agent failed to diversify — log it and
-            # escalate the prompt for the next attempt (if available).
+            # patch. If > 0.7 threshold: REJECT this attempt's patch from candidates.
+            # This is a HARD gate, not just a prompt escalation.
             _dp_sim = -1.0
+            _dp_rejected = False
             if attempt > 1 and patch and _prev_raw_patch:
                 _dp_sim = patch_similarity(_prev_raw_patch, patch)
                 _dp_threshold = 0.7
                 _dp_too_similar = _dp_sim > _dp_threshold
-                print(f"    [dual-patch-check] attempt={attempt} similarity={_dp_sim:.3f} "
+                print(f"    [exp-j-similarity] attempt={attempt} similarity={_dp_sim:.3f} "
                       f"threshold={_dp_threshold} too_similar={_dp_too_similar}",
                       flush=True)
                 if jingu_body:
                     jingu_body["dual_patch_similarity"] = round(_dp_sim, 3)
                     jingu_body["dual_patch_too_similar"] = _dp_too_similar
-                # If too similar AND more attempts remain, escalate the prompt
-                if _dp_too_similar and attempt < self._max_attempts:
-                    _nprg_prompt = (
-                        "SIMILARITY REJECTION: Your patch is {:.0f}% similar to the previous "
-                        "attempt — this does NOT count as a different approach.\n\n"
-                        "Your previous patch:\n```diff\n{}\n```\n\n"
-                        "You MUST produce a FUNDAMENTALLY different patch:\n"
-                        "- Target a DIFFERENT root cause\n"
-                        "- Modify DIFFERENT functions or code paths\n"
-                        "- Do NOT make cosmetic changes to the same fix\n"
-                        "The similarity check will reject patches >70% similar."
-                    ).format(
-                        _dp_sim * 100,
-                        (_prev_raw_patch[:1200] + "\n... [truncated]")
-                        if len(_prev_raw_patch) > 1200 else _prev_raw_patch
-                    )
-                    print(f"    [dual-patch-check] ESCALATED prompt for attempt {attempt + 1}",
-                          flush=True)
+                # HARD REJECTION: drop this patch from candidates if too similar
+                if _dp_too_similar:
+                    _dp_rejected = True
+                    # Remove this attempt's candidate if it was already added
+                    candidates = [c for c in candidates if c.get("attempt") != attempt]
+                    print(f"    [exp-j-similarity] HARD REJECT: patch {_dp_sim:.0%} similar, "
+                          f"dropped from candidates", flush=True)
+                    if jingu_body:
+                        jingu_body["exp_j_rejected"] = "similarity"
+                    # Still escalate prompt for next attempt if available
+                    if attempt < self._max_attempts:
+                        _nprg_prompt = (
+                            "SIMILARITY REJECTION: Your patch is {:.0f}% similar to the previous "
+                            "attempt — this does NOT count as a different approach.\n\n"
+                            "Your previous patch:\n```diff\n{}\n```\n\n"
+                            "You MUST produce a FUNDAMENTALLY different patch:\n"
+                            "- Target a DIFFERENT root cause\n"
+                            "- Modify DIFFERENT functions or code paths\n"
+                            "- Do NOT make cosmetic changes to the same fix\n"
+                            "The similarity check will reject patches >70% similar."
+                        ).format(
+                            _dp_sim * 100,
+                            (_prev_raw_patch[:1200] + "\n... [truncated]")
+                            if len(_prev_raw_patch) > 1200 else _prev_raw_patch
+                        )
 
             self._prev_files_written = _nprg_curr_files
             _prev_raw_patch = patch or _prev_raw_patch  # preserve previous if current empty
@@ -1935,6 +1943,24 @@ class JinguAgent:
                     except (json.JSONDecodeError, OSError) as _nprg_e:
                         print(f"    [nprg] traj persist failed: {_nprg_e}", flush=True)
             # ── end NPRG pre-gate ──
+
+            # Exp J: if similarity gate already rejected this patch, skip gate evaluation
+            # and treat as a failed attempt (do not add to candidates)
+            if _dp_rejected:
+                print(f"    [exp-j] skipping gate — patch rejected by similarity gate", flush=True)
+                attempts_log.append({
+                    "attempt": attempt,
+                    "admission_reason": "similarity_rejected",
+                    "patch_fp": patch_fingerprint(patch) if patch else None,
+                    "gate_reason_codes": ["SIMILARITY_REJECTED"],
+                    "exit_status": agent_exit,
+                })
+                last_failure = (
+                    f"Your patch was REJECTED by the similarity gate "
+                    f"({_dp_sim:.0%} similar to previous). "
+                    "You must produce a fundamentally different fix."
+                )
+                continue  # skip to next attempt
 
             if not patch:
                 print(f"    [gate] EMPTY — no submission (exit={agent_exit})")
@@ -2667,10 +2693,11 @@ class JinguAgent:
                 last_failure = ""
                 agent_exit = None
 
-            # ── Dual-cause + dual-patch forced exploration (Exp I) ─────────────
-            # After attempt 1 fails CV: inject BOTH the root cause analysis AND the
-            # patch diff. Require a DIFFERENT causal hypothesis, not just a different patch.
-            # This controls at the hypothesis level, not just the output level.
+            # ── Exp J: Dual-cause + dual-patch + hard enforcement + strategy taxonomy ──
+            # Three layers of diversity enforcement:
+            # Layer 1 (dual-cause): require different causal hypothesis + different strategy type
+            # Layer 2 (dual-patch): Jaccard rejection prevents similar patches (at line ~1900)
+            # Layer 3 (strategy taxonomy): expand hypothesis space with explicit repair patterns
             _dual_patch_enabled = __import__("os").environ.get("DUAL_PATCH", "1") != "0"
             if _dual_patch_enabled and attempt == 1 and patch and last_failure:
                 _cv_dp = (jingu_body or {}).get("controlled_verify", {})
@@ -2680,43 +2707,68 @@ class JinguAgent:
                     if len(patch) > 1500:
                         _patch_preview += "\n... [truncated]"
 
-                    # Build the cause section if we have the root cause
+                    # Classify attempt 1's strategy type from the patch
+                    _prev_strategy = "unknown"
+                    if _prev_root_cause:
+                        _rc_lower = _prev_root_cause.lower()
+                        if any(w in _rc_lower for w in ["regex", "pattern", "re.compile", "lookahead", "match"]):
+                            _prev_strategy = "REGEX_FIX"
+                        elif any(w in _rc_lower for w in ["copy", "shallow", "deep copy", "dict(", ".copy()"]):
+                            _prev_strategy = "STATE_COPY_FIX"
+                        elif any(w in _rc_lower for w in ["propagat", "flow", "pass through", "not forwarded"]):
+                            _prev_strategy = "DATAFLOW_FIX"
+                        elif any(w in _rc_lower for w in ["pars", "tokeniz", "split", "extract"]):
+                            _prev_strategy = "PARSER_REWRITE"
+                        elif any(w in _rc_lower for w in ["check", "guard", "assert", "invariant", "boundary", "trim"]):
+                            _prev_strategy = "INVARIANT_FIX"
+
+                    # Build the cause section with strategy ban
                     _cause_section = ""
                     if _prev_root_cause:
                         _rc_preview = _prev_root_cause[:800]
                         _cause_section = (
                             f"Your previous ROOT CAUSE HYPOTHESIS (PROVEN WRONG):\n"
                             f'"{_rc_preview}"\n\n'
+                            f"Strategy type used: {_prev_strategy}\n\n"
                             "This hypothesis led to a patch that FAILED all tests. "
                             "The root cause analysis itself is wrong or incomplete.\n\n"
                         )
 
                     _dual_patch_prompt = (
-                        "DUAL-CAUSE EXPLORATION REQUIRED.\n\n"
+                        "DUAL-CAUSE EXPLORATION REQUIRED (with strategy diversity).\n\n"
                         + _cause_section
                         + "Your previous patch based on that hypothesis:\n"
                         "```diff\n"
                         f"{_patch_preview}\n"
                         "```\n\n"
                         "This patch DID NOT fix the issue. The test still fails.\n\n"
+                        "STRATEGY TAXONOMY — you MUST choose a DIFFERENT strategy type:\n"
+                        "  1. REGEX_FIX — adjusting regex pattern logic\n"
+                        "  2. PARSER_REWRITE — restructuring parsing/extraction logic\n"
+                        "  3. DATAFLOW_FIX — fixing value propagation between components\n"
+                        "  4. STATE_COPY_FIX — ensuring internal state is properly copied/preserved\n"
+                        "  5. INVARIANT_FIX — enforcing constraints, boundary checks, or trim logic\n"
+                        "  6. MISSING_SECONDARY_FIX — the primary fix is incomplete, a second change is needed\n"
+                        "  7. API_CONTRACT_FIX — fixing how a function's return value or signature is used\n\n"
+                        f"BANNED strategy: {_prev_strategy} (already tried and FAILED)\n\n"
                         "You MUST now:\n"
                         "1. DISCARD your previous root cause hypothesis entirely\n"
-                        "2. Re-read the FAILING TEST output to understand what it ACTUALLY checks\n"
-                        "3. Form a DIFFERENT causal explanation for WHY the test fails\n"
-                        "4. Produce a patch that follows from your NEW hypothesis\n\n"
-                        "CRITICAL RULES:\n"
-                        "- Your new root cause MUST differ from the previous one — "
-                        "not just rewording, but a genuinely different causal story\n"
-                        "- Your patch MUST target different code (different lines, "
-                        "different functions, or a fundamentally different approach)\n"
+                        "2. Re-read the FAILING TEST to understand what it ACTUALLY checks\n"
+                        "3. Pick a DIFFERENT strategy type from the taxonomy above\n"
+                        "4. Form a root cause that matches your chosen strategy\n"
+                        "5. Produce a patch that follows from your NEW hypothesis\n\n"
+                        "HARD CONSTRAINTS (violation = automatic rejection):\n"
+                        "- Your patch will be compared to the previous one — "
+                        "if >70% similar, it will be REJECTED\n"
                         f"- Files previously modified: {', '.join(sorted(_nprg_curr_files))}\n"
                         "- If modifying the same file, you MUST change DIFFERENT lines "
                         "with a DIFFERENT rationale\n"
+                        "- State which strategy type you chose and why\n"
                     )
                     last_failure = _dual_patch_prompt + "\n" + last_failure
                     _has_cause = "with cause" if _prev_root_cause else "no cause"
-                    print(f"    [dual-cause] attempt=1 injected ({_has_cause}, "
-                          f"patch={len(_patch_preview)}c) "
+                    print(f"    [exp-j] attempt=1 injected ({_has_cause}, "
+                          f"strategy={_prev_strategy}, patch={len(_patch_preview)}c) "
                           f"ban files={sorted(_nprg_curr_files)}", flush=True)
 
             # ── NPRG deferred injection: prepend NPRG prompt AFTER retry controller ──
