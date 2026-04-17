@@ -197,3 +197,72 @@ class TestRendererIsSolePath:
         )
         assert "For ANALYZE:" not in source
         assert "For EXECUTE:" not in source
+
+
+# ── Stage 7: Field onboarding completeness ────────────────────────────────
+
+class TestFieldOnboarding:
+    """Control-grade fields must be fully onboarded: defined + prompted + extracted + gated + consumed.
+
+    Build fails if any control field is declared-but-not-wired.
+    """
+
+    def test_analyze_repair_strategy_type_fully_onboarded(self):
+        """repair_strategy_type must be onboarded across all 4 layers."""
+        from cognition_contracts.analysis_root_cause import (
+            SCHEMA_PROPERTIES, SCHEMA_REQUIRED, PROMPT_GUIDANCE,
+            REPAIR_STRATEGY_TYPES,
+        )
+        from phase_record import PhaseRecord
+        import inspect
+
+        errors = []
+
+        # 1. Defined: in schema
+        if "repair_strategy_type" not in SCHEMA_PROPERTIES:
+            errors.append("DEFINED: not in SCHEMA_PROPERTIES")
+        if "repair_strategy_type" not in SCHEMA_REQUIRED:
+            errors.append("DEFINED: not in SCHEMA_REQUIRED")
+
+        # 2. Requested: in prompt
+        if "REPAIR_STRATEGY_TYPE" not in PROMPT_GUIDANCE:
+            errors.append("REQUESTED: not mentioned in PROMPT_GUIDANCE")
+
+        # 3. Produced: PhaseRecord has the field + extractor sets it
+        if not hasattr(PhaseRecord, "repair_strategy_type"):
+            errors.append("PRODUCED: PhaseRecord missing repair_strategy_type field")
+        from declaration_extractor import build_phase_record_from_structured
+        src = inspect.getsource(build_phase_record_from_structured)
+        if "repair_strategy_type" not in src:
+            errors.append("PRODUCED: build_phase_record_from_structured doesn't extract repair_strategy_type")
+
+        # 4. Consumed: analysis_gate checks it
+        from analysis_gate import evaluate_analysis
+        gate_src = inspect.getsource(evaluate_analysis)
+        if "repair_strategy_type" not in gate_src:
+            errors.append("CONSUMED: analysis_gate doesn't check repair_strategy_type")
+
+        assert errors == [], (
+            f"repair_strategy_type NOT fully onboarded:\n" +
+            "\n".join(f"  - {e}" for e in errors)
+        )
+
+    def test_control_fields_in_schema_have_gate_check(self):
+        """Every required field in ANALYZE schema must be checked by the gate module."""
+        import inspect
+        from cognition_contracts.analysis_root_cause import SCHEMA_REQUIRED
+        import analysis_gate
+
+        # Check the entire module source, not just evaluate_analysis
+        gate_src = inspect.getsource(analysis_gate)
+        # These are auto-filled metadata, not content fields
+        auto_fields = {"phase", "subtype", "principals"}
+        missing_gate = []
+        for field in SCHEMA_REQUIRED:
+            if field in auto_fields:
+                continue
+            if field not in gate_src:
+                missing_gate.append(field)
+        assert missing_gate == [], (
+            f"Required schema fields without gate check: {missing_gate}"
+        )
