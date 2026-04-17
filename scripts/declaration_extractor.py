@@ -414,16 +414,8 @@ try:
 except Exception:
     _PHASE_SUBTYPE_MAP: dict[str, str] = {}  # SST2: no hardcoded copy; all lookups yield "unknown"
 
-# Agent-declared phase names may use gerund/noun variants (e.g. "execution", "observation").
-# Normalize to canonical Phase enum values before _PHASE_SUBTYPE_MAP lookup.
-_PHASE_NORM: dict[str, str] = {
-    "OBSERVATION": "OBSERVE",
-    "ANALYSIS":    "ANALYZE",
-    "DECISION":    "DECIDE",
-    "EXECUTION":   "EXECUTE",
-    "JUDGEMENT":   "JUDGE",
-    "JUDGMENT":    "JUDGE",
-}
+# Phase normalization — derive from canonical_symbols (SST: single definition)
+from canonical_symbols import _PHASE_ALIASES as _PHASE_NORM  # noqa: E402
 
 
 def _extract_phase_from_message(agent_message: str) -> str | None:

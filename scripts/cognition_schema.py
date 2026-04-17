@@ -18,25 +18,11 @@ from typing import Optional
 
 # ── CDP v2.0 taxonomy (derived from subtype_contracts.py) ────────────────────
 
-# Lowercase phase names (as parsed from agent output) → canonical uppercase phase names.
-# Only phases that exist in v2.0 subtype_contracts are valid.
-_PHASE_NORM: dict[str, str] = {
-    "observation": "OBSERVE",
-    "analysis":    "ANALYZE",
-    "decision":    "DECIDE",
-    "execution":   "EXECUTE",
-    "design":      "DESIGN",
-    "judge":       "JUDGE",
-    # Aliases: agent may also output the v2.0 names directly (lowercase)
-    "observe":     "OBSERVE",
-    "analyze":     "ANALYZE",
-    "decide":      "DECIDE",
-    "execute":     "EXECUTE",
-    "validation":  "JUDGE",
-    "planning":    "DESIGN",
-}
+# Phase normalization — derived from canonical_symbols (SST: single definition)
+from canonical_symbols import _PHASE_ALIASES as _PHASE_NORM  # noqa: E402
 
-VALID_PHASES = set(_PHASE_NORM.keys())
+# VALID_PHASES: lowercase keys only (for cognition_schema parser compatibility)
+VALID_PHASES = {k for k in _PHASE_NORM if k.islower()}
 
 
 def _build_principal_contracts() -> dict[str, dict[str, list[str]]]:

@@ -286,16 +286,8 @@ def merge_verdicts(verdicts: list[ControlVerdict]) -> ControlVerdict:
             best_pri = v_pri
     return best
 
-# Phase advance table (mirrors phase_controller.ts)
-_ADVANCE_TABLE: dict[Phase, Optional[Phase]] = {
-    "UNDERSTAND": "OBSERVE",
-    "OBSERVE":    "ANALYZE",
-    "ANALYZE":    "DECIDE",
-    "DECIDE":     "DESIGN",
-    "DESIGN":     "EXECUTE",
-    "EXECUTE":    "JUDGE",
-    "JUDGE":      None,  # terminal
-}
+# Phase advance table — derived from canonical_symbols (SST: single definition)
+from canonical_symbols import PHASE_ADVANCE as _ADVANCE_TABLE  # noqa: E402
 
 NO_PROGRESS_THRESHOLD = 4  # consecutive no-signal steps → forced advance or stop
 

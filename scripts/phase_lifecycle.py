@@ -24,18 +24,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
-# Phase advance table — canonical (mirrors reasoning_state.py _ADVANCE_TABLE)
-_PHASE_ORDER = ["UNDERSTAND", "OBSERVE", "ANALYZE", "DECIDE", "DESIGN", "EXECUTE", "JUDGE"]
-
-_DEFAULT_ADVANCE: dict[str, str | None] = {
-    "UNDERSTAND": "OBSERVE",
-    "OBSERVE": "ANALYZE",
-    "ANALYZE": "DECIDE",
-    "DECIDE": "DESIGN",
-    "DESIGN": "EXECUTE",
-    "EXECUTE": "JUDGE",
-    "JUDGE": None,
-}
+# Phase advance: derive from canonical_symbols (SST — no local copy)
+from canonical_symbols import PHASE_ADVANCE as _DEFAULT_ADVANCE, ALL_PHASES as _PHASE_ORDER
 
 
 @dataclass
@@ -144,17 +134,11 @@ def _route_analyze(result: PhaseResult) -> RoutingDecision:
 
     strategy_normalized = strategy.strip().upper()
 
-    # Validate against known strategies
-    try:
-        from cognition_contracts.analysis_root_cause import REPAIR_STRATEGY_TYPES
-        valid_strategies = {s.upper() for s in REPAIR_STRATEGY_TYPES}
-    except ImportError:
-        valid_strategies = {
-            "REGEX_FIX", "PARSER_REWRITE", "DATAFLOW_FIX", "STATE_COPY_FIX",
-            "INVARIANT_FIX", "MISSING_SECONDARY_FIX", "API_CONTRACT_FIX",
-        }
+    # Validate against canonical strategy registry (SST — no hardcoded fallback)
+    from strategy_registry import is_valid_strategy, all_strategies
 
-    if strategy_normalized not in valid_strategies:
+    if not is_valid_strategy(strategy_normalized):
+        valid_list = ", ".join(all_strategies())
         return RoutingDecision(
             next_phase="ANALYZE",
             reason=f"repair_strategy_type '{strategy_normalized}' not in valid set",
@@ -162,7 +146,7 @@ def _route_analyze(result: PhaseResult) -> RoutingDecision:
             retry_current=True,
             retry_hint=(
                 f"repair_strategy_type '{strategy_normalized}' is not valid. "
-                f"Choose one of: {', '.join(sorted(valid_strategies))}"
+                f"Choose one of: {valid_list}"
             ),
         )
 

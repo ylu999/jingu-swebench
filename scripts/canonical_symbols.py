@@ -22,6 +22,79 @@ def assert_phase(value: str) -> str:
         raise TypeError(f'Invalid Phase: "{value}". Must be one of: {", ".join(ALL_PHASES)}')
     return value
 
+# Phase advance table — the ONE place phase ordering is defined.
+# All consumers (reasoning_state, phase_lifecycle, step_sections) derive from here.
+PHASE_ADVANCE: dict[str, str | None] = {
+    "UNDERSTAND": "OBSERVE",
+    "OBSERVE":    "ANALYZE",
+    "ANALYZE":    "DECIDE",
+    "DECIDE":     "DESIGN",
+    "DESIGN":     "EXECUTE",
+    "EXECUTE":    "JUDGE",
+    "JUDGE":      None,
+}
+
+# Phase normalization — agent-declared variants → canonical Phase.
+# The ONE place all alias→canonical mappings live.
+# Consumers: declaration_extractor, cognition_schema, step_sections.
+_PHASE_ALIASES: dict[str, str] = {
+    # Gerund/noun forms (LLM output)
+    "OBSERVATION": "OBSERVE",
+    "ANALYSIS":    "ANALYZE",
+    "DECISION":    "DECIDE",
+    "EXECUTION":   "EXECUTE",
+    "JUDGEMENT":   "JUDGE",
+    "JUDGMENT":    "JUDGE",
+    # Lowercase forms (cognition_schema legacy)
+    "observation": "OBSERVE",
+    "analysis":    "ANALYZE",
+    "decision":    "DECIDE",
+    "execution":   "EXECUTE",
+    "design":      "DESIGN",
+    "judge":       "JUDGE",
+    "observe":     "OBSERVE",
+    "analyze":     "ANALYZE",
+    "decide":      "DECIDE",
+    "execute":     "EXECUTE",
+    "validation":  "JUDGE",
+    "planning":    "DESIGN",
+}
+
+def normalize_phase(value: str) -> str:
+    """Normalize agent-declared phase to canonical Phase.
+
+    Returns canonical phase if value is already canonical or is a known alias.
+    Raises TypeError if value is not recognized.
+    """
+    if value in ALL_PHASES:
+        return value
+    upper = value.upper()
+    if upper in ALL_PHASES:
+        return upper
+    canonical = _PHASE_ALIASES.get(value) or _PHASE_ALIASES.get(upper)
+    if canonical:
+        return canonical
+    raise TypeError(f'Cannot normalize phase: "{value}". Not a known alias.')
+
+def default_next_phase(phase: str) -> str | None:
+    """Return the default next phase, or None if terminal. Raises TypeError if invalid."""
+    assert_phase(phase)
+    return PHASE_ADVANCE[phase]
+
+def is_valid_phase(value: str) -> bool:
+    """Check if value is a canonical Phase (no normalization)."""
+    return value in ALL_PHASES
+
+# Phase → Subtype mapping (canonical)
+PHASE_TO_SUBTYPE: dict[str, str] = {
+    "OBSERVE":  "observation.fact_gathering",
+    "ANALYZE":  "analysis.root_cause",
+    "DECIDE":   "decision.fix_direction",
+    "DESIGN":   "design.solution_shape",
+    "EXECUTE":  "execution.code_patch",
+    "JUDGE":    "judge.verification",
+}
+
 # -- Principal ----------------------------------------------------------------
 Principal = Literal[
     "ontology_alignment", "phase_boundary_discipline", "evidence_completeness",

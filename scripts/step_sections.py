@@ -349,10 +349,10 @@ def admit_phase_record(
         )
         if _foreign:
             _pr_foreign_phase = _declared_phase
-            _PHASE_ORDER = ["UNDERSTAND", "OBSERVE", "ANALYZE", "DECIDE", "DESIGN", "EXECUTE", "JUDGE"]
+            from canonical_symbols import ALL_PHASES as _PHASE_ORDER_CS
             try:
-                _eval_idx = _PHASE_ORDER.index(eval_phase)
-                _decl_idx = _PHASE_ORDER.index(_declared_phase)
+                _eval_idx = _PHASE_ORDER_CS.index(eval_phase)
+                _decl_idx = _PHASE_ORDER_CS.index(_declared_phase)
                 _align = "declared_ahead" if _decl_idx > _eval_idx else "declared_behind"
                 _align_delta = _decl_idx - _eval_idx
             except (ValueError, AttributeError):
