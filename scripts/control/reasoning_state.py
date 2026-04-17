@@ -51,7 +51,7 @@ from typing import Literal, Optional
 # All runtime consumers (Phase type, _ADVANCE_TABLE, PHASE_STEP_BUDGET, decide_next,
 # telemetry, prompt injection) must use only these 7 canonical names.
 
-Phase = Literal["UNDERSTAND", "OBSERVE", "ANALYZE", "DECIDE", "DESIGN", "EXECUTE", "JUDGE"]
+from canonical_symbols import Phase  # SST: single definition  # noqa: E402
 
 # ── Signals ───────────────────────────────────────────────────────────────────
 

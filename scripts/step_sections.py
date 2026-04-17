@@ -1105,8 +1105,8 @@ def evaluate_transition(
             loop_counts=state._retryable_loop_counts,
         )
         if _pr_foreign_phase:
-            _phase_order = ["UNDERSTAND", "OBSERVE", "ANALYZE", "DECIDE", "DESIGN", "EXECUTE", "JUDGE"]
-            _delta = abs(_phase_order.index(_pr_foreign_phase) - _phase_order.index(eval_phase)) if (_pr_foreign_phase in _phase_order and eval_phase in _phase_order) else 0
+            from canonical_symbols import ALL_PHASES as _phase_order_cs2
+            _delta = abs(_phase_order_cs2.index(_pr_foreign_phase) - _phase_order_cs2.index(eval_phase)) if (_pr_foreign_phase in _phase_order_cs2 and eval_phase in _phase_order_cs2) else 0
             _foreign_reason = f"foreign_phase_declared:declared={_pr_foreign_phase},eval={eval_phase},delta={_delta}"
             _legacy = _admission.reasons_legacy
             if _foreign_reason not in _legacy:
@@ -2067,7 +2067,8 @@ def _step_cp_update_and_verdict(
     # Only advance if the record was actually admitted (Gates 1+3 passed).
     # EXECUTE excluded: EXECUTE→JUDGE driven by verify signal (task_success).
     # UNDERSTAND excluded: no contract, no submission expected.
-    _IMMEDIATE_ADVANCE_PHASES = frozenset({"OBSERVE", "ANALYZE", "DECIDE", "DESIGN"})
+    from canonical_symbols import ALL_PHASES as _all_ph
+    _IMMEDIATE_ADVANCE_PHASES = frozenset(_all_ph) - {"UNDERSTAND", "EXECUTE", "JUDGE"}
     if (isinstance(_step_verdict, VerdictContinue)
             and _admission_result is not None
             and _admission_result.admitted

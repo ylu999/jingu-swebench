@@ -31,7 +31,9 @@ from typing import Literal, Optional, List
 # Type aliases
 # ---------------------------------------------------------------------------
 
-PhaseName = Literal["OBSERVE", "ANALYZE", "DECIDE", "EXECUTE", "JUDGE"]
+# SST: phases with contracts (excludes UNDERSTAND which has no contract, and DESIGN which shares DECIDE's)
+# Derived from canonical_symbols.Phase but restricted to contract-bearing phases.
+PhaseName = Literal["OBSERVE", "ANALYZE", "DECIDE", "DESIGN", "EXECUTE", "JUDGE"]
 
 PhaseVerdict = Literal[
     "ADMITTED",    # phase completed, advance

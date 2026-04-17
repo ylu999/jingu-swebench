@@ -86,7 +86,7 @@ def _build_prompt_registry() -> dict[str, set[str]]:
         bundle = compile_bundle(force_reload=True)
         registry: dict[str, set[str]] = {}
 
-        for phase in ["ANALYZE", "DECIDE", "DESIGN", "EXECUTE", "JUDGE", "OBSERVE"]:
+        for phase in [p for p in __import__('canonical_symbols').ALL_PHASES if p != "UNDERSTAND"]:
             prefix = build_phase_prefix(phase)
             schema = bundle.governance.get_constrained_schema(phase)
             if not schema:
@@ -117,7 +117,7 @@ def _build_schema_registry() -> dict[str, set[str]]:
         bundle = compile_bundle(force_reload=True)
         registry: dict[str, set[str]] = {}
 
-        for phase in ["ANALYZE", "DECIDE", "DESIGN", "EXECUTE", "JUDGE", "OBSERVE"]:
+        for phase in [p for p in __import__('canonical_symbols').ALL_PHASES if p != "UNDERSTAND"]:
             schema = bundle.governance.get_constrained_schema(phase)
             if not schema:
                 continue
@@ -213,7 +213,7 @@ def _build_tool_parameter_registry() -> dict[str, set[str]]:
         from bundle_compiler import compile_bundle
         bundle = compile_bundle(force_reload=True)
 
-        for phase in ["ANALYZE", "DECIDE", "DESIGN", "EXECUTE", "JUDGE", "OBSERVE"]:
+        for phase in [p for p in __import__('canonical_symbols').ALL_PHASES if p != "UNDERSTAND"]:
             schema = bundle.governance.get_constrained_schema(phase)
             if not schema:
                 continue

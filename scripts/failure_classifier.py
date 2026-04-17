@@ -15,26 +15,34 @@ from typing import Literal, Optional
 
 FailureType = Literal["wrong_direction", "incomplete_fix", "verify_gap", "execution_error"]
 
+def _principals_for_phase(phase: str) -> list[str]:
+    """Derive required_principals from contract_registry (SST: no hardcoded copy)."""
+    try:
+        from contract_registry import get_required_principals
+        return list(get_required_principals(phase))
+    except Exception:
+        return []  # SST2: empty fallback, not stale copy
+
 FAILURE_ROUTING_RULES: dict = {
     "wrong_direction": {
-        "next_phase": "ANALYZE",  # canonical name (not "analysis")
+        "next_phase": "ANALYZE",
         "repair_goal": "Re-analyze the actual root cause before proposing any fix.",
-        "required_principals": ["causal_grounding", "evidence_linkage"],
+        "required_principals": _principals_for_phase("ANALYZE"),
     },
     "incomplete_fix": {
         "next_phase": "DESIGN",
         "repair_goal": "Refine the design to cover remaining failing scenarios.",
-        "required_principals": ["minimal_change", "evidence_linkage"],
+        "required_principals": _principals_for_phase("DESIGN"),
     },
     "verify_gap": {
         "next_phase": "EXECUTE",
         "repair_goal": "All targeted tests pass but evaluation still fails. Check for P2P regressions, missing updates, formatting issues, or edge cases not covered by F2P tests.",
-        "required_principals": ["evidence_linkage", "minimal_change"],
+        "required_principals": _principals_for_phase("EXECUTE"),
     },
     "execution_error": {
-        "next_phase": "EXECUTE",  # canonical name (not "execution")
+        "next_phase": "EXECUTE",
         "repair_goal": "Fix execution issues without changing solution direction.",
-        "required_principals": ["minimal_change", "action_grounding"],
+        "required_principals": _principals_for_phase("EXECUTE"),
     },
 }
 
@@ -543,27 +551,27 @@ FAILURE_MODE_ROUTING: dict[str, dict] = {
     "no_patch": {
         "next_phase": "ANALYZE",
         "repair_goal": "No code changes were produced. Re-analyze the problem: identify the exact file and function to modify before writing any code.",
-        "required_principals": ["causal_grounding", "evidence_linkage"],
+        "required_principals": _principals_for_phase("ANALYZE"),
     },
     "no_test_run": {
         "next_phase": "EXECUTE",
         "repair_goal": "A patch was written but tests were never executed. Ensure the patch compiles, run the failing tests, and verify the fix.",
-        "required_principals": ["action_grounding"],
+        "required_principals": _principals_for_phase("EXECUTE"),
     },
     "patch_no_progress": {
         "next_phase": "DESIGN",
         "repair_goal": "A patch was written and tests ran but did not pass. The fix direction may be wrong or incomplete. Re-examine which code path the failing tests exercise.",
-        "required_principals": ["causal_grounding", "minimal_change"],
+        "required_principals": _principals_for_phase("DESIGN"),
     },
     "environment_failure": {
         "next_phase": "EXECUTE",
         "repair_goal": "The execution environment failed (abnormal exit, no output). Focus on producing a clean patch and running tests.",
-        "required_principals": ["action_grounding"],
+        "required_principals": _principals_for_phase("EXECUTE"),
     },
     "unknown_failure": {
         "next_phase": "ANALYZE",
         "repair_goal": "Insufficient signal to diagnose. Start from scratch: read the failing tests, identify the root cause, design a minimal fix.",
-        "required_principals": ["causal_grounding", "evidence_linkage"],
+        "required_principals": _principals_for_phase("ANALYZE"),
     },
 }
 

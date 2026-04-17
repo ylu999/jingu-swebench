@@ -41,16 +41,8 @@ class ExtractedRecord:
     rule_triggered: list[str]    # which rules fired
 
 
-# ── All principals tracked (6 total from p194/p195) ───────────────────────────
-
-ALL_PRINCIPALS = [
-    "causal_grounding",
-    "evidence_linkage",
-    "alternative_hypothesis_check",
-    "minimal_change",
-    "action_grounding",
-    "invariant_preservation",
-]
+# SST: derive from canonical source
+from canonical_symbols import ALL_PRINCIPALS  # type: ignore[assignment]
 
 
 # ── Extractor ─────────────────────────────────────────────────────────────────
@@ -500,11 +492,15 @@ def generate_mock_records(n: int = 20) -> list[ExtractedRecord]:
     random.seed(42)  # deterministic for test reproducibility
 
     subtypes = ["analysis.root_cause", "execution.code_patch", "judge.verification"]
-    principals_by_subtype = {
-        "analysis.root_cause": ["causal_grounding", "evidence_linkage", "alternative_hypothesis_check"],
-        "execution.code_patch": ["minimal_change", "action_grounding"],
-        "judge.verification": ["invariant_preservation"],
-    }
+    # SST: derive principal-subtype mapping from contract_registry
+    try:
+        from contract_registry import get_contract_by_subtype
+        principals_by_subtype = {
+            st: list(get_contract_by_subtype(st).required_principals)
+            for st in ["analysis.root_cause", "execution.code_patch", "judge.verification"]
+        }
+    except Exception:
+        principals_by_subtype = {st: [] for st in ["analysis.root_cause", "execution.code_patch", "judge.verification"]}
 
     records = []
     for i in range(n):

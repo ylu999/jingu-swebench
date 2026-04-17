@@ -33,7 +33,7 @@ PHASE_RECORD_BASE_SCHEMA: dict[str, Any] = {
     "properties": {
         "phase": {
             "type": "string",
-            "enum": ["UNDERSTAND", "OBSERVE", "ANALYZE", "DECIDE", "DESIGN", "EXECUTE", "JUDGE"],
+            "enum": list(__import__('canonical_symbols').ALL_PHASES),
             "description": "The current reasoning phase.",
         },
         "subtype": {

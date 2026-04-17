@@ -359,7 +359,7 @@ def compile_protocol(
             from bundle_compiler import compile_bundle
             bundle = compile_bundle(force_reload=True)
             tool_schemas = {}
-            for phase in ["ANALYZE", "DECIDE", "DESIGN", "EXECUTE", "JUDGE", "OBSERVE"]:
+            for phase in [p for p in __import__('canonical_symbols').ALL_PHASES if p != "UNDERSTAND"]:
                 schema = bundle.governance.get_constrained_schema(phase)
                 if not schema:
                     continue

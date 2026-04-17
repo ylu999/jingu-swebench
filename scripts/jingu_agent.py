@@ -698,9 +698,16 @@ class JinguAgent:
         global _bundle_activation_proof  # PR1: exposed for run_report.json
         _phase_prompt_parts: list[str] = []
         _type_contracts_block = "Type contracts: (see principal_gate for v2.0 contracts)"
-        _analysis_req = "ontology_alignment, phase_boundary_discipline, causal_grounding, evidence_linkage"
-        _decision_req = "ontology_alignment, phase_boundary_discipline, option_comparison, constraint_satisfaction"
-        _execute_req  = "ontology_alignment, phase_boundary_discipline, action_grounding, minimal_change"
+        # SST: derive principal requirements from contract_registry (no hardcoded fallback)
+        try:
+            from contract_registry import get_required_principals as _grp
+            _analysis_req = ", ".join(_grp("ANALYZE"))
+            _decision_req = ", ".join(_grp("DECIDE"))
+            _execute_req  = ", ".join(_grp("EXECUTE"))
+        except Exception:
+            _analysis_req = ""  # SST2: fallback is empty, not stale copy
+            _decision_req = ""
+            _execute_req  = ""
 
         try:
             from bundle_compiler import compile_bundle as _compile_bundle
@@ -2743,13 +2750,8 @@ class JinguAgent:
                         "```\n\n"
                         "This patch DID NOT fix the issue. The test still fails.\n\n"
                         "STRATEGY TAXONOMY — you MUST choose a DIFFERENT strategy type:\n"
-                        "  1. REGEX_FIX — adjusting regex pattern logic\n"
-                        "  2. PARSER_REWRITE — restructuring parsing/extraction logic\n"
-                        "  3. DATAFLOW_FIX — fixing value propagation between components\n"
-                        "  4. STATE_COPY_FIX — ensuring internal state is properly copied/preserved\n"
-                        "  5. INVARIANT_FIX — enforcing constraints, boundary checks, or trim logic\n"
-                        "  6. MISSING_SECONDARY_FIX — the primary fix is incomplete, a second change is needed\n"
-                        "  7. API_CONTRACT_FIX — fixing how a function's return value or signature is used\n\n"
+                        + "".join(f"  {i+1}. {s}\n" for i, s in enumerate(__import__('strategy_registry').all_strategies()))
+                        + "\n"
                         f"{'BANNED strategy: ' + _prev_strategy + ' (already tried and FAILED)' if _prev_strategy else 'Previous strategy type unknown — choose ANY different approach'}\n\n"
                         "You MUST now:\n"
                         "1. DISCARD your previous root cause hypothesis entirely\n"

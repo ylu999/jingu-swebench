@@ -197,11 +197,14 @@ def _has_structured_output(phase_record) -> bool:
     beyond the basic content/phase/subtype. This indicates the record came from
     structured extraction (json_schema response_format) rather than free-text parsing.
     """
-    structural_fields = (
-        "root_cause", "causal_chain", "evidence_refs", "alternative_hypotheses",
-        "options", "chosen", "rationale", "test_results", "success_criteria_met",
-        "scope_boundary", "files_to_modify", "residual_risks", "invariant_capture",
-    )
+    # SST: derive structural field names from contract_registry
+    try:
+        from contract_registry import all_contracts
+        structural_fields = tuple({
+            f.name for c in all_contracts().values() for f in c.field_specs
+        })
+    except Exception:
+        structural_fields = ()  # SST2: empty fallback
     for field_name in structural_fields:
         val = getattr(phase_record, field_name, None)
         if val:  # non-empty string or non-empty list
@@ -467,7 +470,8 @@ def _infer_phase_boundary_discipline(phase_record) -> tuple[float, list[str], st
     score = 0.0
     signals: list[str] = []
 
-    recognized_phases = {"OBSERVE", "ANALYZE", "DECIDE", "DESIGN", "EXECUTE", "JUDGE"}
+    from canonical_symbols import ALL_PHASES
+    recognized_phases = set(ALL_PHASES) - {"UNDERSTAND"}
     if phase not in recognized_phases:
         signals.append("unrecognized_phase")
         return score, signals, f"Phase '{phase}' not in recognized set — boundary discipline unknown"

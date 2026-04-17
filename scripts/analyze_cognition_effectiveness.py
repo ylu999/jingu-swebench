@@ -37,20 +37,8 @@ from typing import Iterator
 
 # ── Constants ────────────────────────────────────────────────────────────────
 
-ALL_PHASES = ["UNDERSTAND", "OBSERVE", "ANALYZE", "DECIDE", "DESIGN", "EXECUTE", "JUDGE"]
-
-ALL_PRINCIPALS = [
-    "causal_grounding",
-    "evidence_linkage",
-    "minimal_change",
-    "ontology_alignment",
-    "phase_boundary_discipline",
-    "action_grounding",
-    "option_comparison",
-    "constraint_satisfaction",
-    "result_verification",
-    "uncertainty_honesty",
-]
+# SST: derive from canonical source
+from canonical_symbols import ALL_PHASES, ALL_PRINCIPALS  # type: ignore[assignment]
 
 
 # ── Traj file iteration (reused pattern from analyze_principal_metrics.py) ───
