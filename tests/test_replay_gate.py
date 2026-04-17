@@ -279,3 +279,25 @@ class TestOnboardingAudit:
         if errors:
             msgs = [f"{e.code}: {e.field_name} ({e.phase}) — {e.message}" for e in errors]
             assert False, "Onboarding audit failed:\n" + "\n".join(msgs)
+
+
+# ── Stage 9: Protocol Compiler (build-time protocol enforcement) ──────────
+
+class TestProtocolCompiler:
+    """Protocol compilation: FieldSpec -> tool/prompt/gate/consumer/replay all wired."""
+
+    def test_protocol_compiles_clean(self):
+        from protocol_compiler import compile_protocol
+        specs, errors = compile_protocol()
+        if errors:
+            msgs = [f"{e.code}: {e.field_name} ({e.phase}) — {e.message}" for e in errors]
+            assert False, "Protocol compile failed:\n" + "\n".join(msgs)
+
+    def test_control_fields_protocol_required(self):
+        """R2: every control field must be protocol_required."""
+        from protocol_compiler import _get_protocol_specs
+        for spec in _get_protocol_specs():
+            if spec.is_control_field:
+                assert spec.protocol_required, (
+                    f"{spec.name} ({spec.phase}) is control but not protocol_required"
+                )

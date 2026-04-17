@@ -543,6 +543,40 @@ def admit_phase_record(
                     flush=True,
                 )
 
+    # ── Protocol validation: control fields must be present ──────────────
+    # Protocol Compiler enforcement: all protocol_required fields must be in
+    # the submitted record. Missing control field = rejection (not bypass).
+    try:
+        from protocol_compiler import validate_record_protocol, _get_protocol_specs
+        _proto_specs = _get_protocol_specs()
+        # Build a dict from the PhaseRecord for validation
+        _proto_record = {}
+        if _tool_submitted is not None:
+            _proto_record = _tool_submitted
+        elif _pr is not None:
+            _proto_record = _pr.as_dict() if hasattr(_pr, "as_dict") else vars(_pr)
+        _proto_missing = validate_record_protocol(_proto_record, eval_phase, _proto_specs)
+        if _proto_missing:
+            _proto_msg = ", ".join(_proto_missing)
+            print(
+                f"    [immediate-admission] PROTOCOL REJECT:"
+                f" phase={eval_phase} missing_fields={_proto_missing}",
+                flush=True,
+            )
+            _result.admitted = False
+            _result.retry_messages.append({
+                "role": "user",
+                "content": (
+                    f"[PROTOCOL VIOLATION — INCOMPLETE SUBMISSION]\n\n"
+                    f"Your submission is missing required protocol fields: {_proto_msg}\n\n"
+                    f"ALL required fields must be present in submit_phase_record.\n"
+                    f"Resubmit with the missing fields filled in."
+                ),
+            })
+            return _result
+    except ImportError:
+        pass  # protocol_compiler not available — skip (graceful degradation)
+
     # ── Admission success: append to state.phase_records ────────────────
     state.phase_records.append(_pr)
     _result.admitted = True
