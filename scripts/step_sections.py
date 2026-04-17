@@ -2414,6 +2414,17 @@ def _step_cp_update_and_verdict(
                 f" routing={_rt.strategy if _rt else 'none'}",
                 flush=True,
             )
+            _emit_decision(
+                state, decision_type="gate_redirect", step_n=_cp_s.step_index,
+                verdict="redirect",
+                reason=_transition.reason,
+                phase_from=_old_phase, phase_to=_redir_target,
+                signals={
+                    "source": _transition.source,
+                    "strategy": _rt.strategy if _rt else None,
+                    "repair_hints": _rt.repair_hints if _rt else [],
+                },
+            )
 
         else:
             # verdict == "retry" — blocked, stay in current phase
@@ -2433,6 +2444,17 @@ def _step_cp_update_and_verdict(
                 f" routing={_rt.strategy if _rt else 'none'}"
                 f" route_to={_rt.next_phase if _rt else _eval_phase}",
                 flush=True,
+            )
+            _emit_decision(
+                state, decision_type="gate_retry", step_n=_cp_s.step_index,
+                verdict="retry",
+                reason=_transition.reason,
+                phase_from=_eval_phase, phase_to=_eval_phase,
+                signals={
+                    "source": _transition.source,
+                    "strategy": _rt.strategy if _rt else None,
+                    "repair_hints": _rt.repair_hints if _rt else [],
+                },
             )
 
 
