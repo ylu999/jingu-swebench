@@ -12,13 +12,14 @@ A field is fully onboarded only when ALL of these hold:
   5. stably produced (hard producer exists if control field)
   6. consumed (consumer wired if declared)
 
-Six build-fail rules:
+Seven build-fail rules:
   Rule 1: control field must have declared producer
   Rule 2: control field cannot rely solely on free-text extraction
   Rule 3: declared consumers must be wired in consumer registry
   Rule 4: required + fail_closed fields must have gate validation
   Rule 5: required fields need prompt + schema + validation + producer
   Rule 6: control field with consumers must have hard producer
+  Rule 7: tool-submitted fields must appear in tool parameters (TOOL_PARAMETER_NOT_WIRED)
 
 Exit code 0 = audit passed. Non-zero = onboarding gap detected.
 """
@@ -199,6 +200,31 @@ def _build_consumer_registry() -> dict[str, set[str]]:
     return registry
 
 
+def _build_tool_parameter_registry() -> dict[str, set[str]]:
+    """Derive tool parameter registry — which fields are in submit_phase_record tool.
+
+    This is the critical check: if a field is not in the tool parameters,
+    the agent CANNOT submit it via the structured tool path. It will be
+    forced to use free-text, which Claude will always prefer (laziness exit).
+    """
+    registry: dict[str, set[str]] = {}
+    try:
+        from jingu_model import _build_phase_record_tool
+        from bundle_compiler import compile_bundle
+        bundle = compile_bundle(force_reload=True)
+
+        for phase in ["ANALYZE", "DECIDE", "DESIGN", "EXECUTE", "JUDGE", "OBSERVE"]:
+            schema = bundle.governance.get_constrained_schema(phase)
+            if not schema:
+                continue
+            tool = _build_phase_record_tool(phase, schema)
+            tool_params = tool.get("function", {}).get("parameters", {}).get("properties", {})
+            registry[phase] = set(tool_params.keys())
+    except Exception:
+        pass
+    return registry
+
+
 def _build_producer_registry() -> dict[str, dict[str, dict[str, str]]]:
     """Derive producer registry — how each field is produced."""
     registry: dict[str, dict[str, dict[str, str]]] = {}
@@ -311,6 +337,7 @@ def audit_fields(
     gate_registry: dict[str, dict[str, set[str]]],
     consumer_registry: dict[str, set[str]],
     producer_registry: dict[str, dict[str, dict[str, str]]],
+    tool_param_registry: dict[str, set[str]] | None = None,
 ) -> list[AuditError]:
     """
     Run onboarding audit against all registries.
@@ -318,6 +345,8 @@ def audit_fields(
     Returns list of AuditError. Empty = all fields fully onboarded.
     """
     errors: list[AuditError] = []
+    if tool_param_registry is None:
+        tool_param_registry = {}
 
     for spec in field_specs:
         phase = spec.phase
@@ -326,7 +355,22 @@ def audit_fields(
         prompt_fields = prompt_registry.get(phase, set())
         schema_fields = schema_registry.get(phase, set())
         gate_fields = gate_registry.get(phase, {}).get("fail_closed_fields", set())
+        tool_params = tool_param_registry.get(phase, set())
         producer_info = producer_registry.get(phase, {}).get(f)
+
+        # ── Rule 7: tool parameter must be wired for tool-submitted fields ──
+        # This is THE critical check. If a field declares producer=submit_phase_record
+        # but the tool doesn't have it as a parameter, the agent CANNOT submit it.
+        # Claude will always bypass the tool and use free-text instead.
+        if spec.producer == "submit_phase_record" and f not in tool_params:
+            errors.append(AuditError(
+                code="TOOL_PARAMETER_NOT_WIRED",
+                field_name=f, phase=phase,
+                message=(
+                    f"{f} declares producer=submit_phase_record but is missing from "
+                    f"submit_phase_record tool parameters — agent cannot submit this field"
+                ),
+            ))
 
         # ── Rule 1: control field must declare producer ──────────────────
         if spec.is_control_field and spec.producer is None:
@@ -448,6 +492,7 @@ def run_audit() -> list[AuditError]:
     gate_reg = _build_gate_registry()
     consumer_reg = _build_consumer_registry()
     producer_reg = _build_producer_registry()
+    tool_param_reg = _build_tool_parameter_registry()
 
     return audit_fields(
         field_specs=field_specs,
@@ -456,6 +501,7 @@ def run_audit() -> list[AuditError]:
         gate_registry=gate_reg,
         consumer_registry=consumer_reg,
         producer_registry=producer_reg,
+        tool_param_registry=tool_param_reg,
     )
 
 
