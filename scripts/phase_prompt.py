@@ -155,4 +155,20 @@ def build_phase_prefix(phase: str) -> str:
     if schema_guidance:
         guidance = f"{guidance}\n\n{schema_guidance}\n\nWhen ready, call submit_phase_record with these fields."
 
+    # Protocol enforcement: inject protocol constraints from Protocol Compiler.
+    # Makes LLM explicitly aware that missing fields = REJECTED submission.
+    try:
+        from protocol_compiler import build_prompt_fragment, _get_protocol_specs
+        _proto_fragment = build_prompt_fragment(phase, _get_protocol_specs())
+        if _proto_fragment:
+            guidance = (
+                f"{guidance}\n\n"
+                f"[PROTOCOL ENFORCEMENT]\n"
+                f"{_proto_fragment}\n"
+                f"If any required field is missing or invalid, your submission will be "
+                f"REJECTED and you will be forced to retry. This is not optional."
+            )
+    except ImportError:
+        pass
+
     return f"[Phase: {phase}] {guidance}\n\n"

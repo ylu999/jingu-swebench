@@ -2711,11 +2711,16 @@ class JinguAgent:
                         _patch_preview += "\n... [truncated]"
 
                     # Use agent-declared repair_strategy_type from ANALYZE structured output
-                    # P0.4: if strategy missing, log it explicitly (no silent fallback)
-                    _prev_strategy = _prev_strategy_type
-                    if not _prev_strategy:
-                        print(f"    [exp-k] WARNING: repair_strategy_type missing from ANALYZE record — ban disabled", flush=True)
-                        _prev_strategy = ""
+                    # Protocol Compiler: read via get_control_field (no silent fallback)
+                    try:
+                        from protocol_compiler import get_control_field
+                        _prev_strategy = get_control_field(
+                            _analyze_rec_dc, "repair_strategy_type", phase="ANALYZE"
+                        )
+                    except Exception:
+                        _prev_strategy = _prev_strategy_type or ""
+                        if not _prev_strategy:
+                            print(f"    [exp-k] PROTOCOL: repair_strategy_type missing from ANALYZE record — strategy ban disabled", flush=True)
 
                     # Build the cause section with strategy ban
                     _cause_section = ""
