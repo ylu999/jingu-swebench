@@ -1659,6 +1659,7 @@ class JinguAgent:
         last_failure = ""
         _prev_raw_patch = ""
         _prev_root_cause = ""  # dual-cause: persist attempt 1's root cause for attempt 2 prompt
+        _prev_strategy_type = ""  # dual-cause: agent-declared repair_strategy_type from ANALYZE
         _no_progress_streak = 0
         total_llm_calls = 0
         _strategy_entries: list[dict] = []
@@ -1931,6 +1932,8 @@ class JinguAgent:
             _analyze_rec_dc = next((r for r in _phase_recs_dc if r.get("phase") == "ANALYZE"), None)
             if _analyze_rec_dc and _analyze_rec_dc.get("root_cause"):
                 _prev_root_cause = _analyze_rec_dc["root_cause"]
+            if _analyze_rec_dc and _analyze_rec_dc.get("repair_strategy_type"):
+                _prev_strategy_type = _analyze_rec_dc["repair_strategy_type"]
             # persist nprg/dual-patch fields into traj
             if jingu_body and (_nprg_l1_pre or _nprg_l2_pre or _dp_sim >= 0):
                 _nprg_traj_path = (self._output_dir / f"attempt_{attempt}"
@@ -2707,20 +2710,8 @@ class JinguAgent:
                     if len(patch) > 1500:
                         _patch_preview += "\n... [truncated]"
 
-                    # Classify attempt 1's strategy type from the patch
-                    _prev_strategy = "unknown"
-                    if _prev_root_cause:
-                        _rc_lower = _prev_root_cause.lower()
-                        if any(w in _rc_lower for w in ["regex", "pattern", "re.compile", "lookahead", "match"]):
-                            _prev_strategy = "REGEX_FIX"
-                        elif any(w in _rc_lower for w in ["copy", "shallow", "deep copy", "dict(", ".copy()"]):
-                            _prev_strategy = "STATE_COPY_FIX"
-                        elif any(w in _rc_lower for w in ["propagat", "flow", "pass through", "not forwarded"]):
-                            _prev_strategy = "DATAFLOW_FIX"
-                        elif any(w in _rc_lower for w in ["pars", "tokeniz", "split", "extract"]):
-                            _prev_strategy = "PARSER_REWRITE"
-                        elif any(w in _rc_lower for w in ["check", "guard", "assert", "invariant", "boundary", "trim"]):
-                            _prev_strategy = "INVARIANT_FIX"
+                    # Use agent-declared repair_strategy_type from ANALYZE structured output
+                    _prev_strategy = _prev_strategy_type or "unknown"
 
                     # Build the cause section with strategy ban
                     _cause_section = ""

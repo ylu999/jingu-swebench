@@ -19,6 +19,21 @@ PHASE = "ANALYZE"
 SUBTYPE = "analysis.root_cause"
 
 
+# ── Repair strategy taxonomy ──────────────────────────────────────────────────
+# Who: SCHEMA_PROPERTIES (enum), jingu_agent.py (dual-cause strategy ban)
+# Agent declares this in structured output; system reads it as declared contract.
+
+REPAIR_STRATEGY_TYPES: list[str] = [
+    "REGEX_FIX",
+    "PARSER_REWRITE",
+    "DATAFLOW_FIX",
+    "STATE_COPY_FIX",
+    "INVARIANT_FIX",
+    "MISSING_SECONDARY_FIX",
+    "API_CONTRACT_FIX",
+]
+
+
 # ── Principals ───────────────────────────────────────────────────────────────
 # Who: subtype_contracts.py, phase_prompt.py (principal guidance)
 
@@ -229,6 +244,21 @@ SCHEMA_PROPERTIES: dict = {
             "What valid behavior must remain accepted?"
         ),
     },
+    "repair_strategy_type": {
+        "type": "string",
+        "enum": REPAIR_STRATEGY_TYPES,
+        "description": (
+            "The repair strategy category for the identified root cause. "
+            "Choose the one that best describes how the fix should work: "
+            "REGEX_FIX (adjust regex/pattern logic), "
+            "PARSER_REWRITE (restructure parsing/extraction), "
+            "DATAFLOW_FIX (fix value propagation between components), "
+            "STATE_COPY_FIX (ensure internal state properly copied/preserved), "
+            "INVARIANT_FIX (enforce constraints/boundary checks), "
+            "MISSING_SECONDARY_FIX (primary fix incomplete, second change needed), "
+            "API_CONTRACT_FIX (fix function return value/signature usage)."
+        ),
+    },
     "principals": {
         "type": "array",
         "items": {"type": "string"},
@@ -238,5 +268,5 @@ SCHEMA_PROPERTIES: dict = {
 
 SCHEMA_REQUIRED: list[str] = [
     "phase", "subtype", "root_cause", "causal_chain",
-    "evidence_refs", "alternative_hypotheses", "principals",
+    "evidence_refs", "alternative_hypotheses", "repair_strategy_type", "principals",
 ]
