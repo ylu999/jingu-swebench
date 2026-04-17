@@ -30,7 +30,9 @@ Environment:
 import argparse
 import datetime
 import json
+import os
 import re
+import subprocess
 import sys
 import threading
 import time
@@ -86,6 +88,55 @@ def wait_for_instance(timeout_s: int = 90) -> str:
     raise TimeoutError("EC2 instance did not start in time")
 
 
+# ── bundle recompile ──────────────────────────────────────────────────────────
+
+def ensure_bundle_compiled() -> None:
+    """Recompile bundle.json from cognition_contracts sources if drifted.
+
+    Runs recompile_bundle.py --check first; if drift detected, recompiles
+    and auto-commits the updated bundle.json so the next git push includes it.
+    """
+    scripts_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)))
+    repo_root = os.path.dirname(scripts_dir)
+    bundle_path = os.path.join(repo_root, "bundle.json")
+    recompile_script = os.path.join(scripts_dir, "recompile_bundle.py")
+
+    if not os.path.exists(recompile_script):
+        print("[ops] WARNING: recompile_bundle.py not found, skipping bundle check")
+        return
+
+    # Check for drift
+    result = subprocess.run(
+        [sys.executable, recompile_script, "--bundle", bundle_path, "--check"],
+        capture_output=True, text=True,
+    )
+
+    if result.returncode == 0:
+        print("[ops] bundle.json: up to date with contract sources")
+        return
+
+    # Drift detected — recompile
+    print("[ops] bundle.json: drift detected, recompiling...")
+    print(result.stdout.strip())
+    result2 = subprocess.run(
+        [sys.executable, recompile_script, "--bundle", bundle_path],
+        capture_output=True, text=True,
+    )
+    if result2.returncode != 0:
+        print(f"[ops] ERROR: recompile failed: {result2.stderr}")
+        sys.exit(1)
+    print(result2.stdout.strip())
+
+    # Auto-commit the updated bundle.json
+    subprocess.run(["git", "add", "bundle.json"], cwd=repo_root)
+    subprocess.run(
+        ["git", "commit", "-m", "chore: recompile bundle.json from contract sources"],
+        cwd=repo_root,
+        capture_output=True,
+    )
+    print("[ops] bundle.json: committed updated bundle")
+
+
 # ── build ──────────────────────────────────────────────────────────────────────
 
 BUILD_SCRIPT = """#!/bin/bash
@@ -138,6 +189,7 @@ echo "BUILD_DONE commit=$GIT_COMMIT ts=$BUILD_TIMESTAMP"
 
 
 def cmd_build(args) -> None:
+    ensure_bundle_compiled()
     print("[ops] build: scale up ASG...")
     scale_asg(1)
     iid = wait_for_instance()
@@ -1522,7 +1574,10 @@ def cmd_pipeline(args) -> None:
     eval_only = getattr(args, "eval_only", False)
     extra_env = _parse_env_args(args)
 
-    # ── Step 0: Replay gate (always runs, even in eval-only mode) ──────────
+    # ── Step 0a: Bundle recompile check ─────────────────────────────────────
+    ensure_bundle_compiled()
+
+    # ── Step 0b: Replay gate (always runs, even in eval-only mode) ────────
     if not _run_replay_gate():
         print("[pipeline] ABORTED — fix contract drift before deploying", flush=True)
         sys.exit(1)
