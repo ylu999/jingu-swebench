@@ -157,6 +157,9 @@ class StepMonitorState:
         self._last_admitted_phase: str = ""           # phase of last admitted record
         # P0.2: hard routing constraint
         self.required_next_phase: str | None = None   # set by routing, cleared on match
+        # L4: Phase Lifecycle — protocol-driven routing (one-shot, cleared after use)
+        self._protocol_next_phase: str | None = None
+        self._protocol_routing_reason: str = ""
         # P0.3: QJ advance trigger
         self._qj_advance_ready: bool = False          # QJ result available, EXECUTE->JUDGE armed
         # P0.4: QJ ack enforcement

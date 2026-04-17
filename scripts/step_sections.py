@@ -1914,6 +1914,54 @@ def _step_cp_update_and_verdict(
             state._last_admitted_phase = _current_phase_str
             print(f"    [immediate-admission] ADMITTED phase={_current_phase_str}"
                   f" source={_admission_result.source}", flush=True)
+
+            # ── L4: Phase Lifecycle — protocol-driven routing (ANALYZE-only) ──
+            # When ANALYZE admission succeeds, use route_from_phase_result()
+            # instead of decide_next() heuristic. This makes phase completion
+            # and routing a single protocol-driven path.
+            if _current_phase_str == "ANALYZE":
+                try:
+                    from phase_lifecycle import build_phase_result_from_admission
+
+                    # Build the admitted record dict from tool submission
+                    _admitted_dict = None
+                    if _model_peek is not None and hasattr(_model_peek, "_submitted_phase_record"):
+                        # Record was already consumed by admit_phase_record.
+                        # Use the last phase_record from state (just appended).
+                        _last_pr = state.phase_records[-1] if state.phase_records else None
+                        if _last_pr is not None and hasattr(_last_pr, "phase") and _last_pr.phase.upper() == "ANALYZE":
+                            _admitted_dict = _last_pr.as_dict() if hasattr(_last_pr, "as_dict") else vars(_last_pr)
+
+                    _phase_result = build_phase_result_from_admission(
+                        phase="ANALYZE",
+                        admitted_record=_admitted_dict,
+                        admission_source=_admission_result.source,
+                    )
+                    _routing = _phase_result.routing
+
+                    if _routing is not None:
+                        if _routing.retry_current:
+                            # Protocol says retry — inject hint
+                            agent_self.messages.append({
+                                "role": "user",
+                                "content": f"[PROTOCOL ROUTING] {_routing.retry_hint}",
+                            })
+                            print(
+                                f"    [phase-lifecycle] ANALYZE retry:"
+                                f" reason={_routing.reason}",
+                                flush=True,
+                            )
+                        elif _routing.next_phase and _routing.source == "protocol":
+                            # Protocol-driven advance: store on state for verdict override
+                            state._protocol_next_phase = _routing.next_phase
+                            state._protocol_routing_reason = _routing.reason
+                            print(
+                                f"    [phase-lifecycle] ANALYZE → {_routing.next_phase}"
+                                f" source=protocol reason={_routing.reason}",
+                                flush=True,
+                            )
+                except Exception as _pl_exc:
+                    print(f"    [phase-lifecycle] error (non-fatal): {_pl_exc}", flush=True)
     else:
         state._steps_without_submission += 1
 
@@ -2024,15 +2072,34 @@ def _step_cp_update_and_verdict(
             and _admission_result is not None
             and _admission_result.admitted
             and _current_phase_str in _IMMEDIATE_ADVANCE_PHASES):
-        from control.reasoning_state import _ADVANCE_TABLE as _adv_tbl
-        _submission_next = _adv_tbl.get(_current_phase_str)
-        if _submission_next is not None:
-            _step_verdict = VerdictAdvance(to=_submission_next, source="admission", reason="submission_triggered")
+
+        # L4: ANALYZE uses protocol-driven routing (phase_lifecycle)
+        _protocol_next = getattr(state, "_protocol_next_phase", None)
+        if _current_phase_str == "ANALYZE" and _protocol_next:
+            _protocol_reason = getattr(state, "_protocol_routing_reason", "")
+            _step_verdict = VerdictAdvance(
+                to=_protocol_next, source="protocol", reason=_protocol_reason,
+            )
+            # Clear one-shot protocol routing state
+            state._protocol_next_phase = None
+            state._protocol_routing_reason = ""
             print(
-                f"    [admission-advance] submission-triggered:"
-                f" phase={_current_phase_str} to={_submission_next}",
+                f"    [admission-advance] PROTOCOL-DRIVEN:"
+                f" phase={_current_phase_str} to={_protocol_next}"
+                f" reason={_protocol_reason}",
                 flush=True,
             )
+        else:
+            # Non-ANALYZE phases: existing heuristic advance
+            from control.reasoning_state import _ADVANCE_TABLE as _adv_tbl
+            _submission_next = _adv_tbl.get(_current_phase_str)
+            if _submission_next is not None:
+                _step_verdict = VerdictAdvance(to=_submission_next, source="admission", reason="submission_triggered")
+                print(
+                    f"    [admission-advance] submission-triggered:"
+                    f" phase={_current_phase_str} to={_submission_next}",
+                    flush=True,
+                )
 
     # ── Phase 2b: QJ-triggered EXECUTE → JUDGE advance (P0.3) ───────
     # When quick-judge returns target_status pass/fail, arm the flag.
@@ -2167,6 +2234,52 @@ def _step_cp_update_and_verdict(
         _old_phase = _cp_s.phase
         _new_phase = _step_verdict.to
         _eval_phase = str(_old_phase).upper()
+
+        # ── L4 Invariant: ANALYZE protocol completeness check ────────────
+        # When advancing FROM ANALYZE, verify admitted record has valid
+        # repair_strategy_type. This is the runtime invariant that catches
+        # any residual bypass of the protocol.
+        _routing_source = getattr(_step_verdict, "source", "unknown")
+        if _eval_phase == "ANALYZE":
+            _analyze_protocol_ok = False
+            _analyze_strategy = ""
+            for _pr_check in reversed(state.phase_records):
+                if hasattr(_pr_check, "phase") and _pr_check.phase.upper() == "ANALYZE":
+                    _rst = getattr(_pr_check, "repair_strategy_type", "") or ""
+                    if _rst.strip():
+                        _analyze_protocol_ok = True
+                        _analyze_strategy = _rst.strip()
+                    break
+            if _analyze_protocol_ok:
+                print(
+                    f"    [protocol-invariant] ANALYZE→{_new_phase} OK:"
+                    f" strategy={_analyze_strategy}"
+                    f" routing_source={_routing_source}",
+                    flush=True,
+                )
+            else:
+                import os as _os_inv
+                _strict = _os_inv.environ.get("JINGU_PROTOCOL_STRICT", "").lower() in ("1", "true", "yes")
+                print(
+                    f"    [protocol-invariant] WARNING: ANALYZE→{_new_phase}"
+                    f" WITHOUT valid repair_strategy_type!"
+                    f" routing_source={_routing_source}"
+                    f" strict={_strict}",
+                    flush=True,
+                )
+                if _strict:
+                    raise RuntimeError(
+                        f"[PROTOCOL INVARIANT VIOLATION] Advancing from ANALYZE"
+                        f" to {_new_phase} without repair_strategy_type."
+                        f" routing_source={_routing_source}"
+                    )
+        else:
+            print(
+                f"    [protocol-invariant] {_eval_phase}→{_new_phase}"
+                f" routing_source={_routing_source}",
+                flush=True,
+            )
+
         try:
             from declaration_extractor import _extract_phase_from_message as _epfm, _PHASE_NORM as _pnorm
             _adv_declared_raw = _epfm(latest_assistant_text)
@@ -2175,7 +2288,8 @@ def _step_cp_update_and_verdict(
             _adv_declared = "unknown"
         print(
             f"    [cp] phase_advance from={_old_phase} to={_step_verdict.to}"
-            f" agent_declared={_adv_declared}",
+            f" agent_declared={_adv_declared}"
+            f" routing_source={_routing_source}",
             flush=True,
         )
         _emit_decision(
