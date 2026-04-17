@@ -62,13 +62,18 @@ def _make_model(submitted_record=None) -> MagicMock:
 
     Args:
         submitted_record: If not None, pop_submitted_phase_record returns this
-                          on first call, then None.
+                          on first call, then None.  Also sets _submitted_phase_record
+                          so the admission peek sees a pending record.
     """
     model = MagicMock()
     if submitted_record is not None:
         model.pop_submitted_phase_record.return_value = submitted_record
+        model._submitted_phase_record = submitted_record
     else:
         model.pop_submitted_phase_record.return_value = None
+        # Explicit None so MagicMock doesn't auto-create a truthy attribute.
+        # This makes _has_pending_submission=False in _step_cp_update_and_verdict.
+        model._submitted_phase_record = None
     # structured_extract returns None (no diagnostic) by default
     model.structured_extract.return_value = None
     model._last_extract_record = None
@@ -107,10 +112,15 @@ def _run_section3(agent, state, cp_holder, verdict_override, latest_text=""):
 # ══════════════════════════════════════════════════════════════════════════════
 
 class TestNoSubmission:
-    """Iron Rule 1+2: no tool submission = no phase completion = no advance."""
+    """Iron Rule 1+2: no tool submission = no phase completion = no advance.
 
-    def test_first_miss_blocks_transition_and_retries(self):
-        """First time agent doesn't submit: transition blocked, retry injected."""
+    Current architecture: RC-1 gate suppresses VerdictAdvance when no pending
+    submission exists.  Deadline-based escalation (soft → hard → terminal)
+    handles agents that don't call submit_phase_record.
+    """
+
+    def test_rc1_suppresses_advance_without_submission(self):
+        """RC-1: VerdictAdvance suppressed to VerdictContinue when no submission."""
         state = _make_state("OBSERVE")
         model = _make_model(submitted_record=None)  # never submits
         agent = _make_agent(model)
@@ -118,7 +128,7 @@ class TestNoSubmission:
 
         verdict = VerdictAdvance(to="ANALYZE")
 
-        # Should NOT raise on first miss (retry allowed)
+        # RC-1 gate suppresses → no advance, no error
         _run_section3(agent, state, cp_holder, verdict)
 
         # Phase did NOT advance — still OBSERVE
@@ -129,20 +139,11 @@ class TestNoSubmission:
         assert len(state.phase_records) == 0, \
             "phase_records must be empty when no tool submission"
 
-        # Retry message injected
-        protocol_msgs = [
-            m for m in agent.messages
-            if "PROTOCOL VIOLATION" in m.get("content", "")
-        ]
-        assert len(protocol_msgs) >= 1, \
-            "Must inject PROTOCOL VIOLATION message on missing submission"
-        assert "submit_phase_record" in protocol_msgs[0]["content"]
+        # Steps without submission counter incremented
+        assert state._steps_without_submission >= 1
 
-        # Retry counter incremented
-        assert state.extraction_retry_counts.get("OBSERVE", 0) >= 1
-
-    def test_exhausted_retries_raises_stop_execution(self):
-        """After max retries without submission: StopExecution, never advances."""
+    def test_deadline_escalation_soft_warning(self):
+        """Soft checkpoint: reminder injected at CHECKPOINT_SOFT steps."""
         state = _make_state("OBSERVE")
         model = _make_model(submitted_record=None)
         agent = _make_agent(model)
@@ -150,31 +151,47 @@ class TestNoSubmission:
 
         verdict = VerdictAdvance(to="ANALYZE")
 
-        # Exhaust retries (MAX = 2, so we need 3 attempts: 0, 1, then >= MAX)
-        # First two: blocked but retryable
-        _run_section3(agent, state, cp_holder, verdict)
-        _run_section3(agent, state, cp_holder, verdict)
-
-        # Third: should raise StopExecution
-        with pytest.raises(StopExecution) as exc_info:
+        # OBSERVE deadline=15, soft=12, hard=15, terminal=18
+        # Run past soft checkpoint (12 steps)
+        for _ in range(13):
             _run_section3(agent, state, cp_holder, verdict)
 
-        assert "protocol_violation_missing_phase_record" in str(exc_info.value)
+        # Phase still OBSERVE
+        assert cp_holder[0].phase == "OBSERVE"
 
-        # Phase STILL did not advance
-        assert cp_holder[0].phase == "OBSERVE", \
-            "Phase must NEVER advance without admitted record, even after max retries"
+        # Soft reminder injected
+        reminder_msgs = [
+            m for m in agent.messages
+            if "PHASE CHECKPOINT" in m.get("content", "")
+        ]
+        assert len(reminder_msgs) >= 1, \
+            "Must inject phase checkpoint message after soft deadline"
 
-        # No admitted records at all
-        assert len(state.phase_records) == 0, \
-            "phase_records must remain empty — no force advance"
+    def test_deadline_escalation_terminal_stops(self):
+        """Terminal checkpoint: StopExecution after deadline + 3 steps."""
+        state = _make_state("OBSERVE")
+        model = _make_model(submitted_record=None)
+        agent = _make_agent(model)
+        cp_holder = [state.cp_state]
 
-        # early_stop_verdict set
-        assert state.early_stop_verdict is not None
-        assert state.early_stop_verdict.reason == "protocol_violation_missing_phase_record"
+        verdict = VerdictAdvance(to="ANALYZE")
 
-    def test_missing_submission_counter_tracks(self):
-        """Telemetry: _missing_submission_count incremented on each miss."""
+        # OBSERVE: deadline=15, terminal=18
+        # Run to terminal threshold
+        for _ in range(18):
+            _run_section3(agent, state, cp_holder, verdict)
+
+        # early_stop_verdict should be set at terminal
+        assert state.early_stop_verdict is not None, \
+            "Terminal escalation must set early_stop_verdict"
+        assert "step_governance_timeout" in state.early_stop_verdict.reason
+
+        # Phase NEVER advanced
+        assert cp_holder[0].phase == "OBSERVE"
+        assert len(state.phase_records) == 0
+
+    def test_steps_without_submission_tracks(self):
+        """Telemetry: _steps_without_submission incremented on each step."""
         state = _make_state("OBSERVE")
         model = _make_model(submitted_record=None)
         agent = _make_agent(model)
@@ -183,10 +200,10 @@ class TestNoSubmission:
         verdict = VerdictAdvance(to="ANALYZE")
 
         _run_section3(agent, state, cp_holder, verdict)
-        assert state._missing_submission_count == 1
+        assert state._steps_without_submission == 1
 
         _run_section3(agent, state, cp_holder, verdict)
-        assert state._missing_submission_count == 2
+        assert state._steps_without_submission == 2
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -304,8 +321,8 @@ class TestFreeTextDiagnosticOnly:
         assert cp_holder[0].phase == "OBSERVE", \
             "Phase must NOT advance on diagnostic-only extraction"
 
-        # Missing submission counter incremented
-        assert state._missing_submission_count >= 1
+        # Steps without submission counter incremented (RC-1 suppression path)
+        assert state._steps_without_submission >= 1
 
     def test_regex_extraction_goes_to_diagnostic_not_admitted(self):
         """Regex fallback extraction → diagnostic only, never admitted."""
@@ -398,8 +415,8 @@ class TestNoForceAdvance:
         # No phase_records at all
         assert len(state.phase_records) == 0
 
-    def test_protocol_violation_sets_early_stop_verdict(self):
-        """StopExecution from protocol violation also sets early_stop_verdict."""
+    def test_deadline_terminal_sets_early_stop_verdict(self):
+        """Deadline terminal escalation sets early_stop_verdict."""
         state = _make_state("OBSERVE")
         model = _make_model(submitted_record=None)
         agent = _make_agent(model)
@@ -407,15 +424,13 @@ class TestNoForceAdvance:
 
         verdict = VerdictAdvance(to="ANALYZE")
 
-        # Exhaust retries
-        _run_section3(agent, state, cp_holder, verdict)
-        _run_section3(agent, state, cp_holder, verdict)
-
-        with pytest.raises(StopExecution):
+        # OBSERVE: terminal = deadline(15) + 3 = 18 steps
+        for _ in range(18):
             _run_section3(agent, state, cp_holder, verdict)
 
         assert state.early_stop_verdict is not None
-        assert "protocol_violation" in state.early_stop_verdict.reason
+        assert "step_governance_timeout" in state.early_stop_verdict.reason
+        assert cp_holder[0].phase == "OBSERVE"
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -423,14 +438,14 @@ class TestNoForceAdvance:
 # ══════════════════════════════════════════════════════════════════════════════
 
 class TestIntegrationSmoke:
-    """End-to-end: JinguAgent.on_step_end → _step_cp_update_and_verdict → StopExecution → StepDecision.
+    """End-to-end: JinguAgent.on_step_end → _step_cp_update_and_verdict.
 
-    This exercises the real wiring, not mocked section3.
-    Only LLM calls and environment are stubbed.
+    Verifies the real wiring — RC-1 suppresses advance, deadline escalation
+    eventually stops the agent.  Only LLM calls and environment are stubbed.
     """
 
-    def test_on_step_end_stops_on_protocol_violation(self):
-        """Real JinguAgent.on_step_end: no tool submission → stop decision."""
+    def test_on_step_end_rc1_suppresses_advance(self):
+        """Real JinguAgent.on_step_end: no tool submission → RC-1 blocks advance."""
         from jingu_agent import JinguAgent, StepDecision
         from pathlib import Path
 
@@ -486,31 +501,29 @@ class TestIntegrationSmoke:
              patch("step_sections._step_inject_phase"), \
              patch("step_sections._check_materialization_gate"):
 
-            # Step 1: blocked, retry allowed
+            # Step 1: RC-1 suppresses advance → continue
             decision1 = ja.on_step_end(agent_mock, step_n=1)
-            assert decision1.action == "continue" or decision1.action == "redirect", \
-                f"First miss should allow retry, got action={decision1.action}"
+            assert decision1.action == "continue", \
+                f"RC-1 should suppress advance to continue, got action={decision1.action}"
             assert ja._cp_state_holder[0].phase == "OBSERVE", \
                 "Phase must not advance on first miss"
 
-            # Step 2: blocked again
+            # Step 2: still suppressed
             ja._last_observe_result = ("Still analyzing...", "analyzing", False)
             decision2 = ja.on_step_end(agent_mock, step_n=2)
             assert ja._cp_state_holder[0].phase == "OBSERVE"
+            assert decision2.action == "continue"
 
-            # Step 3: max retries exhausted → stop
+            # Step 3: still no submission but within deadline — continue
             ja._last_observe_result = ("Still no submission...", "no submission", False)
             decision3 = ja.on_step_end(agent_mock, step_n=3)
-
-            assert decision3.action == "stop", \
-                f"After max retries, must get stop decision, got action={decision3.action}"
-            assert "protocol_violation" in decision3.reason, \
-                f"Stop reason must be protocol_violation, got reason={decision3.reason}"
+            assert decision3.action == "continue", \
+                f"Within deadline, should continue, got action={decision3.action}"
 
         # Final state checks
         assert len(state.phase_records) == 0, \
             "No admitted records should exist"
-        assert state.early_stop_verdict is not None
-        assert "protocol_violation" in state.early_stop_verdict.reason
         assert ja._cp_state_holder[0].phase == "OBSERVE", \
             "Phase must NEVER have advanced"
+        assert state._steps_without_submission >= 3, \
+            "Steps without submission must be tracked"

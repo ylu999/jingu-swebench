@@ -17,6 +17,11 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
 import pytest
 
 
+def _reason_codes(reasons) -> list[str]:
+    """Extract string codes from admission reasons (may be GateFailureCode or str)."""
+    return [r.code if hasattr(r, 'code') else str(r) for r in reasons]
+
+
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 class _FakePR:
@@ -76,14 +81,18 @@ def test_bugB_analyze_foreign_phase_delta1_is_admitted():
     foreign_reason = f"foreign_phase_declared:declared={declared},eval={eval_phase},delta={delta}"
 
     # Apply the same post-processing as the gate code
-    if foreign_reason not in admission.reasons:
+    # reasons may contain GateFailureCode objects or strings
+    def _reason_str(r) -> str:
+        return r.code if hasattr(r, 'code') else str(r)
+
+    if foreign_reason not in [_reason_str(r) for r in admission.reasons]:
         admission.reasons.insert(0, foreign_reason)
-    admission.reasons = [r for r in admission.reasons if not r.startswith("missing_required_principal")]
+    admission.reasons = [r for r in admission.reasons if not _reason_str(r).startswith("MISSING_PRINCIPAL")]
 
     # After stripping missing_required_principal, only foreign_reason remains.
     # Status must be ADMITTED (not RETRYABLE) — this is the fix assertion.
     # If status is RETRYABLE with only foreign_phase_declared reason → loop → ESCALATE.
-    remaining_reasons = [r for r in admission.reasons if r != foreign_reason]
+    remaining_reasons = [r for r in admission.reasons if _reason_str(r) != foreign_reason]
     if not remaining_reasons:
         # All non-foreign reasons stripped → should be ADMITTED
         # This assertion documents the required fix:
@@ -304,8 +313,8 @@ def test_ylite_observe_no_evidence_no_tool_is_retryable():
     assert admission.status == "RETRYABLE", (
         f"OBSERVE with no evidence should be RETRYABLE, got {admission}"
     )
-    assert "missing_evidence_basis" in admission.reasons, (
-        f"Should have missing_evidence_basis, got {admission.reasons}"
+    assert any("MISSING_EVIDENCE_BASIS" in c for c in _reason_codes(admission.reasons)), (
+        f"Should have MISSING_EVIDENCE_BASIS, got {admission.reasons}"
     )
 
 
@@ -423,7 +432,7 @@ def test_analyze_missing_required_is_retryable():
     pr = _FakePR(phase="ANALYZE", principals=[], evidence_refs=["file.py:10"])
     admission = evaluate_admission(pr, "ANALYZE")
     assert admission.status == "RETRYABLE"
-    assert any("missing_required_principal" in r for r in admission.reasons)
+    assert any("MISSING_PRINCIPAL" in c for c in _reason_codes(admission.reasons))
 
 
 # ── Bug C: ESCALATE_CONTRACT_BUG must bypass (ADMITTED) not stop ──────────────
@@ -438,19 +447,22 @@ def test_bugC_escalate_contract_bypass_not_stop():
 
     Note: logic lives in step_sections.py (refactored from run_with_jingu_gate.py).
     """
-    ss_path = os.path.join(os.path.dirname(__file__), "..", "scripts", "step_sections.py")
+    ss_path = os.path.join(os.path.dirname(__file__), "..", "scripts", "principal_gate.py")
     with open(ss_path) as f:
         src = f.read()
-    # The fix must set _contract_bypass = True in the ESCALATE branch
-    assert "_contract_bypass = True" in src, (
-        "Bug C fix: ESCALATE branch must set _contract_bypass=True to skip redirect injection."
+    # The fix must return ESCALATED status with CONTRACT_BUG reason (not StopExecution)
+    assert "EscalationReason.CONTRACT_BUG" in src, (
+        "Bug C fix: ESCALATE branch must use EscalationReason.CONTRACT_BUG."
     )
-    # Must NOT raise StopExecution in the ESCALATE branch anymore
-    escalate_idx = src.find("ESCALATE_CONTRACT_BUG")
+    assert "contract_bypass:" in src, (
+        "Bug C fix: ESCALATED result must include contract_bypass reason."
+    )
+    # Must NOT raise StopExecution in the ESCALATE branch
+    escalate_idx = src.find("CONTRACT_BUG")
     stop_after_escalate = "raise StopExecution" in src[escalate_idx:escalate_idx + 400]
     assert not stop_after_escalate, (
-        "Bug C fix: ESCALATE_CONTRACT_BUG must not raise StopExecution. "
-        "Agent must continue with contract_bypass ADMITTED."
+        "Bug C fix: CONTRACT_BUG must not raise StopExecution. "
+        "Agent must continue with contract_bypass ADMITTED/ESCALATED."
     )
 
 
@@ -462,12 +474,13 @@ def test_bugC_contract_bypass_skips_retryable_redirect():
 
     Note: logic lives in step_sections.py (refactored from run_with_jingu_gate.py).
     """
-    ss_path = os.path.join(os.path.dirname(__file__), "..", "scripts", "step_sections.py")
+    ss_path = os.path.join(os.path.dirname(__file__), "..", "scripts", "principal_gate.py")
     with open(ss_path) as f:
         src = f.read()
-    assert "not _contract_bypass and not state.early_stop_verdict" in src, (
-        "Bug C fix: redirect injection guard must check _contract_bypass. "
-        "Without this, RETRYABLE redirect fires even after contract_bypass."
+    # After escalation, ESCALATED status prevents RETRYABLE redirect injection.
+    # The guard is now structural: evaluate_admission returns ESCALATED (not RETRYABLE).
+    assert "AdmissionStatus.ESCALATED" in src, (
+        "Bug C fix: ESCALATED status must exist — prevents RETRYABLE redirect."
     )
 
 
@@ -599,7 +612,7 @@ def test_p23_missing_root_cause_exempt_from_contract_bypass():
 
     Note: logic lives in step_sections.py (refactored from run_with_jingu_gate.py).
     """
-    ss_path = os.path.join(os.path.dirname(__file__), "..", "scripts", "step_sections.py")
+    ss_path = os.path.join(os.path.dirname(__file__), "..", "scripts", "principal_gate.py")
     with open(ss_path) as f:
         src = f.read()
 
@@ -619,12 +632,12 @@ def test_p23_missing_root_cause_exempt_from_contract_bypass():
     )
 
     # The guard condition must check both loop count AND structured violation exemption
-    assert "not _has_structured_violation" in src, (
-        "p23 fix: contract_bypass condition must include 'not _has_structured_violation'. "
+    assert "not _has_structured" in src, (
+        "p23 fix: contract_bypass condition must include 'not _has_structured'. "
         "Without this, 3 missing_root_cause REDIRECTs will bypass to ADMITTED."
     )
-    assert "_has_structured_violation = any(" in src, (
-        "p23 fix: _has_structured_violation must be computed from admission.reasons."
+    assert "_has_structured = any(" in src, (
+        "p23 fix: _has_structured must be computed from admission.reasons."
     )
 
 
@@ -637,22 +650,22 @@ def test_p23_contract_bypass_still_fires_for_principal_only_violations():
 
     Note: logic lives in step_sections.py (refactored from run_with_jingu_gate.py).
     """
-    ss_path = os.path.join(os.path.dirname(__file__), "..", "scripts", "step_sections.py")
+    ss_path = os.path.join(os.path.dirname(__file__), "..", "scripts", "principal_gate.py")
     with open(ss_path) as f:
         src = f.read()
 
     # Original contract_bypass logic must still exist (not deleted)
-    assert "ESCALATE_CONTRACT_BUG" in src, (
+    assert "CONTRACT_BUG" in src, (
         "contract_bypass (Bug C fix) must still exist for principal declaration failures."
     )
-    assert "contract_bypass ADMITTED" in src, (
-        "contract_bypass ADMITTED path must still exist."
+    assert "contract_bypass:" in src, (
+        "contract_bypass path must still exist."
     )
-    # The condition is now gated on _has_structured_violation = False
-    bypass_block = src[src.find("_has_structured_violation = any("):]
-    bypass_cond_idx = bypass_block.find("if _loop_count >= _RETRYABLE_LOOP_LIMIT and not _has_structured_violation")
+    # The condition is now gated on _has_structured = False
+    bypass_block = src[src.find("_has_structured = any("):]
+    bypass_cond_idx = bypass_block.find("if _esc_count >= _RETRYABLE_LOOP_LIMIT and not _has_structured")
     assert bypass_cond_idx != -1, (
         "contract_bypass condition must be: "
-        "'if _loop_count >= _RETRYABLE_LOOP_LIMIT and not _has_structured_violation'. "
+        "'if _esc_count >= _RETRYABLE_LOOP_LIMIT and not _has_structured'. "
         "This ensures bypass fires for principal gaps but not for structured output gaps."
     )

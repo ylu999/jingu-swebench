@@ -63,6 +63,7 @@ def _make_well_formed_analyze_response() -> dict:
             ],
             "risk_if_violated": "Invalid data bypasses validation and corrupts the DB",
         },
+        "repair_strategy_type": "DATAFLOW_FIX",
         "content": "Full analysis content here",
     }
 

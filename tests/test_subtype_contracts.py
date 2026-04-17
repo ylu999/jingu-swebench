@@ -56,10 +56,10 @@ def test_execute_contract_has_minimal_change():
     assert "minimal_change" in contract["required_principals"]
 
 
-def test_judge_contract_has_invariant_preservation():
-    """judge.verification required_principals includes invariant_preservation."""
+def test_judge_contract_has_result_verification():
+    """judge.verification required_principals includes result_verification (contract truth)."""
     contract = SUBTYPE_CONTRACTS["judge.verification"]
-    assert "invariant_preservation" in contract["required_principals"]
+    assert "result_verification" in contract["required_principals"]
 
 
 # ── Tests: get_required_principals ───────────────────────────────────────────
@@ -77,9 +77,9 @@ def test_get_required_principals_execute():
 
 
 def test_get_required_principals_judge():
-    """JUDGE phase returns invariant_preservation."""
+    """JUDGE phase returns result_verification (contract truth)."""
     principals = get_required_principals("JUDGE")
-    assert "invariant_preservation" in principals
+    assert "result_verification" in principals
 
 
 def test_get_required_principals_observe():
@@ -110,15 +110,15 @@ def test_get_repair_target_analyze():
 
 
 def test_get_repair_target_execute():
-    """EXECUTE violation repair target is ANALYZE."""
+    """EXECUTE violation repair target is EXECUTE (contract truth: self-repair)."""
     target = get_repair_target("EXECUTE")
-    assert target == "ANALYZE", f"expected ANALYZE, got {target}"
+    assert target == "EXECUTE", f"expected EXECUTE, got {target}"
 
 
 def test_get_repair_target_judge():
-    """JUDGE violation repair target is EXECUTE."""
+    """JUDGE violation repair target is JUDGE (contract truth: self-repair)."""
     target = get_repair_target("JUDGE")
-    assert target == "EXECUTE", f"expected EXECUTE, got {target}"
+    assert target == "JUDGE", f"expected JUDGE, got {target}"
 
 
 def test_get_repair_target_unknown():
@@ -150,10 +150,10 @@ def test_guidance_execute_contains_minimal_change():
     assert "minimal_change" in guidance
 
 
-def test_guidance_judge_contains_invariant_preservation():
-    """JUDGE guidance mentions invariant_preservation."""
+def test_guidance_judge_contains_result_verification():
+    """JUDGE guidance mentions result_verification (contract truth)."""
     guidance = build_phase_principal_guidance("JUDGE")
-    assert "invariant_preservation" in guidance
+    assert "result_verification" in guidance
 
 
 def test_guidance_unknown_returns_empty():
@@ -212,10 +212,10 @@ def test_phase_prompt_execute_contains_minimal_change():
     assert "minimal_change" in guidance
 
 
-def test_phase_prompt_judge_contains_invariant_preservation():
-    """PHASE_GUIDANCE['JUDGE'] contains 'invariant_preservation'."""
+def test_phase_prompt_judge_contains_result_verification():
+    """PHASE_GUIDANCE['JUDGE'] contains 'result_verification' (contract truth)."""
     guidance = PHASE_GUIDANCE.get("JUDGE", "")
-    assert "invariant_preservation" in guidance
+    assert "result_verification" in guidance
 
 
 # ── Tests: expected_principals (soft / quality signal) ───────────────────────
@@ -229,10 +229,10 @@ def test_analyze_contract_has_expected_principals():
 
 
 def test_execute_contract_has_expected_principals():
-    """execution.code_patch expected_principals includes action_grounding (soft signal)."""
+    """execution.code_patch: action_grounding is in required (contract truth), expected is empty."""
     contract = SUBTYPE_CONTRACTS["execution.code_patch"]
-    assert "expected_principals" in contract
-    assert "action_grounding" in contract["expected_principals"]
+    # action_grounding is REQUIRED for EXECUTE, not expected
+    assert "action_grounding" in contract["required_principals"]
 
 
 def test_get_expected_principals_analyze():
@@ -245,9 +245,10 @@ def test_get_expected_principals_analyze():
 
 
 def test_get_expected_principals_execute():
-    """EXECUTE expected principals includes action_grounding."""
+    """EXECUTE expected principals is empty (action_grounding is in required)."""
     expected = get_expected_principals("EXECUTE")
-    assert "action_grounding" in expected
+    # action_grounding moved to required in contract — expected is empty
+    assert expected == []
 
 
 def test_get_expected_principals_observe():
@@ -295,21 +296,20 @@ def test_guidance_analyze_has_should():
     assert "evidence_linkage" in guidance
 
 
-def test_guidance_execute_has_must_and_should():
-    """EXECUTE guidance contains MUST for minimal_change and SHOULD for action_grounding."""
+def test_guidance_execute_has_must():
+    """EXECUTE guidance contains MUST for minimal_change and action_grounding (both required)."""
     guidance = build_phase_principal_guidance("EXECUTE")
     assert "MUST" in guidance
     assert "minimal_change" in guidance
-    assert "SHOULD" in guidance
     assert "action_grounding" in guidance
 
 
-def test_guidance_judge_has_must_no_should():
-    """JUDGE guidance has MUST and SHOULD (expected principals defined in v2.0)."""
+def test_guidance_judge_has_must_and_should():
+    """JUDGE guidance has MUST for result_verification and SHOULD for uncertainty_honesty."""
     guidance = build_phase_principal_guidance("JUDGE")
     assert "MUST" in guidance
-    assert "invariant_preservation" in guidance
-    # judge.verification has expected_principals in v2.0, so SHOULD line present
+    assert "result_verification" in guidance
+    # judge.verification has expected_principals=[uncertainty_honesty]
     assert "SHOULD" in guidance
 
 

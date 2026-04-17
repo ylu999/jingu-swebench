@@ -29,7 +29,7 @@ from gate_rejection import GateRejection, FieldFailure
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
 def _make_good_pr() -> PhaseRecord:
-    """A well-formed analysis PhaseRecord that should pass all 4 rules."""
+    """A well-formed analysis PhaseRecord that should pass all gate rules."""
     return PhaseRecord(
         phase="ANALYZE",
         subtype="analysis.root_cause",
@@ -67,6 +67,15 @@ def _make_good_pr() -> PhaseRecord:
             "test_invalid_date -> DateTimeField.clean() -> to_python() "
             "-> datetime.strptime() without tz -> ValueError"
         ),
+        alternative_hypotheses=[
+            {"hypothesis": "DateTimeField.validate() method is broken", "ruled_out_reason": "validate delegates to to_python, traceback points to to_python directly"},
+            {"hypothesis": "The issue is in the model Meta class timezone config", "ruled_out_reason": "Meta class does not affect field-level parsing, only display timezone"},
+        ],
+        invariant_capture={
+            "identified_invariants": ["timezone-naive datetime objects must be handled by to_python"],
+            "risk_if_violated": "ValueError crashes any form submission with datetime input",
+        },
+        repair_strategy_type="REGEX_FIX",
     )
 
 
@@ -162,13 +171,13 @@ class TestEvaluateAnalysis:
         assert verdict.scores["alternative_hypothesis"] >= 0.5
         assert verdict.scores["causal_chain"] >= 0.5
 
-    def test_no_code_refs_fails_code_grounding(self):
-        """Analysis without code references should fail code_grounding."""
+    def test_no_code_refs_partial_code_grounding(self):
+        """Analysis without code refs but with root_cause gets partial score (0.5 = pass)."""
         pr = _make_no_code_refs_pr()
         verdict = evaluate_analysis(pr)
-        assert verdict.passed is False
-        assert "code_grounding" in verdict.failed_rules
-        assert verdict.scores["code_grounding"] < 0.5
+        # root_cause present (>10 chars) → 0.5 → at threshold → passes code_grounding
+        assert verdict.scores["code_grounding"] == 0.5
+        assert "code_grounding" not in verdict.failed_rules
 
     def test_single_hypothesis_soft_gate_in_general_domain(self):
         """Single hypothesis with good core rules → fail-open in general domain."""
@@ -188,15 +197,16 @@ class TestEvaluateAnalysis:
         assert verdict.scores["causal_chain"] < 0.5
 
     def test_empty_pr_fails_all(self):
-        """Completely empty PhaseRecord should fail all 4 rules."""
+        """Completely empty PhaseRecord should fail all 5 rules."""
         pr = _make_empty_pr()
         verdict = evaluate_analysis(pr)
         assert verdict.passed is False
-        assert len(verdict.failed_rules) == 4
+        assert len(verdict.failed_rules) == 5
         assert "code_grounding" in verdict.failed_rules
         assert "alternative_hypothesis" in verdict.failed_rules
         assert "causal_chain" in verdict.failed_rules
         assert "invariant_capture" in verdict.failed_rules
+        assert "repair_strategy_type" in verdict.failed_rules
 
     def test_verdict_has_correct_type(self):
         """evaluate_analysis returns an AnalysisVerdict."""
@@ -221,13 +231,13 @@ class TestCodeGrounding:
         assert _check_code_grounding(pr) >= 1.0
 
     def test_evidence_refs_only_gives_half(self):
-        """Code ref in evidence_refs but not root_cause gives 0.5."""
+        """Code ref in evidence_refs only (no root_cause) gives 0.5."""
         pr = PhaseRecord(
             phase="ANALYZE", subtype="analysis.root_cause",
             principals=[], claims=[],
             evidence_refs=["django/db/models.py:45"],
             from_steps=[], content="",
-            root_cause="The validation logic is wrong.",  # No code ref
+            root_cause="",  # No root_cause
         )
         assert _check_code_grounding(pr) == 0.5
 
@@ -243,18 +253,18 @@ class TestCodeGrounding:
         assert _check_code_grounding(pr) == 0.5
 
     def test_no_code_refs_anywhere(self):
-        """No code references anywhere gives 0.0."""
+        """No evidence_refs and no root_cause gives 0.0."""
         pr = PhaseRecord(
             phase="ANALYZE", subtype="analysis.root_cause",
             principals=[], claims=[],
             evidence_refs=[],
             from_steps=[], content="The bug is somewhere in the codebase.",
-            root_cause="Something is wrong with the validation.",
+            root_cause="",  # empty root_cause
         )
         assert _check_code_grounding(pr) == 0.0
 
-    def test_content_fallback_with_code_refs(self):
-        """Content field with 2+ code refs gives 0.5 as fallback."""
+    def test_content_not_used_for_code_grounding(self):
+        """Content field is NOT used for code_grounding (structural-only: evidence_refs + root_cause)."""
         pr = PhaseRecord(
             phase="ANALYZE", subtype="analysis.root_cause",
             principals=[], claims=[],
@@ -263,7 +273,8 @@ class TestCodeGrounding:
             content="Looking at django/db/models.py:45 and django/utils/timezone.py:12",
             root_cause="",
         )
-        assert _check_code_grounding(pr) == 0.5
+        # Content field ignored — no evidence_refs, no root_cause → 0.0
+        assert _check_code_grounding(pr) == 0.0
 
 
 class TestIsCodeEvidenceRef:
@@ -297,18 +308,15 @@ class TestIsCodeEvidenceRef:
 class TestAlternativeHypothesis:
 
     def test_multiple_hypotheses_with_rejection(self):
-        """Content with multiple hypotheses and rejection reasoning scores 1.0."""
+        """alternative_hypotheses with 2+ substantive entries scores 1.0."""
         pr = PhaseRecord(
             phase="ANALYZE", subtype="analysis.root_cause",
             principals=[], claims=[], evidence_refs=[],
-            from_steps=[], root_cause="",
-            content=(
-                "Hypothesis 1: The issue is in to_python() handling.\n"
-                "Hypothesis 2: The issue could be in validate().\n"
-                "Alternative explanation: it might be a serializer bug.\n"
-                "However, hypothesis 2 doesn't explain the traceback, "
-                "so it was ruled out because the error originates in to_python()."
-            ),
+            from_steps=[], root_cause="", content="",
+            alternative_hypotheses=[
+                {"hypothesis": "The issue is in to_python() handling", "ruled_out_reason": "traceback points to to_python directly"},
+                {"hypothesis": "The issue could be in validate() method", "ruled_out_reason": "validate delegates to to_python, error originates there"},
+            ],
         )
         score = _check_alternative_hypothesis(pr)
         assert score >= 1.0
@@ -324,17 +332,15 @@ class TestAlternativeHypothesis:
         score = _check_alternative_hypothesis(pr)
         assert score == 0.0
 
-    def test_vague_alternatives_score_half(self):
-        """Content mentioning alternatives vaguely (1-2 markers) scores 0.5."""
+    def test_single_hypothesis_scores_half(self):
+        """alternative_hypotheses with 1 substantive entry scores 0.5."""
         pr = PhaseRecord(
             phase="ANALYZE", subtype="analysis.root_cause",
             principals=[], claims=[], evidence_refs=[],
-            from_steps=[], root_cause="",
-            content=(
-                "The root cause is the validation method. "
-                "Another possible cause could be the serializer, "
-                "but the validation seems more likely."
-            ),
+            from_steps=[], root_cause="", content="",
+            alternative_hypotheses=[
+                {"hypothesis": "Could be a serializer issue instead", "ruled_out_reason": "validation seems more likely based on traceback"},
+            ],
         )
         score = _check_alternative_hypothesis(pr)
         assert score == 0.5
@@ -363,38 +369,41 @@ class TestCausalChain:
         )
         assert _check_causal_chain(pr) == 1.0
 
-    def test_root_cause_plus_code_and_test_refs(self):
-        """root_cause with code ref + test in evidence_refs = 1.0."""
+    def test_substantive_causal_chain(self):
+        """causal_chain field >20 chars = 1.0 (structural check)."""
         pr = PhaseRecord(
             phase="ANALYZE", subtype="analysis.root_cause",
             principals=[], claims=[],
             evidence_refs=["tests/test_models.py::test_clean"],
             from_steps=[], content="",
             root_cause="Bug in django/db/models.py:45 causes ValueError.",
+            causal_chain="test_clean -> Model.clean() -> validate() -> django/db/models.py:45 -> ValueError",
         )
         assert _check_causal_chain(pr) == 1.0
 
-    def test_root_cause_with_code_only(self):
-        """root_cause with code ref but no test ref = 0.5."""
+    def test_short_causal_chain_scores_partial(self):
+        """causal_chain 5 < len <= 20 = 0.3 (partial)."""
         pr = PhaseRecord(
             phase="ANALYZE", subtype="analysis.root_cause",
             principals=[], claims=[],
-            evidence_refs=["django/db/models.py:45"],  # code ref, not test
+            evidence_refs=["django/db/models.py:45"],
             from_steps=[], content="",
             root_cause="Bug in django/db/models.py:45 causes ValueError.",
+            causal_chain="a -> b -> c -> d",  # 16 chars, between 5 and 20
         )
-        assert _check_causal_chain(pr) == 0.5
+        assert _check_causal_chain(pr) == 0.3
 
-    def test_root_cause_without_code_ref(self):
-        """root_cause present but without code references = 0.3."""
+    def test_no_causal_chain_field_scores_zero(self):
+        """No causal_chain field = 0.0 (content/root_cause not used)."""
         pr = PhaseRecord(
             phase="ANALYZE", subtype="analysis.root_cause",
             principals=[], claims=[],
             evidence_refs=[],
             from_steps=[], content="",
             root_cause="The validation logic is incorrect and causes failures.",
+            causal_chain="",
         )
-        assert _check_causal_chain(pr) == 0.3
+        assert _check_causal_chain(pr) == 0.0
 
     def test_no_root_cause_no_chain(self):
         """No root_cause and no causal_chain = 0.0."""
@@ -422,17 +431,17 @@ class TestCausalChain:
 class TestThresholds:
 
     def test_score_at_exactly_half_passes(self):
-        """Score of exactly 0.5 should pass (threshold is < 0.5 to fail)."""
+        """Score of exactly 0.5 should pass (threshold is >= 0.5 to pass)."""
         pr = PhaseRecord(
             phase="ANALYZE", subtype="analysis.root_cause",
             principals=[], claims=[],
             evidence_refs=["django/db/models.py:45"],
             from_steps=[], content="",
-            root_cause="validation logic is wrong",  # no code ref
+            root_cause="",  # no root_cause → code_grounding = 0.5 (evidence only)
             causal_chain="test -> clean() -> to_python() -> ValueError long enough",
         )
         verdict = evaluate_analysis(pr)
-        # code_grounding = 0.5 (evidence only), should pass
+        # code_grounding = 0.5 (evidence_refs only, no root_cause), should pass
         assert verdict.scores["code_grounding"] == 0.5
         assert "code_grounding" not in verdict.failed_rules
 
@@ -475,7 +484,7 @@ class TestAnalysisGateRejection:
         """Rejection contains FieldFailure entries for each failed rule."""
         pr = _make_empty_pr()
         verdict = evaluate_analysis(pr)
-        assert len(verdict.rejection.failures) == 4  # all 4 rules fail
+        assert len(verdict.rejection.failures) == 5  # all 5 rules fail
         fields_failed = [f.field for f in verdict.rejection.failures]
         assert "root_cause" in fields_failed
         assert "causal_chain" in fields_failed
@@ -541,7 +550,12 @@ class TestStructuredOutputMode:
 
     def test_code_grounding_still_enforced_in_structured_mode(self):
         """Code grounding is a semantic check — still enforced in structured mode."""
-        pr = _make_no_code_refs_pr()
+        pr = PhaseRecord(
+            phase="ANALYZE", subtype="analysis.root_cause",
+            principals=["causal_grounding"], claims=[],
+            evidence_refs=[], from_steps=[3],
+            content="Something is wrong.", root_cause="",  # no root_cause, no evidence_refs → 0.0
+        )
         verdict = evaluate_analysis(pr, structured_output=True)
         assert "code_grounding" in verdict.failed_rules
 
@@ -551,21 +565,23 @@ class TestStructuredOutputMode:
         verdict = evaluate_analysis(pr, structured_output=True)
         assert "causal_chain" in verdict.failed_rules
 
-    def test_empty_pr_fails_three_not_four_in_structured_mode(self):
-        """Empty PR fails code_grounding + causal_chain + invariant_capture but NOT alternative_hypothesis."""
+    def test_empty_pr_fails_four_not_five_in_structured_mode(self):
+        """Empty PR fails 4 rules but NOT alternative_hypothesis (soft gate in structured mode)."""
         pr = _make_empty_pr()
         verdict = evaluate_analysis(pr, structured_output=True)
         assert verdict.passed is False
         assert "code_grounding" in verdict.failed_rules
         assert "causal_chain" in verdict.failed_rules
         assert "invariant_capture" in verdict.failed_rules
+        assert "repair_strategy_type" in verdict.failed_rules
         assert "alternative_hypothesis" not in verdict.failed_rules
-        assert len(verdict.failed_rules) == 3
+        assert len(verdict.failed_rules) == 4
 
     def test_structured_mode_false_is_default(self):
-        """Default behavior (structured_output=False) keeps all 4 rules enforced."""
+        """Default behavior (structured_output=False) keeps all 5 rules enforced."""
         pr = _make_empty_pr()
         verdict = evaluate_analysis(pr, structured_output=False)
-        assert len(verdict.failed_rules) == 4
+        assert len(verdict.failed_rules) == 5
         assert "alternative_hypothesis" in verdict.failed_rules
         assert "invariant_capture" in verdict.failed_rules
+        assert "repair_strategy_type" in verdict.failed_rules

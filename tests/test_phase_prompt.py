@@ -52,8 +52,9 @@ def test_all_known_phases_have_guidance():
 
 
 def test_phase_guidance_dict_completeness():
-    """PHASE_GUIDANCE dict contains all 6 expected phases."""
-    expected_phases = {"UNDERSTAND", "OBSERVE", "ANALYZE", "DECIDE", "EXECUTE", "JUDGE"}
+    """PHASE_GUIDANCE dict contains all canonical phases."""
+    from canonical_symbols import ALL_PHASES
+    expected_phases = set(ALL_PHASES)
     assert set(PHASE_GUIDANCE.keys()) == expected_phases, (
         f"PHASE_GUIDANCE keys mismatch. Expected: {expected_phases}, got: {set(PHASE_GUIDANCE.keys())}"
     )

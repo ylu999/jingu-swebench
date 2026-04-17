@@ -74,8 +74,8 @@ class TestBuildPhaseRecordAnalyze:
         }
         pr = build_phase_record_from_structured(parsed, "ANALYZE")
         assert "ROOT_CAUSE:" in pr.content
-        assert "HYPOTHESIS: caching issue" in pr.content
-        assert "RULED_OUT: no cache involved" in pr.content
+        assert "ALTERNATIVES_CONSIDERED:" in pr.content
+        assert "caching issue" in pr.content
 
 
 class TestBuildPhaseRecordExecute:
@@ -105,8 +105,9 @@ class TestBuildPhaseRecordExecute:
             "principals": [],
         }
         pr = build_phase_record_from_structured(parsed, "EXECUTE")
-        assert "PATCH:" in pr.content
-        assert "FILES:" in pr.content
+        assert "PLAN:" in pr.content
+        assert "PATCH_DESCRIPTION:" in pr.content
+        assert "CHANGE_SCOPE:" in pr.content
 
 
 class TestBuildPhaseRecordJudge:
@@ -134,8 +135,8 @@ class TestBuildPhaseRecordJudge:
             "principals": [],
         }
         pr = build_phase_record_from_structured(parsed, "JUDGE")
-        assert "TESTS_PASSED: pass" in pr.content
-        assert "CRITERION:" in pr.content
+        assert "VERIFICATION_RESULT: pass" in pr.content
+        assert "REMAINING_RISKS:" in pr.content
 
 
 class TestBuildPhaseRecordObserve:
@@ -160,7 +161,8 @@ class TestBuildPhaseRecordObserve:
             "principals": [],
         }
         pr = build_phase_record_from_structured(parsed, "OBSERVE")
-        assert pr.content.count("OBS:") == 3
+        assert "OBSERVATIONS:" in pr.content
+        assert "Found field class" in pr.content
 
     def test_content_preview_observe_string(self):
         parsed = {
@@ -168,7 +170,7 @@ class TestBuildPhaseRecordObserve:
             "principals": [],
         }
         pr = build_phase_record_from_structured(parsed, "OBSERVE")
-        assert "OBS: Found the relevant field class" in pr.content
+        assert "OBSERVATIONS: Found the relevant field class" in pr.content
 
 
 class TestBuildPhaseRecordDecide:
@@ -223,7 +225,7 @@ class TestBuildPhaseRecordDesign:
         }
         pr = build_phase_record_from_structured(parsed, "DESIGN")
         assert "SCOPE:" in pr.content
-        assert "FILES:" in pr.content
+        assert "CHANGE_SCOPE:" in pr.content
 
 
 class TestSubtypeValidation:

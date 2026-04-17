@@ -43,6 +43,8 @@ class FakePhaseRecord:
         from_steps=None,
         content="",
         principals=None,
+        root_cause="",
+        causal_chain="",
     ):
         self.phase = phase
         self.evidence_refs = evidence_refs or []
@@ -50,16 +52,20 @@ class FakePhaseRecord:
         self.from_steps = from_steps or []
         self.content = content
         self.principals = principals or []
+        self.root_cause = root_cause
+        self.causal_chain = causal_chain
 
 
 # ── infer_principals tests ────────────────────────────────────────────────────
 
 def test_infer_causal_grounding():
-    """evidence_refs non-empty + causal keyword => causal_grounding inferred."""
+    """evidence_refs + root_cause + causal_chain => causal_grounding inferred (structural check)."""
     rec = FakePhaseRecord(
         phase="ANALYZE",
         evidence_refs=["ref1"],
         content="The bug occurs because the state machine transitions incorrectly.",
+        root_cause="State machine transitions incorrectly due to missing guard",
+        causal_chain="Test fails because guard condition is missing in transition handler at line 42",
     )
     result = infer_principals(rec)
     assert "causal_grounding" in result, f"Expected causal_grounding, got {result}"
@@ -321,12 +327,14 @@ def test_inference_result_has_explanation():
 
 
 def test_causal_grounding_score_above_threshold():
-    """evidence_refs + causal keyword + from_steps => causal_grounding score >= 0.7."""
+    """evidence_refs + root_cause + causal_chain => causal_grounding score >= 0.7 (structural)."""
     rec = FakePhaseRecord(
         phase="ANALYZE",
         evidence_refs=["ref1", "ref2"],
         content="The failure occurs because the index is off by one.",
         from_steps=[1, 2],
+        root_cause="Off-by-one error in array indexing at utils.py:42",
+        causal_chain="Test fails because loop boundary uses < instead of <= causing last element to be skipped",
     )
     result = run_inference(rec, "analysis.root_cause")
     assert "causal_grounding" in result.details

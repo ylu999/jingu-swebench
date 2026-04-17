@@ -60,8 +60,8 @@ def test_execute_missing_minimal_change():
 
 
 def test_execute_with_minimal_change():
-    """EXECUTE phase with minimal_change declared -> no violation."""
-    record = _FakePhaseRecord(principals=["minimal_change"])
+    """EXECUTE phase with minimal_change + action_grounding declared -> no violation."""
+    record = _FakePhaseRecord(principals=["minimal_change", "action_grounding"])
     violation = check_principal_gate(record, "EXECUTE")
     assert violation is None, f"expected None, got {violation}"
 
@@ -81,15 +81,15 @@ def test_observe_no_enforcement_with_principals():
 
 
 def test_judge_missing_invariant_preservation():
-    """JUDGE phase without invariant_preservation -> violation."""
+    """JUDGE phase without result_verification -> violation."""
     record = _FakePhaseRecord(principals=["causal_grounding"])
     violation = check_principal_gate(record, "JUDGE")
-    assert violation == "missing_invariant_preservation"
+    assert violation == "missing_result_verification"
 
 
 def test_judge_with_invariant_preservation():
-    """JUDGE phase with invariant_preservation declared -> no violation."""
-    record = _FakePhaseRecord(principals=["invariant_preservation"])
+    """JUDGE phase with result_verification declared -> no violation."""
+    record = _FakePhaseRecord(principals=["result_verification"])
     violation = check_principal_gate(record, "JUDGE")
     assert violation is None
 
@@ -181,6 +181,8 @@ def test_observe_has_no_required_principals():
 
 def test_phase_redirect_via_routing_decision():
     """Routing now uses RoutingDecision (EF-5), PHASE_VIOLATION_REDIRECT deleted."""
+    from dataclasses import fields as dc_fields
     from routing_decision import RoutingDecision
-    # RoutingDecision type exists and is importable
-    assert hasattr(RoutingDecision, 'next_phase')
+    # RoutingDecision type exists and has next_phase field
+    field_names = {f.name for f in dc_fields(RoutingDecision)}
+    assert 'next_phase' in field_names

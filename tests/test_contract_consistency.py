@@ -241,11 +241,11 @@ class TestFieldNamingConsistency:
         # Bundle uses alternative_hypotheses
         assert "alternative_hypotheses" in schema_props
 
-        # Gate uses alternatives_considered
+        # Gate uses alternative_hypotheses (canonical field name)
         from cognition_contracts.analysis_root_cause import GATE_RULE_MAP
         alt_rule = GATE_RULE_MAP.get("alternative_hypothesis")
         assert alt_rule is not None
-        assert alt_rule.field == "alternatives_considered"
+        assert alt_rule.field == "alternative_hypotheses"
 
     def test_declaration_extractor_maps_alternatives(self):
         """declaration_extractor must map alternative_hypotheses → alternatives_considered."""
