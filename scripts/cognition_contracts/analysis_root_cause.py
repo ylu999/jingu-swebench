@@ -40,12 +40,12 @@ REPAIR_STRATEGY_TYPES: list[str] = [
 REQUIRED_PRINCIPALS: list[str] = [
     "causal_grounding",
     "evidence_linkage",
+    "alternative_hypothesis_check",
 ]
 
 EXPECTED_PRINCIPALS: list[str] = [
     "ontology_alignment",
     "phase_boundary_discipline",
-    "alternative_hypothesis_check",
     "uncertainty_honesty",
     "invariant_capture",
 ]

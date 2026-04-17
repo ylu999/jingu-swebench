@@ -182,8 +182,9 @@ def test_principal_gate_accepts_causal_grounding():
 
 
 def test_principal_gate_accepts_causal_grounding_and_evidence_linkage():
-    """check_principal_gate accepts ['causal_grounding', 'evidence_linkage'] for ANALYZE."""
-    record = _FakePR(principals=["causal_grounding", "evidence_linkage"])
+    """check_principal_gate accepts all 3 required principals for ANALYZE (P1.2)."""
+    # P1.2: alternative_hypothesis_check promoted to required
+    record = _FakePR(principals=["causal_grounding", "evidence_linkage", "alternative_hypothesis_check"])
     violation = check_principal_gate(record, "ANALYZE")
     assert violation is None, f"expected None, got {violation}"
 
@@ -293,7 +294,8 @@ def test_guidance_analyze_has_should():
     """ANALYZE guidance contains 'SHOULD' for expected principals."""
     guidance = build_phase_principal_guidance("ANALYZE")
     assert "SHOULD" in guidance, f"guidance should contain SHOULD: {guidance!r}"
-    assert "evidence_linkage" in guidance
+    # ontology_alignment is an expected principal for ANALYZE
+    assert "ontology_alignment" in guidance
 
 
 def test_guidance_execute_has_must():

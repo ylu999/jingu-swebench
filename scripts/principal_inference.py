@@ -224,8 +224,13 @@ def _structural_principal_check(rule_principal: str, phase_record) -> float:
     checks = {
         "causal_grounding": lambda: (
             len(getattr(pr, "evidence_refs", []) or []) >= 1
+            and any(
+                '/' in ref or '.' in ref.split(':')[0]
+                for ref in (getattr(pr, "evidence_refs", []) or [])
+                if isinstance(ref, str) and len(ref) > 3
+            )
             and len(getattr(pr, "root_cause", "") or "") >= 10
-            and len(getattr(pr, "causal_chain", "") or "") >= 20
+            and len(getattr(pr, "causal_chain", "") or "") >= 30
         ),
         "evidence_linkage": lambda: (
             len(getattr(pr, "evidence_refs", []) or []) >= 1

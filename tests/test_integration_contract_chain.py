@@ -34,7 +34,7 @@ def _make_well_formed_analyze_response() -> dict:
     return {
         "phase": "ANALYZE",
         "subtype": "analysis.root_cause",
-        "principals": ["causal_grounding", "evidence_linkage"],
+        "principals": ["causal_grounding", "evidence_linkage", "alternative_hypothesis_check"],
         "root_cause": (
             "The issue is in django/db/models/fields.py:245 where "
             "field validation is skipped during bulk_create"

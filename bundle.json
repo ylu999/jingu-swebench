@@ -266,7 +266,8 @@
         ],
         "required_principals": [
           "causal_grounding",
-          "evidence_linkage"
+          "evidence_linkage",
+          "alternative_hypothesis_check"
         ],
         "forbidden_principals": [
           "action_grounding",
@@ -383,7 +384,7 @@
           "principals"
         ]
       },
-      "prompt": "## Phase: ANALYZE\nGoal: Root-cause analysis: connect evidence to a causal hypothesis.\nSubtype: analysis.root_cause (root_cause)\n\n## Required Fields\n- root_cause\n- causal_chain\n- evidence_refs\n- alternative_hypotheses\n\n## Forbidden Moves\n- do not write code\n- do not skip evidence\n- do not jump to a fix without causal reasoning\n\n## Required Principals\nYou MUST declare: causal_grounding, evidence_linkage\n\n## Forbidden Principals\nDo NOT declare: action_grounding, minimal_change\n\n## Guidance\nIdentify the root cause with causal evidence. Do NOT write any fix yet.\n\nInvestigate the code, then call submit_phase_record with your findings.\n\nRules: Do NOT propose fixes here. Focus on understanding why the test fails.\n\nIf any required field is missing or empty, you will be returned to ANALYZE.\n\nYou MUST explicitly declare your repair strategy type. Choose exactly one:\n  REPAIR_STRATEGY_TYPE: REGEX_FIX | PARSER_REWRITE | DATAFLOW_FIX | STATE_COPY_FIX | INVARIANT_FIX | MISSING_SECONDARY_FIX | API_CONTRACT_FIX\nThis field is REQUIRED. If missing, your analysis will be REJECTED.",
+      "prompt": "## Phase: ANALYZE\nGoal: Root-cause analysis: connect evidence to a causal hypothesis.\nSubtype: analysis.root_cause (root_cause)\n\n## Required Fields\n- root_cause\n- causal_chain\n- evidence_refs\n- alternative_hypotheses\n\n## Forbidden Moves\n- do not write code\n- do not skip evidence\n- do not jump to a fix without causal reasoning\n\n## Required Principals\nYou MUST declare: causal_grounding, evidence_linkage, alternative_hypothesis_check\n\n## Forbidden Principals\nDo NOT declare: action_grounding, minimal_change\n\n## Guidance\nIdentify the root cause with causal evidence. Do NOT write any fix yet.\n\nInvestigate the code, then call submit_phase_record with your findings.\n\nRules: Do NOT propose fixes here. Focus on understanding why the test fails.\n\nIf any required field is missing or empty, you will be returned to ANALYZE.\n\nYou MUST explicitly declare your repair strategy type. Choose exactly one:\n  REPAIR_STRATEGY_TYPE: REGEX_FIX | PARSER_REWRITE | DATAFLOW_FIX | STATE_COPY_FIX | INVARIANT_FIX | MISSING_SECONDARY_FIX | API_CONTRACT_FIX\nThis field is REQUIRED. If missing, your analysis will be REJECTED.",
       "repair_templates": {
         "code_grounding": {
           "hint": "Point to exact code location (file:line or function name) causing the issue",
@@ -1262,7 +1263,8 @@
         "ontology_alignment",
         "phase_boundary_discipline",
         "causal_grounding",
-        "evidence_linkage"
+        "evidence_linkage",
+        "alternative_hypothesis_check"
       ],
       "decision.fix_direction": [
         "ontology_alignment",

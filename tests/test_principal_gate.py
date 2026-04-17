@@ -41,15 +41,19 @@ def test_analyze_missing_causal_grounding():
 
 
 def test_analyze_with_causal_grounding():
-    """ANALYZE phase requires both causal_grounding and evidence_linkage (v2.0 contract)."""
+    """ANALYZE phase requires causal_grounding, evidence_linkage, and alternative_hypothesis_check (P1.2)."""
     # causal_grounding alone is insufficient
     record = _FakePhaseRecord(principals=["causal_grounding", "evidence_based"])
     violation = check_principal_gate(record, "ANALYZE")
     assert violation is not None, "causal_grounding alone should fail (evidence_linkage also required)"
-    # both required principals satisfies the gate
+    # two of three required principals is still insufficient
     record2 = _FakePhaseRecord(principals=["causal_grounding", "evidence_linkage"])
     violation2 = check_principal_gate(record2, "ANALYZE")
-    assert violation2 is None, f"causal_grounding + evidence_linkage should pass, got {violation2}"
+    assert violation2 is not None, f"causal_grounding + evidence_linkage should fail (alternative_hypothesis_check also required), got {violation2}"
+    # all three required principals satisfies the gate
+    record3 = _FakePhaseRecord(principals=["causal_grounding", "evidence_linkage", "alternative_hypothesis_check"])
+    violation3 = check_principal_gate(record3, "ANALYZE")
+    assert violation3 is None, f"all 3 required principals should pass, got {violation3}"
 
 
 def test_execute_missing_minimal_change():
@@ -103,14 +107,14 @@ def test_unknown_phase_no_enforcement():
 
 def test_principals_case_insensitive():
     """Principal matching is case-insensitive."""
-    record = _FakePhaseRecord(principals=["Causal_Grounding", "Evidence_Linkage"])
+    record = _FakePhaseRecord(principals=["Causal_Grounding", "Evidence_Linkage", "Alternative_Hypothesis_Check"])
     violation = check_principal_gate(record, "ANALYZE")
     assert violation is None, f"case-insensitive match should work, got {violation}"
 
 
 def test_phase_case_insensitive():
     """Phase name matching is case-insensitive."""
-    record = _FakePhaseRecord(principals=["causal_grounding", "evidence_linkage"])
+    record = _FakePhaseRecord(principals=["causal_grounding", "evidence_linkage", "alternative_hypothesis_check"])
     violation = check_principal_gate(record, "analyze")  # lowercase
     assert violation is None
 

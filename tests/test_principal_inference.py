@@ -59,13 +59,13 @@ class FakePhaseRecord:
 # ── infer_principals tests ────────────────────────────────────────────────────
 
 def test_infer_causal_grounding():
-    """evidence_refs + root_cause + causal_chain => causal_grounding inferred (structural check)."""
+    """evidence_refs with code ref + root_cause + causal_chain => causal_grounding inferred (structural check)."""
     rec = FakePhaseRecord(
         phase="ANALYZE",
-        evidence_refs=["ref1"],
+        evidence_refs=["django/db/models.py:42"],
         content="The bug occurs because the state machine transitions incorrectly.",
         root_cause="State machine transitions incorrectly due to missing guard",
-        causal_chain="Test fails because guard condition is missing in transition handler at line 42",
+        causal_chain="Test fails because guard condition is missing in the transition handler at models.py:42 which skips validation",
     )
     result = infer_principals(rec)
     assert "causal_grounding" in result, f"Expected causal_grounding, got {result}"
@@ -192,13 +192,13 @@ def test_diff_missing_required():
 def test_diff_missing_expected():
     """ANALYZE phase: declared has all required but not expected => missing_expected only.
 
-    v2.0 contract: required=["causal_grounding", "evidence_linkage"].
-    Must declare both required to avoid missing_required.
-    expected principals (e.g. alternative_hypothesis_check) go in missing_expected.
+    P1.2 contract: required=["causal_grounding", "evidence_linkage", "alternative_hypothesis_check"].
+    Must declare all three required to avoid missing_required.
+    expected principals (e.g. ontology_alignment) go in missing_expected.
     """
     result = diff_principals(
-        declared=["causal_grounding", "evidence_linkage"],
-        inferred=["causal_grounding", "evidence_linkage"],
+        declared=["causal_grounding", "evidence_linkage", "alternative_hypothesis_check"],
+        inferred=["causal_grounding", "evidence_linkage", "alternative_hypothesis_check"],
         phase="ANALYZE",
     )
     assert result["missing_required"] == [], (
@@ -207,9 +207,9 @@ def test_diff_missing_expected():
     assert result["fake"] == [], (
         f"Expected no fake when declared matches inferred, got {result}"
     )
-    # alternative_hypothesis_check is expected but not declared => missing_expected
+    # ontology_alignment is expected but not declared => missing_expected
     assert len(result["missing_expected"]) > 0, (
-        f"Expected some missing_expected (e.g. alternative_hypothesis_check) for ANALYZE, got {result}"
+        f"Expected some missing_expected (e.g. ontology_alignment) for ANALYZE, got {result}"
     )
 
 
@@ -327,10 +327,10 @@ def test_inference_result_has_explanation():
 
 
 def test_causal_grounding_score_above_threshold():
-    """evidence_refs + root_cause + causal_chain => causal_grounding score >= 0.7 (structural)."""
+    """evidence_refs with code refs + root_cause + causal_chain => causal_grounding score >= 0.7 (structural)."""
     rec = FakePhaseRecord(
         phase="ANALYZE",
-        evidence_refs=["ref1", "ref2"],
+        evidence_refs=["utils.py:42", "tests/test_utils.py:10"],
         content="The failure occurs because the index is off by one.",
         from_steps=[1, 2],
         root_cause="Off-by-one error in array indexing at utils.py:42",

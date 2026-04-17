@@ -117,7 +117,8 @@ def test_bugB_foreign_phase_declared_does_not_loop():
     # ANALYZE with empty principals — foreign context (agent declared OBSERVE)
     pr_foreign = _FakePR(phase="ANALYZE", principals=[], evidence_refs=["file.py:10"])
     # ANALYZE with correct principals + root_cause — normal case (p23: root_cause now required)
-    pr_normal = _FakePR(phase="ANALYZE", principals=["causal_grounding", "evidence_linkage"],
+    # P1.2: alternative_hypothesis_check promoted to required for ANALYZE
+    pr_normal = _FakePR(phase="ANALYZE", principals=["causal_grounding", "evidence_linkage", "alternative_hypothesis_check"],
                         evidence_refs=["file.py:10"],
                         root_cause="The validator does not handle timezone-aware datetimes.")
 
@@ -410,12 +411,13 @@ def test_decide_always_admitted_no_required_principals():
 
 
 def test_analyze_with_required_principals_is_admitted():
-    """ANALYZE with causal_grounding + evidence_linkage → ADMITTED."""
+    """ANALYZE with causal_grounding + evidence_linkage + alternative_hypothesis_check → ADMITTED."""
     from principal_gate import evaluate_admission
 
+    # P1.2: alternative_hypothesis_check promoted to required for ANALYZE
     pr = _FakePR(
         phase="ANALYZE",
-        principals=["causal_grounding", "evidence_linkage"],
+        principals=["causal_grounding", "evidence_linkage", "alternative_hypothesis_check"],
         evidence_refs=["file.py:10"],
         root_cause="The validator does not handle timezone-aware datetimes correctly.",
     )

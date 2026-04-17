@@ -66,14 +66,17 @@ class SubtypeContract(TypedDict, total=False):
 #   causal_grounding      — applies_to: ["analysis.root_cause"]
 #   evidence_linkage      — applies_to: None (all subtypes)
 #   minimal_change        — applies_to: ["execution.code_patch"]
-#   alternative_hypothesis_check — applies_to: ["analysis.root_cause"]
+#   alternative_hypothesis_check — applies_to: ["analysis.root_cause"] (P1.2: promoted to required)
 #   invariant_preservation       — applies_to: ["judge.verification"]
+#   uncertainty_honesty          — applies_to: ["analysis.root_cause"]
+#   ontology_alignment           — applies_to: None (all subtypes)
+#   phase_boundary_discipline    — applies_to: None (all subtypes)
 #
 # Principals WITHOUT inference rules (required_enforced, stage 2 — expected only):
-#   ontology_alignment, phase_boundary_discipline, evidence_completeness,
-#   action_grounding, option_comparison, constraint_satisfaction,
-#   scope_minimality, result_verification, uncertainty_honesty, residual_risk_detection,
-#   invariant_capture, design_comparison, constraint_encoding_justification
+#   evidence_completeness, action_grounding, option_comparison,
+#   constraint_satisfaction, scope_minimality, result_verification,
+#   residual_risk_detection, invariant_capture, design_comparison,
+#   constraint_encoding_justification
 #
 # This table is the enforcement boundary. Update it when inference rules are added.
 # ─────────────────────────────────────────────────────────────────────────────
