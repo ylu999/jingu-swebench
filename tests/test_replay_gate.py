@@ -266,3 +266,16 @@ class TestFieldOnboarding:
         assert missing_gate == [], (
             f"Required schema fields without gate check: {missing_gate}"
         )
+
+
+# ── Stage 8: Onboarding audit (L0 static verification) ─────────────────────
+
+class TestOnboardingAudit:
+    """Build-time onboarding completeness: declared fields must be fully wired."""
+
+    def test_onboarding_audit_passes(self):
+        from onboarding_audit import run_audit
+        errors = run_audit()
+        if errors:
+            msgs = [f"{e.code}: {e.field_name} ({e.phase}) — {e.message}" for e in errors]
+            assert False, "Onboarding audit failed:\n" + "\n".join(msgs)
