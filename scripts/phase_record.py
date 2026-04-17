@@ -41,6 +41,7 @@ class PhaseRecord:
     observations: list[str] = field(default_factory=list)
     # ANALYZE
     alternative_hypotheses: list[dict] = field(default_factory=list)  # [{hypothesis, ruled_out_reason}]
+    repair_strategy_type: str = ""  # ANALYZE: enum from REPAIR_STRATEGY_TYPES
     # DECIDE
     options: list[dict] = field(default_factory=list)  # [{name, pros: str[], cons: str[]}]
     chosen: str = ""
@@ -89,6 +90,8 @@ class PhaseRecord:
         # ANALYZE
         if self.alternative_hypotheses:
             d["alternative_hypotheses"] = self.alternative_hypotheses
+        if self.repair_strategy_type:
+            d["repair_strategy_type"] = self.repair_strategy_type
         # DECIDE
         if self.options:
             d["options"] = self.options

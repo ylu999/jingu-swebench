@@ -274,6 +274,8 @@ def build_phase_record_from_structured(
     # ANALYZE
     raw_alt_hyp = parsed.get("alternative_hypotheses", [])
     alternative_hypotheses = raw_alt_hyp if isinstance(raw_alt_hyp, list) else []
+    raw_repair_strategy = parsed.get("repair_strategy_type", "")
+    repair_strategy_type = raw_repair_strategy.strip() if isinstance(raw_repair_strategy, str) else ""
 
     # DECIDE
     raw_options = parsed.get("options", [])
@@ -326,6 +328,7 @@ def build_phase_record_from_structured(
         # C-06: all named fields
         observations=observations,
         alternative_hypotheses=alternative_hypotheses,
+        repair_strategy_type=repair_strategy_type,
         options=options,
         chosen=chosen,
         rationale=rationale,
