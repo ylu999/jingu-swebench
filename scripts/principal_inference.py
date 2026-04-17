@@ -523,58 +523,96 @@ def _infer_phase_boundary_discipline(phase_record) -> tuple[float, list[str], st
 
 
 def _infer_action_grounding(phase_record) -> tuple[float, list[str], str]:
-    """action_grounding: PLAN field references ROOT_CAUSE from ANALYZE phase.
+    """action_grounding: EXECUTE patch_description is grounded in prior analysis.
 
-    Checks that execution plan is grounded in the root cause analysis,
-    not invented from scratch. Applies to execution.code_patch only.
+    Checks EXECUTE's actual schema fields (patch_description, files_modified)
+    against evidence of grounding: causal language, file specificity, and
+    cross-reference to prior ANALYZE root_cause if available.
+
+    Applies to execution.code_patch only.
     """
-    structured = _extract_structured_from_content(phase_record)
-    plan_text = structured.get("plan", "")
-    root_cause_text = structured.get("root_cause", "")
+    # Use EXECUTE's actual schema fields, not ANALYZE fields
+    patch_desc = getattr(phase_record, "patch_description", "") or ""
+    files_modified = getattr(phase_record, "files_modified", []) or []
+    evidence_refs = getattr(phase_record, "evidence_refs", []) or []
     content = getattr(phase_record, "content", "") or ""
+
+    # Fallback: try structured extraction from content if named attrs empty
+    if not patch_desc:
+        structured = _extract_structured_from_content(phase_record)
+        patch_desc = structured.get("patch_description", "") or structured.get("plan", "")
+
     score = 0.0
     signals: list[str] = []
 
-    # Check 1: PLAN field exists and is non-empty
-    if plan_text:
-        score += 0.4
-        signals.append("has_plan_field")
+    # Check 1: patch_description exists and has substance (>= 20 chars)
+    if patch_desc and len(patch_desc) >= 20:
+        score += 0.3
+        signals.append("has_patch_description")
+    elif patch_desc:
+        score += 0.1
+        signals.append("patch_description_short")
     else:
-        signals.append("no_plan_field")
+        signals.append("no_patch_description")
 
-    # Check 2: PLAN references root cause (either via root_cause field or causal language)
-    if plan_text and root_cause_text:
-        # Direct reference: plan contains words from root cause
-        rc_words = set(w.lower() for w in root_cause_text.split() if len(w) > 4)
-        plan_words = set(w.lower() for w in plan_text.split())
-        overlap = rc_words & plan_words
-        if len(overlap) >= 2:
-            score += 0.4
-            signals.append(f"plan_references_root_cause_{len(overlap)}_words")
-        elif overlap:
-            score += 0.2
-            signals.append("plan_weak_root_cause_reference")
-        else:
-            signals.append("plan_no_root_cause_reference")
-    elif plan_text:
-        # No root_cause field but plan exists — check for causal language in plan
-        if _CAUSAL_KEYWORDS.search(plan_text):
-            score += 0.3
-            signals.append("plan_has_causal_language")
-        else:
-            signals.append("plan_no_causal_language")
-
-    # Bonus: evidence_refs present (plan grounded in specific files)
-    evidence_refs = getattr(phase_record, "evidence_refs", []) or []
-    if evidence_refs:
+    # Check 2: patch_description contains causal language (why the fix works)
+    if patch_desc and _CAUSAL_KEYWORDS.search(patch_desc):
         score += 0.2
-        score = min(score, 1.0)
-        signals.append("has_evidence_refs")
+        signals.append("patch_desc_has_causal_language")
+
+    # Check 3: files_modified is non-empty (patch touches specific files)
+    if files_modified:
+        score += 0.2
+        signals.append(f"files_modified_{len(files_modified)}")
+    else:
+        signals.append("no_files_modified")
+
+    # Check 4: evidence_refs present (grounded in specific code locations)
+    if evidence_refs:
+        code_refs = [
+            r for r in evidence_refs
+            if isinstance(r, str) and len(r) > 3
+            and ("/" in r or "." in r.split(":")[0])
+        ]
+        if code_refs:
+            score += 0.2
+            signals.append(f"has_code_refs_{len(code_refs)}")
+        else:
+            score += 0.1
+            signals.append("has_evidence_refs_no_code")
+    else:
+        signals.append("no_evidence_refs")
+
+    # Check 5 (cross-phase): if prior ANALYZE root_cause is accessible,
+    # check that patch_description references it
+    root_cause_text = getattr(phase_record, "root_cause", "") or ""
+    if not root_cause_text:
+        structured = _extract_structured_from_content(phase_record)
+        root_cause_text = structured.get("root_cause", "")
+    if patch_desc and root_cause_text:
+        rc_words = set(w.lower() for w in root_cause_text.split() if len(w) > 4)
+        pd_words = set(w.lower() for w in patch_desc.split())
+        overlap = rc_words & pd_words
+        if len(overlap) >= 2:
+            score += 0.2
+            signals.append(f"patch_references_root_cause_{len(overlap)}_words")
+        elif overlap:
+            score += 0.1
+            signals.append("patch_weak_root_cause_reference")
+
+    score = min(score, 1.0)
 
     if score >= 0.7:
-        explanation = "Execution plan grounded in root cause analysis"
+        explanation = "Execution patch grounded: has description, file specificity, and causal reasoning"
     else:
-        explanation = "Execution plan not grounded — PLAN missing or no root cause reference"
+        missing = []
+        if "no_patch_description" in signals or "patch_description_short" in signals:
+            missing.append("substantial patch_description (>= 20 chars)")
+        if "no_files_modified" in signals:
+            missing.append("files_modified list")
+        if "no_evidence_refs" in signals:
+            missing.append("evidence_refs with code locations")
+        explanation = f"Execution patch not grounded — missing: {', '.join(missing) if missing else 'causal language or root cause reference'}"
 
     return score, signals, explanation
 

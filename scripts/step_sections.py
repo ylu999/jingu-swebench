@@ -1393,11 +1393,32 @@ def evaluate_transition(
                 _inf_repair = ""
                 _inf_guidance = ""
             _inf_repair_suffix = f" Repair phase: {_inf_repair}." if _inf_repair else ""
+
+            # P1.4.b: Build actionable repair hint from inference signals
+            _fake_detail_hints = []
+            try:
+                _fake_names_for_hint = [
+                    p.strip() for p in _inf_violation.split(":", 1)[1].split(",")
+                    if p.strip()
+                ]
+                for _fp_name in _fake_names_for_hint:
+                    _fp_detail = _inf_result.details.get(_fp_name) if _inf_result else None
+                    if _fp_detail and _fp_detail.explanation:
+                        _fake_detail_hints.append(
+                            f"  - {_fp_name}: {_fp_detail.explanation}"
+                        )
+            except Exception:
+                pass
+            _detail_block = ""
+            if _fake_detail_hints:
+                _detail_block = " Specific issues:\n" + "\n".join(_fake_detail_hints)
+
             state.pending_redirect_hint = (
                 f"[RETRYABLE:{_inf_violation}] "
                 f"Your declared principals are not supported by your reasoning. "
                 f"Provide concrete evidence (file references, causal reasoning) "
                 f"before declaring these principals.{_inf_repair_suffix} {_inf_guidance}"
+                f"{_detail_block}"
             )
             print(
                 f"    [principal_inference] FAKE_RETRYABLE: phase={eval_phase}"

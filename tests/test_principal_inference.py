@@ -45,6 +45,8 @@ class FakePhaseRecord:
         principals=None,
         root_cause="",
         causal_chain="",
+        patch_description="",
+        files_modified=None,
     ):
         self.phase = phase
         self.evidence_refs = evidence_refs or []
@@ -54,6 +56,8 @@ class FakePhaseRecord:
         self.principals = principals or []
         self.root_cause = root_cause
         self.causal_chain = causal_chain
+        self.patch_description = patch_description
+        self.files_modified = files_modified or []
 
 
 # ── infer_principals tests ────────────────────────────────────────────────────
@@ -406,4 +410,105 @@ def test_new_rule_without_engine_change():
     )
     assert new_principal in result.details, (
         f"Expected {new_principal} in details, got {list(result.details.keys())}"
+    )
+
+
+# ── P1.4: action_grounding inference tests (EXECUTE schema fields) ───────────
+
+
+def test_action_grounding_with_patch_description_and_files():
+    """EXECUTE with patch_description + files_modified + evidence_refs => action_grounding inferred."""
+    rec = FakePhaseRecord(
+        phase="EXECUTE",
+        patch_description="Fix the off-by-one error in utils.py by changing < to <= in the loop boundary because the last element was being skipped",
+        files_modified=["django/utils/helpers.py"],
+        evidence_refs=["django/utils/helpers.py:42"],
+        principals=["minimal_change", "action_grounding"],
+    )
+    result = run_inference(rec, "execution.code_patch")
+    assert "action_grounding" in result.present, (
+        f"Expected action_grounding with full EXECUTE fields, got {result.present}"
+    )
+    detail = result.details.get("action_grounding")
+    assert detail is not None
+    assert detail.score >= 0.7, f"Expected score >= 0.7, got {detail.score}"
+
+
+def test_action_grounding_no_patch_description():
+    """EXECUTE without patch_description => action_grounding NOT inferred."""
+    rec = FakePhaseRecord(
+        phase="EXECUTE",
+        patch_description="",
+        files_modified=[],
+        evidence_refs=[],
+        principals=["minimal_change", "action_grounding"],
+    )
+    result = run_inference(rec, "execution.code_patch")
+    assert "action_grounding" not in result.present, (
+        f"action_grounding should not be inferred without patch_description, got {result.present}"
+    )
+
+
+def test_action_grounding_short_patch_description():
+    """EXECUTE with very short patch_description (< 20 chars) => low score."""
+    rec = FakePhaseRecord(
+        phase="EXECUTE",
+        patch_description="fix bug",
+        files_modified=["file.py"],
+        principals=["minimal_change", "action_grounding"],
+    )
+    result = run_inference(rec, "execution.code_patch")
+    detail = result.details.get("action_grounding")
+    assert detail is not None
+    assert detail.score < 0.7, (
+        f"Short patch_description should not reach threshold, got {detail.score}"
+    )
+
+
+def test_action_grounding_with_causal_language():
+    """EXECUTE patch_description with causal language boosts score."""
+    rec = FakePhaseRecord(
+        phase="EXECUTE",
+        patch_description="This patch fixes the issue because the validator was incorrectly skipping None values in the input",
+        files_modified=["django/core/validators.py"],
+        principals=["minimal_change", "action_grounding"],
+    )
+    result = run_inference(rec, "execution.code_patch")
+    detail = result.details.get("action_grounding")
+    assert detail is not None
+    assert "patch_desc_has_causal_language" in detail.signals, (
+        f"Expected causal language signal, got {detail.signals}"
+    )
+
+
+def test_action_grounding_explanation_lists_missing():
+    """When action_grounding fails, explanation lists what's missing."""
+    rec = FakePhaseRecord(
+        phase="EXECUTE",
+        patch_description="",
+        files_modified=[],
+        evidence_refs=[],
+    )
+    result = run_inference(rec, "execution.code_patch")
+    detail = result.details.get("action_grounding")
+    assert detail is not None
+    assert "patch_description" in detail.explanation, (
+        f"Explanation should mention patch_description, got {detail.explanation}"
+    )
+
+
+def test_action_grounding_cross_phase_root_cause():
+    """patch_description referencing root_cause words boosts score."""
+    rec = FakePhaseRecord(
+        phase="EXECUTE",
+        patch_description="Change the boundary condition in the loop to use <= instead of < to include the last element",
+        files_modified=["utils.py"],
+        evidence_refs=["utils.py:42"],
+        root_cause="Off-by-one error: loop boundary uses < instead of <= causing last element to be skipped",
+    )
+    result = run_inference(rec, "execution.code_patch")
+    detail = result.details.get("action_grounding")
+    assert detail is not None
+    assert any("root_cause" in s for s in detail.signals), (
+        f"Expected root_cause reference signal, got {detail.signals}"
     )

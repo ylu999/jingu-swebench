@@ -329,7 +329,7 @@
               ]
             },
             "minItems": 1,
-            "description": "At least 1 alternative hypothesis with rejection reasoning — prevents premature trajectory collapse"
+            "description": "At least 1 alternative hypothesis with rejection reasoning \u2014 prevents premature trajectory collapse"
           },
           "invariant_capture": {
             "type": "object",
@@ -904,6 +904,11 @@
         "scope_bounded": {
           "hint": "List the files your patch modifies in files_modified",
           "field": "files_modified",
+          "threshold": 0.5
+        },
+        "check_fake_principals": {
+          "hint": "Your EXECUTE submission must demonstrate action_grounding: (1) patch_description must explain WHAT the patch does and WHY it fixes the root cause (>= 20 chars with causal reasoning), (2) files_modified must list the actual files changed, (3) evidence_refs should reference specific code locations. Also ensure principals field contains principal NAMES (e.g. minimal_change, action_grounding) not descriptions.",
+          "field": "patch_description",
           "threshold": 0.5
         }
       },

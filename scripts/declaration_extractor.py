@@ -264,7 +264,23 @@ def build_phase_record_from_structured(
         if subtype == "unknown":
             print(f"[declaration_extractor] WARNING: unknown subtype for phase={phase_upper}")
 
-    principals = [p.strip().lower() for p in (parsed.get("principals") or []) if p.strip()]
+    raw_principals = [p.strip().lower() for p in (parsed.get("principals") or []) if p.strip()]
+    # P1.4.c: filter out non-principal entries (descriptions, sentences)
+    # Valid principals are short identifiers with underscores, not free-text descriptions
+    principals = []
+    _invalid_principals = []
+    for _rp in raw_principals:
+        # Principal names are short (< 40 chars), contain underscores, no spaces typically
+        if len(_rp) > 50 or " " in _rp and "_" not in _rp:
+            _invalid_principals.append(_rp)
+        else:
+            principals.append(_rp)
+    if _invalid_principals:
+        print(
+            f"[declaration_extractor] WARNING: invalid principal entries filtered out"
+            f" (descriptions instead of principal names): {[s[:60] for s in _invalid_principals]}",
+            flush=True,
+        )
 
     # Bundle schema: evidence_refs is [string], ANALYZE uses 'evidence' as [string]
     evidence_refs: list[str] = []
