@@ -171,7 +171,11 @@ PROMPT_GUIDANCE = (
     "Identify the root cause with causal evidence. Do NOT write any fix yet.\n\n"
     "Investigate the code, then call submit_phase_record with your findings.\n\n"
     "Rules: Do NOT propose fixes here. Focus on understanding why the test fails.\n\n"
-    "If any required field is missing or empty, you will be returned to ANALYZE.\n"
+    "If any required field is missing or empty, you will be returned to ANALYZE.\n\n"
+    "You MUST explicitly declare your repair strategy type. Choose exactly one:\n"
+    "  REPAIR_STRATEGY_TYPE: REGEX_FIX | PARSER_REWRITE | DATAFLOW_FIX | "
+    "STATE_COPY_FIX | INVARIANT_FIX | MISSING_SECONDARY_FIX | API_CONTRACT_FIX\n"
+    "This field is REQUIRED. If missing, your analysis will be REJECTED.\n"
 )
 # NOTE: Field descriptions are NO LONGER listed here. They are rendered at
 # runtime from the bundle schema by schema_field_guidance.render_schema_field_guidance().

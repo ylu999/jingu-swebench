@@ -320,10 +320,23 @@ def evaluate_analysis(pr: PhaseRecord, *, structured_output: bool = False, compi
                 "must the fix preserve? List identified_invariants and risk_if_violated."
             )
 
+    # Rule 5: repair_strategy_type (hard gate — control-grade field)
+    _valid_strategies = set(_arc.REPAIR_STRATEGY_TYPES)
+    _strategy = getattr(pr, "repair_strategy_type", "") or ""
+    score5 = 1.0 if _strategy in _valid_strategies else 0.0
+    scores["repair_strategy_type"] = score5
+    if score5 < _THRESHOLD:
+        failed.append("repair_strategy_type")
+        reasons.append(
+            "REPAIR_STRATEGY_TYPE is missing or invalid. You MUST declare exactly one of: "
+            + ", ".join(_arc.REPAIR_STRATEGY_TYPES)
+        )
+
     extracted = {
         "root_cause": pr.root_cause[:100] if pr.root_cause else "",
         "causal_chain": pr.causal_chain[:100] if pr.causal_chain else "",
         "invariant_capture": pr.invariant_capture if pr.invariant_capture else {},
+        "repair_strategy_type": _strategy,
     }
 
     # p217: Build structured GateRejection on failure (when SDG enabled)

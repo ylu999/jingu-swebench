@@ -200,6 +200,38 @@ def _get_valid_subtypes() -> set[str]:
         return set()  # SST2: fallback returns empty, not a stale copy
 
 
+def _classify_repair_strategy(parsed: dict) -> str:
+    """Deterministic classifier for repair_strategy_type from ANALYZE fields.
+
+    Fallback for when structured_extract doesn't produce repair_strategy_type.
+    Uses root_cause + causal_chain text to classify into REPAIR_STRATEGY_TYPES enum.
+    Returns empty string if no confident match (gate will reject).
+    """
+    text = " ".join([
+        (parsed.get("root_cause") or ""),
+        (parsed.get("causal_chain") or ""),
+    ]).lower()
+    if not text.strip():
+        return ""
+
+    # Order matters: more specific patterns first
+    if any(w in text for w in ("regex", "pattern", "re.compile", "re.match", "re.search", "regular expression")):
+        return "REGEX_FIX"
+    if any(w in text for w in ("pars", "tokeniz", "split(", "ast.", "grammar", "syntax tree")):
+        return "PARSER_REWRITE"
+    if any(w in text for w in ("copy()", "deepcopy", "shallow copy", "clone", "copied", "shared reference", "aliased")):
+        return "STATE_COPY_FIX"
+    if any(w in text for w in ("return value", "return type", "signature", "api contract", "callable", "argument")):
+        return "API_CONTRACT_FIX"
+    if any(w in text for w in ("propagat", "dataflow", "passed through", "not forwarded", "lost in", "overwritten")):
+        return "DATAFLOW_FIX"
+    if any(w in text for w in ("invariant", "boundary", "constraint", "must not", "must remain", "assertion")):
+        return "INVARIANT_FIX"
+    if any(w in text for w in ("secondary", "additional change", "also need", "incomplete fix", "two changes")):
+        return "MISSING_SECONDARY_FIX"
+    return ""
+
+
 def build_phase_record_from_structured(
     parsed: dict,
     phase: str,
@@ -276,6 +308,9 @@ def build_phase_record_from_structured(
     alternative_hypotheses = raw_alt_hyp if isinstance(raw_alt_hyp, list) else []
     raw_repair_strategy = parsed.get("repair_strategy_type", "")
     repair_strategy_type = raw_repair_strategy.strip() if isinstance(raw_repair_strategy, str) else ""
+    # P0.3: deterministic fallback classifier for control-grade field
+    if not repair_strategy_type:
+        repair_strategy_type = _classify_repair_strategy(parsed)
 
     # DECIDE
     raw_options = parsed.get("options", [])

@@ -2711,7 +2711,11 @@ class JinguAgent:
                         _patch_preview += "\n... [truncated]"
 
                     # Use agent-declared repair_strategy_type from ANALYZE structured output
-                    _prev_strategy = _prev_strategy_type or "unknown"
+                    # P0.4: if strategy missing, log it explicitly (no silent fallback)
+                    _prev_strategy = _prev_strategy_type
+                    if not _prev_strategy:
+                        print(f"    [exp-k] WARNING: repair_strategy_type missing from ANALYZE record — ban disabled", flush=True)
+                        _prev_strategy = ""
 
                     # Build the cause section with strategy ban
                     _cause_section = ""
@@ -2741,7 +2745,7 @@ class JinguAgent:
                         "  5. INVARIANT_FIX — enforcing constraints, boundary checks, or trim logic\n"
                         "  6. MISSING_SECONDARY_FIX — the primary fix is incomplete, a second change is needed\n"
                         "  7. API_CONTRACT_FIX — fixing how a function's return value or signature is used\n\n"
-                        f"BANNED strategy: {_prev_strategy} (already tried and FAILED)\n\n"
+                        f"{'BANNED strategy: ' + _prev_strategy + ' (already tried and FAILED)' if _prev_strategy else 'Previous strategy type unknown — choose ANY different approach'}\n\n"
                         "You MUST now:\n"
                         "1. DISCARD your previous root cause hypothesis entirely\n"
                         "2. Re-read the FAILING TEST to understand what it ACTUALLY checks\n"

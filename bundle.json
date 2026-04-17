@@ -1,7 +1,7 @@
 {
   "version": "1.0.0",
   "compiler_version": "0.1.0",
-  "generated_at": "2026-04-17T03:02:09.625361+00:00",
+  "generated_at": "2026-04-17T03:22:56.131268+00:00",
   "generator_commit": "1ffc8dc",
   "capabilities": [
     "prompt_only",
@@ -22,7 +22,7 @@
     "observation.fact_gathering": {
       "phase": "OBSERVE",
       "subtype": "observation.fact_gathering",
-      "compiled_at": "2026-04-17T03:02:09.622742+00:00",
+      "compiled_at": "2026-04-17T03:22:56.129132+00:00",
       "phase_spec": {
         "name": "OBSERVE",
         "goal": "Gather evidence from the environment: read files, traces, logs, tests.",
@@ -170,7 +170,7 @@
     "analysis.root_cause": {
       "phase": "ANALYZE",
       "subtype": "analysis.root_cause",
-      "compiled_at": "2026-04-17T03:02:09.623748+00:00",
+      "compiled_at": "2026-04-17T03:22:56.129928+00:00",
       "phase_spec": {
         "name": "ANALYZE",
         "goal": "Root-cause analysis: connect evidence to a causal hypothesis.",
@@ -383,7 +383,7 @@
           "principals"
         ]
       },
-      "prompt": "## Phase: ANALYZE\nGoal: Root-cause analysis: connect evidence to a causal hypothesis.\nSubtype: analysis.root_cause (root_cause)\n\n## Required Fields\n- root_cause\n- causal_chain\n- evidence_refs\n- alternative_hypotheses\n\n## Forbidden Moves\n- do not write code\n- do not skip evidence\n- do not jump to a fix without causal reasoning\n\n## Required Principals\nYou MUST declare: causal_grounding, evidence_linkage\n\n## Forbidden Principals\nDo NOT declare: action_grounding, minimal_change\n\n## Guidance\nIdentify the root cause with causal evidence. Do NOT write any fix yet.\n\nInvestigate the code, then call submit_phase_record with your findings.\n\nRules: Do NOT propose fixes here. Focus on understanding why the test fails.\n\nIf any required field is missing or empty, you will be returned to ANALYZE.",
+      "prompt": "## Phase: ANALYZE\nGoal: Root-cause analysis: connect evidence to a causal hypothesis.\nSubtype: analysis.root_cause (root_cause)\n\n## Required Fields\n- root_cause\n- causal_chain\n- evidence_refs\n- alternative_hypotheses\n\n## Forbidden Moves\n- do not write code\n- do not skip evidence\n- do not jump to a fix without causal reasoning\n\n## Required Principals\nYou MUST declare: causal_grounding, evidence_linkage\n\n## Forbidden Principals\nDo NOT declare: action_grounding, minimal_change\n\n## Guidance\nIdentify the root cause with causal evidence. Do NOT write any fix yet.\n\nInvestigate the code, then call submit_phase_record with your findings.\n\nRules: Do NOT propose fixes here. Focus on understanding why the test fails.\n\nIf any required field is missing or empty, you will be returned to ANALYZE.\n\nYou MUST explicitly declare your repair strategy type. Choose exactly one:\n  REPAIR_STRATEGY_TYPE: REGEX_FIX | PARSER_REWRITE | DATAFLOW_FIX | STATE_COPY_FIX | INVARIANT_FIX | MISSING_SECONDARY_FIX | API_CONTRACT_FIX\nThis field is REQUIRED. If missing, your analysis will be REJECTED.",
       "repair_templates": {
         "code_grounding": {
           "hint": "Point to exact code location (file:line or function name) causing the issue",
@@ -446,7 +446,7 @@
     "decision.fix_direction": {
       "phase": "DECIDE",
       "subtype": "decision.fix_direction",
-      "compiled_at": "2026-04-17T03:02:09.624140+00:00",
+      "compiled_at": "2026-04-17T03:22:56.130257+00:00",
       "phase_spec": {
         "name": "DECIDE",
         "goal": "Choose the fix direction based on analysis.",
@@ -615,7 +615,7 @@
     "design.solution_shape": {
       "phase": "DESIGN",
       "subtype": "design.solution_shape",
-      "compiled_at": "2026-04-17T03:02:09.624607+00:00",
+      "compiled_at": "2026-04-17T03:22:56.130602+00:00",
       "phase_spec": {
         "name": "DESIGN",
         "goal": "Design the solution shape before writing code.",
@@ -789,7 +789,7 @@
     "execution.code_patch": {
       "phase": "EXECUTE",
       "subtype": "execution.code_patch",
-      "compiled_at": "2026-04-17T03:02:09.624976+00:00",
+      "compiled_at": "2026-04-17T03:22:56.130927+00:00",
       "phase_spec": {
         "name": "EXECUTE",
         "goal": "Write the minimal code patch that fixes the issue.",
@@ -926,7 +926,7 @@
     "judge.verification": {
       "phase": "JUDGE",
       "subtype": "judge.verification",
-      "compiled_at": "2026-04-17T03:02:09.625351+00:00",
+      "compiled_at": "2026-04-17T03:22:56.131260+00:00",
       "phase_spec": {
         "name": "JUDGE",
         "goal": "Verify the fix: run tests, check correctness, assess completeness.",
