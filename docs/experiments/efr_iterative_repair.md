@@ -133,3 +133,21 @@ The 3 simplest routes are already wired:
 - **Phase routing:** incomplete_fix → DESIGN (in failure_routing) → ANALYZE (protocol-route override)
 - **Ack validation:** Agent entered prescribed ANALYZE phase as first phase ✅
 - **Eval:** 0/1 resolved (10097 historically hard — not an EFR issue)
+
+### 3-Instance Smoke (efr-3inst-smoke): 10097, 10973, 11087
+- **Commit:** 62e3ad0
+- **Batch task:** 4b7140ac78794c68a6e1595e2d943ee3
+- **Eval:** 1/3 resolved (33.3%) — 10973 resolved on attempt 1
+- **EFR Signal Summary:**
+
+| Instance | A1 Failure | Route | A2 cp-reset | efr-ack entered | Resolved |
+|----------|-----------|-------|-------------|-----------------|----------|
+| 10973 | (resolved) | — | — | — | ✅ |
+| 10097 | incomplete_fix (436/438) | DESIGN | ANALYZE | True | ❌ |
+| 11087 | wrong_direction (0/1) | ANALYZE | ANALYZE | True | ❌ |
+
+- **Two distinct failure types observed:** incomplete_fix + wrong_direction
+- **Cross-phase routing:** 2/2 (100%)
+- **efr-ack entered prescribed phase:** 2/2 (100%)
+- **H1-H4 all validated at 3-instance scale**
+- **No new code needed** — existing infrastructure works correctly with telemetry
