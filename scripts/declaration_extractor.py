@@ -328,6 +328,18 @@ def build_phase_record_from_structured(
     if not repair_strategy_type:
         repair_strategy_type = _classify_repair_strategy(parsed)
 
+    # P2: root_cause_location_files — explicit from agent, or fallback from root_cause text
+    raw_rcf = parsed.get("root_cause_location_files", [])
+    root_cause_location_files = raw_rcf if isinstance(raw_rcf, list) else []
+    root_cause_location_files = [f for f in root_cause_location_files if isinstance(f, str) and f.strip()]
+    # Deterministic fallback: extract file paths from root_cause if agent didn't declare
+    if not root_cause_location_files and phase_upper == "ANALYZE":
+        _rc_text = parsed.get("root_cause", "")
+        if _rc_text:
+            import re
+            _file_patterns = re.findall(r'(?:/testbed/)?([a-zA-Z_][\w/]*\.(?:py|js|ts|go|rs|java|c|cpp|h|rb))\b', _rc_text)
+            root_cause_location_files = list(dict.fromkeys(_file_patterns))[:5]  # dedupe, max 5
+
     # DECIDE
     raw_options = parsed.get("options", [])
     options = raw_options if isinstance(raw_options, list) else []
@@ -380,6 +392,7 @@ def build_phase_record_from_structured(
         observations=observations,
         alternative_hypotheses=alternative_hypotheses,
         repair_strategy_type=repair_strategy_type,
+        root_cause_location_files=root_cause_location_files,
         options=options,
         chosen=chosen,
         rationale=rationale,

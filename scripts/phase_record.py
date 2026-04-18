@@ -42,6 +42,7 @@ class PhaseRecord:
     # ANALYZE
     alternative_hypotheses: list[dict] = field(default_factory=list)  # [{hypothesis, ruled_out_reason}]
     repair_strategy_type: str = ""  # ANALYZE: enum from REPAIR_STRATEGY_TYPES
+    root_cause_location_files: list[str] = field(default_factory=list)  # ANALYZE: files where root cause lives
     # DECIDE
     options: list[dict] = field(default_factory=list)  # [{name, pros: str[], cons: str[]}]
     chosen: str = ""
@@ -92,6 +93,8 @@ class PhaseRecord:
             d["alternative_hypotheses"] = self.alternative_hypotheses
         if self.repair_strategy_type:
             d["repair_strategy_type"] = self.repair_strategy_type
+        if self.root_cause_location_files:
+            d["root_cause_location_files"] = self.root_cause_location_files
         # DECIDE
         if self.options:
             d["options"] = self.options
