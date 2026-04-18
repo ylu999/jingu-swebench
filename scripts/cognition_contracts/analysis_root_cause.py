@@ -109,14 +109,14 @@ FIELD_SPECS: list[FieldSpec] = [
     ),
     FieldSpec(
         name="mechanism_path",
-        description="Code path from symptom to mechanism (e.g. caller -> resolver -> matcher)",
-        required=False,
+        description="Code path from symptom to mechanism (e.g. caller -> resolver -> matcher). Required.",
+        required=True,
         semantic_check="traces_to_mechanism",
     ),
     FieldSpec(
         name="rejected_nearby_files",
-        description="Files considered but rejected as root cause, with reasons",
-        required=False,
+        description="Files considered but rejected as root cause, with reasons. Required.",
+        required=True,
         semantic_check="justifies_scope_choice",
     ),
 ]
@@ -202,14 +202,15 @@ PROMPT_GUIDANCE = (
     "Downstream DECIDE/EXECUTE phases are CONSTRAINED to this file scope.\n"
     "If the patch later targets different files, it will be REJECTED unless\n"
     "you update the analysis with new evidence justifying the scope change.\n\n"
-    "ROOT-CAUSE SCOPE JUSTIFICATION (P3):\n"
-    "If you identify a SINGLE root cause file, you MUST also provide:\n"
+    "SEARCH SPACE PRUNING (required):\n"
+    "You MUST provide both of these fields:\n"
     "  - mechanism_path: the code path from symptom to mechanism\n"
     "    (e.g. ['translate_url()', 'reverse()', 'RegexPattern.match()'])\n"
+    "    At least 2 hops showing how the symptom traces to the root mechanism.\n"
     "  - rejected_nearby_files: at least 1 file you considered but rejected,\n"
-    "    with reason (e.g. 'caller/symptom layer only, delegates to X')\n"
-    "This proves you traced past the symptom layer to the actual mechanism.\n"
-    "If missing, your analysis will be returned for deeper investigation.\n"
+    "    with reason (e.g. {file: 'views.py', reason: 'caller only, delegates to resolver'})\n"
+    "This proves you explored alternatives before committing to a root cause.\n"
+    "If missing, your analysis will be REJECTED.\n"
 )
 # NOTE: Field descriptions are NO LONGER listed here. They are rendered at
 # runtime from the bundle schema by schema_field_guidance.render_schema_field_guidance().
@@ -304,11 +305,11 @@ SCHEMA_PROPERTIES: dict = {
     "mechanism_path": {
         "type": "array",
         "items": {"type": "string"},
+        "minItems": 2,
         "description": (
-            "The code path through which the error occurs, from symptom to mechanism. "
+            "The code path from observable symptom to root mechanism. "
             "e.g. ['translate_url()', 'reverse()', 'RegexPattern.match()']. "
-            "Must trace from the observable symptom down to the actual mechanism "
-            "that produces incorrect behavior."
+            "At least 2 hops required: the entry point and the mechanism."
         ),
     },
     "rejected_nearby_files": {
@@ -321,11 +322,12 @@ SCHEMA_PROPERTIES: dict = {
             },
             "required": ["file", "reason"],
         },
+        "minItems": 1,
         "description": (
-            "Files considered but rejected as root cause location. "
+            "Files you considered but rejected as root cause location. "
             "For each: the file path and why it is NOT the root cause "
             "(e.g. 'caller/symptom layer only', 'wrapper that delegates to X'). "
-            "At least 1 required when root_cause_location_files has a single file."
+            "At least 1 required — proves you explored the search space."
         ),
     },
     "repair_strategy_type": {
@@ -353,5 +355,6 @@ SCHEMA_PROPERTIES: dict = {
 SCHEMA_REQUIRED: list[str] = [
     "phase", "subtype", "root_cause", "causal_chain",
     "evidence_refs", "alternative_hypotheses", "repair_strategy_type",
-    "root_cause_location_files", "principals",
+    "root_cause_location_files", "mechanism_path", "rejected_nearby_files",
+    "principals",
 ]

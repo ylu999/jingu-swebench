@@ -759,13 +759,13 @@ class TestScopeJustificationGate:
         return PhaseRecord(**defaults)
 
     def test_single_file_no_justification_scores_zero(self):
-        """Single file + no mechanism_path + no rejected_nearby → score=0."""
+        """Single file + no mechanism_path + no rejected_nearby → score=0, hard reject."""
         from analysis_gate import evaluate_analysis
         pr = self._make_pr()
         v = evaluate_analysis(pr)
         assert v.scores["scope_justification"] == 0.0
-        # v0: soft gate, should NOT hard-reject
-        assert "scope_justification" not in v.failed_rules
+        # P3 v1: hard gate — missing both = reject
+        assert "scope_justification" in v.failed_rules
 
     def test_single_file_with_mechanism_path_scores_half(self):
         """Single file + mechanism_path (no rejected) → score=0.5."""
@@ -787,29 +787,32 @@ class TestScopeJustificationGate:
         v = evaluate_analysis(pr)
         assert v.scores["scope_justification"] == 1.0
 
-    def test_multiple_files_always_passes(self):
-        """Multiple root_cause_location_files → gate not applicable, score=1.0."""
+    def test_multiple_files_no_justification_scores_zero(self):
+        """P3 v1: even multiple files need mechanism_path + rejected_nearby_files."""
         from analysis_gate import evaluate_analysis
         pr = self._make_pr(
             root_cause_location_files=["django/urls/resolvers.py", "django/urls/base.py"],
         )
         v = evaluate_analysis(pr)
-        assert v.scores["scope_justification"] == 1.0
+        assert v.scores["scope_justification"] == 0.0
 
-    def test_no_files_always_passes(self):
-        """No root_cause_location_files → gate not applicable, score=1.0."""
+    def test_multiple_files_with_justification_passes(self):
+        """Multiple files with mechanism_path + rejected_nearby_files → score=1.0."""
         from analysis_gate import evaluate_analysis
-        pr = self._make_pr(root_cause_location_files=[])
+        pr = self._make_pr(
+            root_cause_location_files=["django/urls/resolvers.py", "django/urls/base.py"],
+            mechanism_path=["view()", "resolve()", "match()"],
+            rejected_nearby_files=[{"file": "views.py", "reason": "caller only"}],
+        )
         v = evaluate_analysis(pr)
         assert v.scores["scope_justification"] == 1.0
 
-    def test_v0_never_hard_rejects(self):
-        """P3 v0 is soft-only: even worst case should not appear in failed_rules."""
+    def test_v1_hard_rejects_when_missing(self):
+        """P3 v1 is a hard gate: missing both fields → appears in failed_rules."""
         from analysis_gate import evaluate_analysis
-        pr = self._make_pr()  # single file, no justification
+        pr = self._make_pr()  # no mechanism, no rejected
         v = evaluate_analysis(pr)
-        assert "scope_justification" not in v.failed_rules
-        assert "scope_justification_note" in v.scores
+        assert "scope_justification" in v.failed_rules
 
     def test_schema_includes_p3_fields(self):
         """ANALYZE contract schema must include mechanism_path and rejected_nearby_files."""

@@ -76,6 +76,10 @@ def _make_good_pr() -> PhaseRecord:
             "risk_if_violated": "ValueError crashes any form submission with datetime input",
         },
         repair_strategy_type="REGEX_FIX",
+        mechanism_path=["DateTimeField.clean()", "to_python()", "datetime.strptime()"],
+        rejected_nearby_files=[
+            {"file": "django/db/models/fields/__init__.py", "reason": "validate() delegates to to_python, not the root cause"},
+        ],
     )
 
 
@@ -197,16 +201,17 @@ class TestEvaluateAnalysis:
         assert verdict.scores["causal_chain"] < 0.5
 
     def test_empty_pr_fails_all(self):
-        """Completely empty PhaseRecord should fail all 5 rules."""
+        """Completely empty PhaseRecord should fail all 6 rules."""
         pr = _make_empty_pr()
         verdict = evaluate_analysis(pr)
         assert verdict.passed is False
-        assert len(verdict.failed_rules) == 5
+        assert len(verdict.failed_rules) == 6
         assert "code_grounding" in verdict.failed_rules
         assert "alternative_hypothesis" in verdict.failed_rules
         assert "causal_chain" in verdict.failed_rules
         assert "invariant_capture" in verdict.failed_rules
         assert "repair_strategy_type" in verdict.failed_rules
+        assert "scope_justification" in verdict.failed_rules
 
     def test_verdict_has_correct_type(self):
         """evaluate_analysis returns an AnalysisVerdict."""
@@ -484,11 +489,12 @@ class TestAnalysisGateRejection:
         """Rejection contains FieldFailure entries for each failed rule."""
         pr = _make_empty_pr()
         verdict = evaluate_analysis(pr)
-        assert len(verdict.rejection.failures) == 5  # all 5 rules fail
+        assert len(verdict.rejection.failures) == 6  # all 6 rules fail
         fields_failed = [f.field for f in verdict.rejection.failures]
         assert "root_cause" in fields_failed
         assert "causal_chain" in fields_failed
         assert "alternative_hypotheses" in fields_failed
+        assert "rejected_nearby_files" in fields_failed
 
     def test_rejection_failures_have_hints(self):
         """Each FieldFailure has a non-empty hint."""
@@ -575,13 +581,15 @@ class TestStructuredOutputMode:
         assert "invariant_capture" in verdict.failed_rules
         assert "repair_strategy_type" in verdict.failed_rules
         assert "alternative_hypothesis" not in verdict.failed_rules
-        assert len(verdict.failed_rules) == 4
+        assert "scope_justification" in verdict.failed_rules
+        assert len(verdict.failed_rules) == 5
 
     def test_structured_mode_false_is_default(self):
-        """Default behavior (structured_output=False) keeps all 5 rules enforced."""
+        """Default behavior (structured_output=False) keeps all 6 rules enforced."""
         pr = _make_empty_pr()
         verdict = evaluate_analysis(pr, structured_output=False)
-        assert len(verdict.failed_rules) == 5
+        assert len(verdict.failed_rules) == 6
         assert "alternative_hypothesis" in verdict.failed_rules
+        assert "scope_justification" in verdict.failed_rules
         assert "invariant_capture" in verdict.failed_rules
         assert "repair_strategy_type" in verdict.failed_rules

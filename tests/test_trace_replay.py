@@ -59,6 +59,11 @@ GOOD_ANALYZE_OUTPUT = {
         "risk_if_violated": "All negative duration strings silently return None instead of raising or parsing correctly",
     },
     "repair_strategy_type": "REGEX_FIX",
+    "root_cause_location_files": ["django/utils/dateparse.py"],
+    "mechanism_path": ["parse_duration()", "standard_duration_re.match()", "lookahead fails on negative"],
+    "rejected_nearby_files": [
+        {"file": "django/utils/duration.py", "reason": "output formatter only, not involved in parsing"},
+    ],
     "principals": ["causal_grounding", "evidence_linkage"],
 }
 

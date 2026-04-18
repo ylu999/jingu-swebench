@@ -64,6 +64,11 @@ def _make_well_formed_analyze_response() -> dict:
             "risk_if_violated": "Invalid data bypasses validation and corrupts the DB",
         },
         "repair_strategy_type": "DATAFLOW_FIX",
+        "root_cause_location_files": ["django/db/models/fields.py"],
+        "mechanism_path": ["bulk_create()", "_do_insert()", "field.clean() skipped"],
+        "rejected_nearby_files": [
+            {"file": "django/db/models/query.py", "reason": "caller only — delegates to _do_insert which skips clean()"},
+        ],
         "content": "Full analysis content here",
     }
 

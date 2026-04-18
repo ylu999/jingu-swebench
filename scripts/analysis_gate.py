@@ -348,10 +348,11 @@ def evaluate_analysis(pr: PhaseRecord, *, structured_output: bool = False, compi
             "soft: root_cause_location_files missing — downstream scope gate disabled"
         )
 
-    # Rule 7: scope_justification (P3 — root-cause correctness gate)
-    # Trigger: single root-cause file + no rejected_nearby_files + no mechanism_path
-    # This catches symptom-layer analysis: agent stops at the caller/wrapper instead
-    # of tracing to the actual mechanism. Only fires when single file declared.
+    # Rule 7: scope_justification (P3 — search space pruning gate)
+    # Now a HARD gate: mechanism_path + rejected_nearby_files are required contract fields.
+    # Agent must demonstrate it explored alternatives before committing to root cause.
+    # Fires always (not just single-file): the requirement is about reasoning process,
+    # not about file count.
     _mechanism_path = getattr(pr, "mechanism_path", None) or []
     _rejected_nearby = getattr(pr, "rejected_nearby_files", None) or []
     _has_mechanism = len(_mechanism_path) >= 2  # at least 2 hops (symptom -> mechanism)
@@ -359,22 +360,19 @@ def evaluate_analysis(pr: PhaseRecord, *, structured_output: bool = False, compi
         isinstance(r, dict) and len((r.get("reason") or "").strip()) > 5
         for r in _rejected_nearby
     )
-    if len(_rcf) == 1 and not _has_mechanism and not _has_rejected:
+    if not _has_mechanism and not _has_rejected:
         score7 = 0.0
-    elif len(_rcf) == 1 and (_has_mechanism or _has_rejected):
-        score7 = 0.5 if not (_has_mechanism and _has_rejected) else 1.0
-    else:
-        # Multiple files or no files: gate not applicable
+    elif _has_mechanism and _has_rejected:
         score7 = 1.0
+    else:
+        # Has one but not both
+        score7 = 0.5
     scores["scope_justification"] = score7
-
-    # P3 enforcement: v0 = always soft (score-only, never hard-reject).
-    # Collects baseline data on mechanism_path/rejected_nearby_files adoption.
-    # Promote to hard gate after validating on real trajectories.
+    # P3 v1: hard gate. Missing both = reject. Having one = pass (0.5 >= threshold).
+    # This forces the agent to do search space pruning as part of analysis.
     if score7 < _THRESHOLD:
-        scores["scope_justification_note"] = (
-            "soft_v0: scope justification missing — score recorded, not blocking"
-        )
+        failed.append("scope_justification")
+        reasons.append("Missing mechanism_path and/or rejected_nearby_files — search space pruning required")
 
     extracted = {
         "root_cause": pr.root_cause[:100] if pr.root_cause else "",
