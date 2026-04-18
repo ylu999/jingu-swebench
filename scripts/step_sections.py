@@ -107,6 +107,73 @@ class AdmissionResult:
     extraction_telemetry: dict = dc_field(default_factory=dict)
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+# Extracted: fake loop escalation check (Gate 10 core logic)
+#
+# Determines whether a fake_principal violation should trigger:
+#   - "bypass": escalation limit reached → selective bypass, record PRESERVED
+#   - "retry": below limit → record cleared, agent retries
+#
+# Extracted from evaluate_transition() for testability (10999 bug fix).
+# ══════════════════════════════════════════════════════════════════════════════
+
+@dataclass
+class FakeLoopResult:
+    """Result of fake loop escalation check."""
+    action: str = "retry"  # "bypass" or "retry"
+    bypassed_principals: list = dc_field(default_factory=list)
+    loop_count: int = 0
+
+
+def _handle_fake_loop_check(state, eval_phase: str, violation: str) -> FakeLoopResult:
+    """Check fake loop count and decide bypass vs retry.
+
+    On bypass: record is PRESERVED in state.phase_records.
+    On retry: record for eval_phase is CLEARED from state.phase_records.
+
+    Returns FakeLoopResult with action="bypass" or "retry".
+    """
+    from principal_gate import _FAKE_LOOP_LIMIT
+
+    loop_key = (eval_phase, violation)
+    state._retryable_loop_counts[loop_key] = (
+        state._retryable_loop_counts.get(loop_key, 0) + 1
+    )
+    # Reset other loop counters
+    for k in list(state._retryable_loop_counts):
+        if k != loop_key:
+            state._retryable_loop_counts[k] = 0
+    loop_count = state._retryable_loop_counts[loop_key]
+
+    if loop_count >= _FAKE_LOOP_LIMIT:
+        # Escalation: selective bypass — record PRESERVED
+        fake_principals = []
+        if ":" in violation:
+            fake_principals = [
+                p.strip() for p in violation.split(":", 1)[1].split(",")
+                if p.strip()
+            ]
+        state._bypassed_principals.update(fake_principals)
+        state._retryable_loop_counts[loop_key] = 0
+        state.pending_redirect_hint = ""
+        return FakeLoopResult(
+            action="bypass",
+            bypassed_principals=sorted(state._bypassed_principals),
+            loop_count=loop_count,
+        )
+    else:
+        # Below limit: clear record for retry
+        state.phase_records = [
+            r for r in state.phase_records
+            if r.phase.upper() != eval_phase
+        ]
+        return FakeLoopResult(
+            action="retry",
+            bypassed_principals=[],
+            loop_count=loop_count,
+        )
+
+
 # ── Phase 4.5: Rejection Policy Table ─────────────────────────────────────
 # Single source of truth for all rejection → verdict escalation.
 #
@@ -1437,54 +1504,33 @@ def evaluate_transition(
                 f" violation={_inf_violation} repair={_inf_repair}",
                 flush=True,
             )
-            _fi_loop_key = (eval_phase, _inf_violation)
-            state._retryable_loop_counts[_fi_loop_key] = (
-                state._retryable_loop_counts.get(_fi_loop_key, 0) + 1
-            )
-            for _k in list(state._retryable_loop_counts):
-                if _k != _fi_loop_key:
-                    state._retryable_loop_counts[_k] = 0
-            _fi_loop_count = state._retryable_loop_counts[_fi_loop_key]
-            from principal_gate import _FAKE_LOOP_LIMIT
-            if _fi_loop_count >= _FAKE_LOOP_LIMIT:
-                _fake_principals = []
-                if ":" in _inf_violation:
-                    _fake_principals = [
-                        p.strip() for p in _inf_violation.split(":", 1)[1].split(",")
-                        if p.strip()
-                    ]
-                state._bypassed_principals.update(_fake_principals)
-                state._retryable_loop_counts[_fi_loop_key] = 0
+            _fl_result = _handle_fake_loop_check(state, eval_phase, _inf_violation)
+            if _fl_result.action == "bypass":
                 from routing_decision import EscalationReason, EscalationInfo
                 _fi_esc = EscalationInfo(
                     reason=EscalationReason.FAKE_LOOP,
-                    loop_key=_fi_loop_key,
-                    loop_count=_fi_loop_count,
+                    loop_key=(eval_phase, _inf_violation),
+                    loop_count=_fl_result.loop_count,
                     action="selective_bypass",
-                    bypassed_principals=sorted(state._bypassed_principals),
+                    bypassed_principals=_fl_result.bypassed_principals,
                 )
+                from principal_gate import _FAKE_LOOP_LIMIT
                 _emit_limit_triggered(
                     state, step_n=_cp_s.step_index,
                     limit_name=f"escalation_{_fi_esc.reason.value}",
-                    configured_value=_FAKE_LOOP_LIMIT, actual_value=_fi_loop_count,
+                    configured_value=_FAKE_LOOP_LIMIT, actual_value=_fl_result.loop_count,
                     action_taken=_fi_esc.action, source_file="principal_gate.py", source_line=0,
                     reason=f"phase={eval_phase} violation={_inf_violation} bypassed={_fi_esc.bypassed_principals}",
                 )
                 print(
                     f"    [principal_inference] ESCALATED(fake_loop):"
                     f" phase={eval_phase} violation={_inf_violation}"
-                    f" count={_fi_loop_count} >= {_FAKE_LOOP_LIMIT}"
+                    f" count={_fl_result.loop_count} >= {_FAKE_LOOP_LIMIT}"
                     f" → bypassed_principals={_fi_esc.bypassed_principals}"
                     f" (selective bypass, record preserved, other principals still enforced)",
                     flush=True,
                 )
-                state.pending_redirect_hint = ""
             else:
-                # Fake check rejected but not yet at escalation limit — clear record for retry
-                state.phase_records = [
-                    r for r in state.phase_records
-                    if r.phase.upper() != eval_phase
-                ]
                 result.verdict = "retry"
                 result.source = "gate_rejection"
                 result.reason = f"fake_principal:{_inf_violation}"

@@ -849,22 +849,21 @@ class TestScopeJustificationGate:
 # ══════════════════════════════════════════════════════════════════════════════
 
 class TestFakeLoopBypassPreservesRecord:
-    """When principal_inference fake loop hits escalation limit and does
-    selective_bypass, the phase_record must NOT be cleared.
+    """Tests call _handle_fake_loop_check() — the REAL extracted function
+    from step_sections Gate 10 — not a simulation of state operations.
 
-    Bug: record was cleared BEFORE checking escalation limit, so bypass
-    succeeded but the admitted record was lost. Downstream phases had no
-    ANALYZE record even though one was admitted and passed analysis_gate.
+    Bug (10999): record was cleared BEFORE checking escalation limit, so
+    bypass succeeded but the admitted record was lost.
+
+    Fix: extracted _handle_fake_loop_check() with correct ordering —
+    bypass path preserves record, retry path clears it.
     """
 
-    def test_record_preserved_on_bypass(self):
-        """After fake loop selective_bypass, phase_records still contains
-        the ANALYZE record that passed the phase-specific gate."""
+    @staticmethod
+    def _make_analyze_record(**overrides):
+        """Build a minimal ANALYZE PhaseRecord with P3 fields."""
         from phase_record import PhaseRecord
-        from principal_gate import _FAKE_LOOP_LIMIT
-
-        # Build a minimal PhaseRecord that passes analysis_gate
-        pr = PhaseRecord(
+        defaults = dict(
             phase="ANALYZE",
             subtype="analysis.root_cause",
             principals=["causal_grounding"],
@@ -884,96 +883,121 @@ class TestFakeLoopBypassPreservesRecord:
                 {"file": "django/utils/duration.py", "reason": "output only"},
             ],
         )
+        defaults.update(overrides)
+        return PhaseRecord(**defaults)
 
-        # Simulate: state has this record admitted, and fake loop count
-        # is at the limit so next check triggers bypass
+    @staticmethod
+    def _make_state(phase_records, loop_counts=None):
+        """Build a minimal state object for _handle_fake_loop_check."""
         class FakeState:
             pass
-
         state = FakeState()
-        state.phase_records = [pr]
-        state._retryable_loop_counts = {
-            ("ANALYZE", "fake_principal:causal_grounding"): _FAKE_LOOP_LIMIT - 1,
-        }
+        state.phase_records = list(phase_records)
+        state._retryable_loop_counts = dict(loop_counts or {})
         state._bypassed_principals = set()
+        state.pending_redirect_hint = "some hint"
+        return state
 
-        # Simulate the fake loop logic from step_sections (Gate 10)
-        eval_phase = "ANALYZE"
-        _inf_violation = "fake_principal:causal_grounding"
-        _fi_loop_key = (eval_phase, _inf_violation)
-
-        # Increment count (as step_sections does)
-        state._retryable_loop_counts[_fi_loop_key] = (
-            state._retryable_loop_counts.get(_fi_loop_key, 0) + 1
-        )
-        _fi_loop_count = state._retryable_loop_counts[_fi_loop_key]
-
-        # Should be at limit now
-        assert _fi_loop_count >= _FAKE_LOOP_LIMIT, (
-            f"Expected count >= {_FAKE_LOOP_LIMIT}, got {_fi_loop_count}"
-        )
-
-        # After bypass, record must still be in phase_records
-        analyze_records = [
-            r for r in state.phase_records
-            if r.phase.upper() == "ANALYZE"
-        ]
-        assert len(analyze_records) == 1, (
-            f"ANALYZE record must be preserved after fake loop bypass, "
-            f"got {len(analyze_records)} records"
-        )
-        assert analyze_records[0].mechanism_path == ["parse_duration()", "standard_duration_re.match()"]
-        assert len(analyze_records[0].rejected_nearby_files) == 1
-
-    def test_record_cleared_on_retry(self):
-        """When fake loop has NOT reached escalation limit, record IS
-        cleared (normal retry behavior)."""
-        from phase_record import PhaseRecord
+    def test_bypass_preserves_record(self):
+        """Bypass path: loop count at limit → ANALYZE record PRESERVED,
+        bypassed_principals populated, pending_redirect_hint cleared."""
+        from step_sections import _handle_fake_loop_check
         from principal_gate import _FAKE_LOOP_LIMIT
 
-        pr = PhaseRecord(
-            phase="ANALYZE",
-            subtype="analysis.root_cause",
-            principals=["causal_grounding"],
-            claims=["test"],
-            evidence_refs=["file.py:1"],
-            from_steps=[1],
-            content="test",
-            root_cause="test root cause",
-            causal_chain="test chain",
-            alternative_hypotheses=[{"hypothesis": "h", "ruled_out_reason": "r"}],
-            repair_strategy_type="REGEX_FIX",
-            root_cause_location_files=["file.py"],
-            mechanism_path=["a()", "b()"],
-            rejected_nearby_files=[{"file": "c.py", "reason": "not it"}],
+        pr = self._make_analyze_record()
+        state = self._make_state(
+            phase_records=[pr],
+            loop_counts={("ANALYZE", "fake_principal:causal_grounding"): _FAKE_LOOP_LIMIT - 1},
         )
 
-        class FakeState:
-            pass
+        result = _handle_fake_loop_check(state, "ANALYZE", "fake_principal:causal_grounding")
 
-        state = FakeState()
-        state.phase_records = [pr]
-        state._retryable_loop_counts = {
-            ("ANALYZE", "fake_principal:causal_grounding"): 0,
-        }
+        # Action must be bypass
+        assert result.action == "bypass", f"Expected bypass, got {result.action}"
+        assert result.loop_count >= _FAKE_LOOP_LIMIT
 
-        eval_phase = "ANALYZE"
-        _fi_loop_key = (eval_phase, "fake_principal:causal_grounding")
+        # CRITICAL: ANALYZE record must still be in phase_records
+        analyze_records = [r for r in state.phase_records if r.phase.upper() == "ANALYZE"]
+        assert len(analyze_records) == 1, (
+            f"ANALYZE record must be PRESERVED after bypass, got {len(analyze_records)}"
+        )
+        # P3 fields intact
+        assert analyze_records[0].mechanism_path == ["parse_duration()", "standard_duration_re.match()"]
+        assert len(analyze_records[0].rejected_nearby_files) == 1
+        assert analyze_records[0].rejected_nearby_files[0]["file"] == "django/utils/duration.py"
 
-        # Increment — still below limit
-        state._retryable_loop_counts[_fi_loop_key] = 1
-        _fi_loop_count = state._retryable_loop_counts[_fi_loop_key]
-        assert _fi_loop_count < _FAKE_LOOP_LIMIT
+        # bypassed_principals populated
+        assert "causal_grounding" in result.bypassed_principals
+        assert "causal_grounding" in state._bypassed_principals
 
-        # Simulate the retry path: record should be cleared
-        state.phase_records = [
-            r for r in state.phase_records
-            if r.phase.upper() != eval_phase
-        ]
-        analyze_records = [
-            r for r in state.phase_records
-            if r.phase.upper() == "ANALYZE"
-        ]
+        # pending_redirect_hint cleared (bypass = no retry message)
+        assert state.pending_redirect_hint == ""
+
+    def test_retry_clears_record(self):
+        """Retry path: loop count below limit → ANALYZE record CLEARED."""
+        from step_sections import _handle_fake_loop_check
+        from principal_gate import _FAKE_LOOP_LIMIT
+
+        pr = self._make_analyze_record()
+        state = self._make_state(
+            phase_records=[pr],
+            loop_counts={("ANALYZE", "fake_principal:causal_grounding"): 0},
+        )
+
+        result = _handle_fake_loop_check(state, "ANALYZE", "fake_principal:causal_grounding")
+
+        # Action must be retry
+        assert result.action == "retry", f"Expected retry, got {result.action}"
+        assert result.loop_count < _FAKE_LOOP_LIMIT
+
+        # ANALYZE record must be CLEARED
+        analyze_records = [r for r in state.phase_records if r.phase.upper() == "ANALYZE"]
         assert len(analyze_records) == 0, (
-            "On normal retry (below escalation limit), ANALYZE record must be cleared"
+            "On retry (below limit), ANALYZE record must be cleared"
         )
+
+    def test_bypass_with_multiple_fake_principals(self):
+        """Bypass with comma-separated principals: all should be bypassed."""
+        from step_sections import _handle_fake_loop_check
+        from principal_gate import _FAKE_LOOP_LIMIT
+
+        pr = self._make_analyze_record(principals=["causal_grounding", "evidence_linkage"])
+        state = self._make_state(
+            phase_records=[pr],
+            loop_counts={
+                ("ANALYZE", "fake_principal:causal_grounding,evidence_linkage"): _FAKE_LOOP_LIMIT - 1,
+            },
+        )
+
+        result = _handle_fake_loop_check(
+            state, "ANALYZE", "fake_principal:causal_grounding,evidence_linkage"
+        )
+
+        assert result.action == "bypass"
+        assert "causal_grounding" in result.bypassed_principals
+        assert "evidence_linkage" in result.bypassed_principals
+        # Record preserved
+        assert len([r for r in state.phase_records if r.phase.upper() == "ANALYZE"]) == 1
+
+    def test_other_phase_records_unaffected_on_retry(self):
+        """Retry clears only the target phase record, others untouched."""
+        from step_sections import _handle_fake_loop_check
+
+        pr_analyze = self._make_analyze_record()
+        from phase_record import PhaseRecord
+        pr_observe = PhaseRecord(
+            phase="OBSERVE", subtype="observe.initial",
+            principals=[], claims=[], evidence_refs=[], from_steps=[], content="obs",
+        )
+        state = self._make_state(
+            phase_records=[pr_observe, pr_analyze],
+            loop_counts={("ANALYZE", "fake_principal:causal_grounding"): 0},
+        )
+
+        result = _handle_fake_loop_check(state, "ANALYZE", "fake_principal:causal_grounding")
+
+        assert result.action == "retry"
+        # OBSERVE record must survive
+        assert len([r for r in state.phase_records if r.phase.upper() == "OBSERVE"]) == 1
+        # ANALYZE record cleared
+        assert len([r for r in state.phase_records if r.phase.upper() == "ANALYZE"]) == 0
