@@ -1,7 +1,7 @@
 {
   "version": "1.0.0",
   "compiler_version": "0.1.0",
-  "generated_at": "2026-04-18T01:45:54.234896+00:00",
+  "generated_at": "2026-04-18T03:22:38.322202+00:00",
   "generator_commit": "1ffc8dc",
   "capabilities": [
     "prompt_only",
@@ -22,7 +22,7 @@
     "observation.fact_gathering": {
       "phase": "OBSERVE",
       "subtype": "observation.fact_gathering",
-      "compiled_at": "2026-04-18T01:45:54.229210+00:00",
+      "compiled_at": "2026-04-18T03:22:38.319979+00:00",
       "phase_spec": {
         "name": "OBSERVE",
         "goal": "Gather evidence from the environment: read files, traces, logs, tests.",
@@ -170,7 +170,7 @@
     "analysis.root_cause": {
       "phase": "ANALYZE",
       "subtype": "analysis.root_cause",
-      "compiled_at": "2026-04-18T01:45:54.231311+00:00",
+      "compiled_at": "2026-04-18T03:22:38.320833+00:00",
       "phase_spec": {
         "name": "ANALYZE",
         "goal": "Root-cause analysis: connect evidence to a causal hypothesis.",
@@ -365,6 +365,32 @@
             "minLength": 10,
             "description": "One-sentence summary of where the bug lives and what layer it belongs to. Used to ground downstream DECIDE/EXECUTE phases."
           },
+          "mechanism_path": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The code path through which the error occurs, from symptom to mechanism. e.g. ['translate_url()', 'reverse()', 'RegexPattern.match()']. Must trace from the observable symptom down to the actual mechanism that produces incorrect behavior."
+          },
+          "rejected_nearby_files": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "file": {
+                  "type": "string"
+                },
+                "reason": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "file",
+                "reason"
+              ]
+            },
+            "description": "Files considered but rejected as root cause location. For each: the file path and why it is NOT the root cause (e.g. 'caller/symptom layer only', 'wrapper that delegates to X'). At least 1 required when root_cause_location_files has a single file."
+          },
           "repair_strategy_type": {
             "type": "string",
             "enum": [
@@ -398,7 +424,7 @@
           "principals"
         ]
       },
-      "prompt": "## Phase: ANALYZE\nGoal: Root-cause analysis: connect evidence to a causal hypothesis.\nSubtype: analysis.root_cause (root_cause)\n\n## Required Fields\n- root_cause\n- causal_chain\n- evidence_refs\n- alternative_hypotheses\n\n## Forbidden Moves\n- do not write code\n- do not skip evidence\n- do not jump to a fix without causal reasoning\n\n## Required Principals\nYou MUST declare: causal_grounding, evidence_linkage, alternative_hypothesis_check\n\n## Forbidden Principals\nDo NOT declare: action_grounding, minimal_change\n\n## Guidance\nIdentify the root cause with causal evidence. Do NOT write any fix yet.\n\nInvestigate the code, then call submit_phase_record with your findings.\n\nRules: Do NOT propose fixes here. Focus on understanding why the test fails.\n\nIf any required field is missing or empty, you will be returned to ANALYZE.\n\nYou MUST explicitly declare your repair strategy type. Choose exactly one:\n  REPAIR_STRATEGY_TYPE: REGEX_FIX | PARSER_REWRITE | DATAFLOW_FIX | STATE_COPY_FIX | INVARIANT_FIX | MISSING_SECONDARY_FIX | API_CONTRACT_FIX\nThis field is REQUIRED. If missing, your analysis will be REJECTED.\n\nYou MUST declare root_cause_location_files: the file(s) where the bug lives.\nDownstream DECIDE/EXECUTE phases are CONSTRAINED to this file scope.\nIf the patch later targets different files, it will be REJECTED unless\nyou update the analysis with new evidence justifying the scope change.",
+      "prompt": "## Phase: ANALYZE\nGoal: Root-cause analysis: connect evidence to a causal hypothesis.\nSubtype: analysis.root_cause (root_cause)\n\n## Required Fields\n- root_cause\n- causal_chain\n- evidence_refs\n- alternative_hypotheses\n\n## Forbidden Moves\n- do not write code\n- do not skip evidence\n- do not jump to a fix without causal reasoning\n\n## Required Principals\nYou MUST declare: causal_grounding, evidence_linkage, alternative_hypothesis_check\n\n## Forbidden Principals\nDo NOT declare: action_grounding, minimal_change\n\n## Guidance\nIdentify the root cause with causal evidence. Do NOT write any fix yet.\n\nInvestigate the code, then call submit_phase_record with your findings.\n\nRules: Do NOT propose fixes here. Focus on understanding why the test fails.\n\nIf any required field is missing or empty, you will be returned to ANALYZE.\n\nYou MUST explicitly declare your repair strategy type. Choose exactly one:\n  REPAIR_STRATEGY_TYPE: REGEX_FIX | PARSER_REWRITE | DATAFLOW_FIX | STATE_COPY_FIX | INVARIANT_FIX | MISSING_SECONDARY_FIX | API_CONTRACT_FIX\nThis field is REQUIRED. If missing, your analysis will be REJECTED.\n\nYou MUST declare root_cause_location_files: the file(s) where the bug lives.\nDownstream DECIDE/EXECUTE phases are CONSTRAINED to this file scope.\nIf the patch later targets different files, it will be REJECTED unless\nyou update the analysis with new evidence justifying the scope change.\n\nROOT-CAUSE SCOPE JUSTIFICATION (P3):\nIf you identify a SINGLE root cause file, you MUST also provide:\n  - mechanism_path: the code path from symptom to mechanism\n    (e.g. ['translate_url()', 'reverse()', 'RegexPattern.match()'])\n  - rejected_nearby_files: at least 1 file you considered but rejected,\n    with reason (e.g. 'caller/symptom layer only, delegates to X')\nThis proves you traced past the symptom layer to the actual mechanism.\nIf missing, your analysis will be returned for deeper investigation.",
       "repair_templates": {
         "code_grounding": {
           "hint": "Point to exact code location (file:line or function name) causing the issue",
@@ -418,6 +444,11 @@
         "invariant_capture": {
           "hint": "Identify the behavioral constraint your fix must preserve: what property, contract, or boundary must remain unchanged? What invalid behavior must still be rejected? What valid behavior must remain accepted?",
           "field": "root_cause",
+          "threshold": 0.5
+        },
+        "scope_justification": {
+          "hint": "You identified a single root-cause file but did not justify why it is the mechanism, not just the symptom. Provide: (1) mechanism_path tracing from symptom to actual mechanism, (2) at least 1 rejected_nearby_files entry explaining why a nearby file (caller/wrapper) is NOT the root cause.",
+          "field": "rejected_nearby_files",
           "threshold": 0.5
         }
       },
@@ -461,7 +492,7 @@
     "decision.fix_direction": {
       "phase": "DECIDE",
       "subtype": "decision.fix_direction",
-      "compiled_at": "2026-04-18T01:45:54.232190+00:00",
+      "compiled_at": "2026-04-18T03:22:38.321185+00:00",
       "phase_spec": {
         "name": "DECIDE",
         "goal": "Choose the fix direction based on analysis.",
@@ -630,7 +661,7 @@
     "design.solution_shape": {
       "phase": "DESIGN",
       "subtype": "design.solution_shape",
-      "compiled_at": "2026-04-18T01:45:54.232935+00:00",
+      "compiled_at": "2026-04-18T03:22:38.321506+00:00",
       "phase_spec": {
         "name": "DESIGN",
         "goal": "Design the solution shape before writing code.",
@@ -804,7 +835,7 @@
     "execution.code_patch": {
       "phase": "EXECUTE",
       "subtype": "execution.code_patch",
-      "compiled_at": "2026-04-18T01:45:54.233778+00:00",
+      "compiled_at": "2026-04-18T03:22:38.321825+00:00",
       "phase_spec": {
         "name": "EXECUTE",
         "goal": "Write the minimal code patch that fixes the issue.",
@@ -941,7 +972,7 @@
     "judge.verification": {
       "phase": "JUDGE",
       "subtype": "judge.verification",
-      "compiled_at": "2026-04-18T01:45:54.234872+00:00",
+      "compiled_at": "2026-04-18T03:22:38.322189+00:00",
       "phase_spec": {
         "name": "JUDGE",
         "goal": "Verify the fix: run tests, check correctness, assess completeness.",
