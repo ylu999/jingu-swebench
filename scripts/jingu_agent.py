@@ -1315,6 +1315,15 @@ class JinguAgent:
                         print(f"    [failure-classify] type={_ft} next_phase={_routing['next_phase']} "
                               f"f2p_pass={cv_flat.get('f2p_passed', 0)} "
                               f"f2p_fail={cv_flat.get('f2p_failed', 0)}", flush=True)
+                        # EFR telemetry: structured feedback emission
+                        _evidence_quality = "rich" if cv_flat.get("output_tail") or cv_flat.get("stdout") else "counts_only"
+                        _current_phase = str(cp_state_holder[0].phase).upper() if cp_state_holder else "?"
+                        _cross_phase = _routing["next_phase"].upper() != _current_phase
+                        print(f"    [efr-emit] failure_type={_ft} repair_target={_routing['next_phase']} "
+                              f"current_phase={_current_phase} cross_phase={_cross_phase} "
+                              f"evidence_quality={_evidence_quality} "
+                              f"has_repair_goal={bool(_routing.get('repair_goal'))} "
+                              f"has_principals={bool(_routing.get('required_principals'))}", flush=True)
                     else:
                         jingu_body["failure_type"] = None
                         jingu_body["failure_routing"] = None
@@ -1675,6 +1684,7 @@ class JinguAgent:
         self._prev_failure_mode: str | None = None  # P0.2: environment_failure early terminate
         _test_counts_by_attempt: dict[int, int] = {}
         _next_attempt_start_phase: str = "OBSERVE"  # p-fix: repair routing target for next attempt
+        _next_attempt_start_phase_for_ack: str | None = None  # EFR: prescribed phase for ack check
         _last_failure_type: str = ""  # telemetry: which failure_type drove the routing
         cp_state_holder: list = [initial_reasoning_state("OBSERVE")]
         self._cp_state_holder = cp_state_holder
@@ -1709,6 +1719,19 @@ class JinguAgent:
             agent_exit = outcome.result.exit_status
             jingu_body = outcome.result.jingu_body
             _attempt_monitor = outcome.result.monitor
+
+            # EFR telemetry: acknowledgment — did attempt N enter the prescribed repair phase?
+            if attempt > 1 and _last_failure_type and _next_attempt_start_phase_for_ack:
+                _phase_records = (jingu_body or {}).get("phase_records", [])
+                _entered_phases = [r.get("phase", "").upper() for r in _phase_records if r.get("phase")]
+                _entered_prescribed = _next_attempt_start_phase_for_ack.upper() in _entered_phases
+                _first_phase = _entered_phases[0] if _entered_phases else "none"
+                print(f"    [efr-ack] attempt={attempt} prescribed_phase={_next_attempt_start_phase_for_ack} "
+                      f"entered={_entered_prescribed} first_phase={_first_phase} "
+                      f"all_phases={_entered_phases} failure_type={_last_failure_type}", flush=True)
+            # Save prescribed phase for next attempt's ack check
+            if attempt < self._max_attempts:
+                _next_attempt_start_phase_for_ack = _next_attempt_start_phase
 
             # Early stop verdict handling
             if _attempt_monitor is not None and _attempt_monitor.early_stop_verdict is not None:
@@ -2517,6 +2540,9 @@ class JinguAgent:
                             if _approach_summary:
                                 _past_approach_summaries.append(_approach_summary)
                             last_failure = retry_plan.next_attempt_prompt[:600]
+                            # EFR telemetry: base last_failure from retry_plan
+                            print(f"    [efr-base] attempt={attempt} source=retry_plan "
+                                  f"last_failure_len={len(last_failure)}", flush=True)
                             # Decision Quality v1: prediction error feedback
                             try:
                                 from prediction_feedback import compute_prediction_error, build_prediction_error_hint
@@ -2551,6 +2577,13 @@ class JinguAgent:
                                 # p-fix: propagate repair routing target to next attempt cp_state
                                 _next_attempt_start_phase = _jb_routing['next_phase'].upper()
                                 _last_failure_type = _jb_ft or ""
+                                # EFR telemetry: structured repair consumed (retry_plan branch)
+                                print(f"    [efr-consume] attempt={attempt} failure_type={_jb_ft} "
+                                      f"repair_target={_jb_routing['next_phase']} "
+                                      f"repair_len={len(_repair)} "
+                                      f"has_evidence={'Evidence from previous attempt' in _repair} "
+                                      f"has_phase_decl={'[REPAIR PHASE:' in _repair} "
+                                      f"branch=retry_plan", flush=True)
                                 print(f"    [repair-route] attempt={attempt} failure_type={_jb_ft} "
                                       f"next_phase={_jb_routing['next_phase']}", flush=True)
                             elif not _jb_ft:
@@ -2599,6 +2632,8 @@ class JinguAgent:
                             if _approach_summary:
                                 _past_approach_summaries.append(_approach_summary)
                             last_failure = exec_feedback[:400]
+                            print(f"    [efr-base] attempt={attempt} source=exec_feedback "
+                                  f"last_failure_len={len(last_failure)}", flush=True)
                             _jb_ft = (jingu_body or {}).get("failure_type")
                             _jb_routing = (jingu_body or {}).get("failure_routing")
                             _jb_cv = (jingu_body or {}).get("controlled_verify") or {}
@@ -2608,6 +2643,13 @@ class JinguAgent:
                                 # p-fix: propagate repair routing target to next attempt cp_state
                                 _next_attempt_start_phase = _jb_routing['next_phase'].upper()
                                 _last_failure_type = _jb_ft or ""
+                                # EFR telemetry: structured repair consumed (no retry_plan branch)
+                                print(f"    [efr-consume] attempt={attempt} failure_type={_jb_ft} "
+                                      f"repair_target={_jb_routing['next_phase']} "
+                                      f"repair_len={len(_repair)} "
+                                      f"has_evidence={'Evidence from previous attempt' in _repair} "
+                                      f"has_phase_decl={'[REPAIR PHASE:' in _repair} "
+                                      f"branch=no_retry_plan", flush=True)
                                 print(f"    [repair-route] attempt={attempt} failure_type={_jb_ft} "
                                       f"next_phase={_jb_routing['next_phase']}", flush=True)
                             elif not _jb_ft:
