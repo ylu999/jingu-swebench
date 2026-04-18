@@ -175,7 +175,11 @@ PROMPT_GUIDANCE = (
     "You MUST explicitly declare your repair strategy type. Choose exactly one:\n"
     "  REPAIR_STRATEGY_TYPE: REGEX_FIX | PARSER_REWRITE | DATAFLOW_FIX | "
     "STATE_COPY_FIX | INVARIANT_FIX | MISSING_SECONDARY_FIX | API_CONTRACT_FIX\n"
-    "This field is REQUIRED. If missing, your analysis will be REJECTED.\n"
+    "This field is REQUIRED. If missing, your analysis will be REJECTED.\n\n"
+    "You MUST declare root_cause_location_files: the file(s) where the bug lives.\n"
+    "Downstream DECIDE/EXECUTE phases are CONSTRAINED to this file scope.\n"
+    "If the patch later targets different files, it will be REJECTED unless\n"
+    "you update the analysis with new evidence justifying the scope change.\n"
 )
 # NOTE: Field descriptions are NO LONGER listed here. They are rendered at
 # runtime from the bundle schema by schema_field_guidance.render_schema_field_guidance().
@@ -248,6 +252,25 @@ SCHEMA_PROPERTIES: dict = {
             "What valid behavior must remain accepted?"
         ),
     },
+    "root_cause_location_files": {
+        "type": "array",
+        "items": {"type": "string"},
+        "minItems": 1,
+        "description": (
+            "Files where the root cause lives (e.g. ['django/urls/resolvers.py']). "
+            "Downstream phases (DECIDE/EXECUTE) must keep patches consistent with "
+            "this scope. If your patch targets different files, you must justify "
+            "the deviation with new evidence."
+        ),
+    },
+    "root_cause_scope_summary": {
+        "type": "string",
+        "minLength": 10,
+        "description": (
+            "One-sentence summary of where the bug lives and what layer it belongs to. "
+            "Used to ground downstream DECIDE/EXECUTE phases."
+        ),
+    },
     "repair_strategy_type": {
         "type": "string",
         "enum": REPAIR_STRATEGY_TYPES,
@@ -272,5 +295,6 @@ SCHEMA_PROPERTIES: dict = {
 
 SCHEMA_REQUIRED: list[str] = [
     "phase", "subtype", "root_cause", "causal_chain",
-    "evidence_refs", "alternative_hypotheses", "repair_strategy_type", "principals",
+    "evidence_refs", "alternative_hypotheses", "repair_strategy_type",
+    "root_cause_location_files", "principals",
 ]

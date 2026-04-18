@@ -332,11 +332,28 @@ def evaluate_analysis(pr: PhaseRecord, *, structured_output: bool = False, compi
             + ", ".join(_arc.REPAIR_STRATEGY_TYPES)
         )
 
+    # Rule 6: root_cause_location_files (P2 scope consistency — soft gate)
+    # Presence check only. The hard enforcement happens downstream in the
+    # scope consistency gate (zero-overlap check in step_sections.py).
+    # When structured_output=True, schema enforces minItems=1.
+    _rcf = getattr(pr, "root_cause_location_files", None)
+    if not _rcf and hasattr(pr, "__dict__"):
+        _rcf = pr.__dict__.get("root_cause_location_files", None)
+    _rcf = _rcf or []
+    score6 = 1.0 if _rcf else 0.0
+    scores["root_cause_location_files"] = score6
+    if score6 < _THRESHOLD and not structured_output:
+        # Soft: warn but don't hard-reject (structured_output enforces via schema)
+        scores["root_cause_location_files_note"] = (
+            "soft: root_cause_location_files missing — downstream scope gate disabled"
+        )
+
     extracted = {
         "root_cause": pr.root_cause[:100] if pr.root_cause else "",
         "causal_chain": pr.causal_chain[:100] if pr.causal_chain else "",
         "invariant_capture": pr.invariant_capture if pr.invariant_capture else {},
         "repair_strategy_type": _strategy,
+        "root_cause_location_files": _rcf,
     }
 
     # p217: Build structured GateRejection on failure (when SDG enabled)

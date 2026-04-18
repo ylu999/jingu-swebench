@@ -1128,6 +1128,18 @@ def evaluate_transition(
             if _rc:
                 state.last_analyze_root_cause = _rc
                 print(f"    [phase_record] root_cause saved ({len(_rc)} chars)", flush=True)
+            # P2: Save root_cause_location_files for scope consistency gate
+            _rcf = getattr(_pr, "root_cause_location_files", None) or []
+            if not _rcf and hasattr(_pr, "__dict__"):
+                _rcf = _pr.__dict__.get("root_cause_location_files", []) or []
+            if _rcf:
+                state._analyze_root_cause_files = list(_rcf)
+                print(f"    [phase_record] root_cause_location_files={_rcf}", flush=True)
+            _rcs = getattr(_pr, "root_cause_scope_summary", None) or ""
+            if not _rcs and hasattr(_pr, "__dict__"):
+                _rcs = _pr.__dict__.get("root_cause_scope_summary", "") or ""
+            if _rcs:
+                state._analyze_scope_summary = _rcs
         _admission = _eval_admission(
             _pr, eval_phase,
             observe_tool_signal=_obs_tool_sig,
@@ -2111,8 +2123,97 @@ def _step_cp_update_and_verdict(
                             f" count={_ph_count}/{_REPEATED_PATCH_LIMIT}",
                             flush=True,
                         )
+                    # P2: Extract patch_files deterministically from git diff
+                    _patch_files = []
+                    try:
+                        _diff_names = _env.communicate(
+                            "cd /testbed && git diff --name-only 2>/dev/null || true"
+                        )
+                        if _diff_names and _diff_names.strip():
+                            _patch_files = [
+                                f.strip() for f in _diff_names.strip().split("\n")
+                                if f.strip()
+                            ]
+                            state._last_patch_files = _patch_files
+                    except Exception:
+                        pass
         except Exception:
             pass  # non-critical — don't crash on hash check failure
+
+    # ── P2: Scope consistency gate (ANALYZE→EXECUTE file-scope) ───────
+    # If ANALYZE declared root_cause_location_files AND EXECUTE has a patch,
+    # check for zero overlap. Zero overlap = execution_scope_drift → RETRYABLE.
+    # First violation → route to DECIDE. Repeated → route to ANALYZE.
+    _P2_SCOPE_GATE_MAX = 2  # max scope drift violations before giving up
+    if (step_patch_non_empty
+            and _current_phase_str == "EXECUTE"
+            and state._analyze_root_cause_files
+            and state._last_patch_files
+            and not isinstance(_step_verdict, VerdictStop)):
+        try:
+            # Normalize: strip leading paths to get relative file paths
+            def _norm_file(f: str) -> str:
+                """Normalize to bare relative path (strip /testbed/ prefix)."""
+                f = f.strip()
+                for _prefix in ("/testbed/", "a/", "b/"):
+                    if f.startswith(_prefix):
+                        f = f[len(_prefix):]
+                return f
+
+            _analyze_files_norm = {_norm_file(f) for f in state._analyze_root_cause_files}
+            _patch_files_norm = {_norm_file(f) for f in state._last_patch_files}
+
+            _overlap = _analyze_files_norm & _patch_files_norm
+            if not _overlap:
+                # Zero overlap → scope drift detected
+                state._scope_drift_count += 1
+                _drift_n = state._scope_drift_count
+                print(
+                    f"    [P2-scope-gate] DRIFT DETECTED ({_drift_n}/{_P2_SCOPE_GATE_MAX}):"
+                    f" analyze_files={sorted(_analyze_files_norm)}"
+                    f" patch_files={sorted(_patch_files_norm)}"
+                    f" overlap=NONE",
+                    flush=True,
+                )
+                if _drift_n <= _P2_SCOPE_GATE_MAX:
+                    # Route back: first → DECIDE, repeated → ANALYZE
+                    import dataclasses as _dc_p2
+                    _target_phase = "DECIDE" if _drift_n == 1 else "ANALYZE"
+                    _cp_p2 = cp_state_holder[0] if cp_state_holder else state.cp_state
+                    _cp_p2_new = _dc_p2.replace(
+                        _cp_p2, phase=_target_phase, no_progress_steps=0
+                    )
+                    if cp_state_holder:
+                        cp_state_holder[0] = _cp_p2_new
+                    else:
+                        state.cp_state = _cp_p2_new
+                    state._execute_entry_step = -1
+
+                    _repair_hint = (
+                        f"[SCOPE DRIFT] Your patch modifies {sorted(_patch_files_norm)} "
+                        f"but ANALYZE identified root cause in {sorted(_analyze_files_norm)}. "
+                        f"Either: (1) revise the patch to target the analyzed files, or "
+                        f"(2) go back to ANALYZE and update root_cause_location_files "
+                        f"with evidence justifying a different scope."
+                    )
+                    agent_self.messages.append({
+                        "role": "user",
+                        "content": _repair_hint,
+                    })
+                    _step_verdict = VerdictContinue()
+                    print(
+                        f"    [P2-scope-gate] → routed to {_target_phase}",
+                        flush=True,
+                    )
+            else:
+                if state._scope_drift_count > 0:
+                    print(
+                        f"    [P2-scope-gate] OK: overlap={sorted(_overlap)}"
+                        f" (previous drift count={state._scope_drift_count})",
+                        flush=True,
+                    )
+        except Exception as _p2_exc:
+            print(f"    [P2-scope-gate] error (non-fatal): {_p2_exc}", flush=True)
 
     # ── Phase 2: Submission-triggered advance ─────────────────────────
     # P0.1: Now driven by immediate admission result, not raw submission peek.
@@ -2658,6 +2759,36 @@ def _step_inject_phase(agent_self, *, cp_state_holder: "list | None", state: "St
                 print(f"    [phase_injection] phase={_phase_str} skipped=dedup", flush=True)
     except Exception as _phase_exc:
         print(f"    [phase_injection] error (non-fatal): {_phase_exc}", flush=True)
+
+    # P2: Inject ANALYZE-confirmed file scope into DECIDE/EXECUTE prompts
+    try:
+        _cp_p2inj = cp_state_holder[0] if cp_state_holder is not None else state.cp_state
+        _phase_p2inj = str(_cp_p2inj.phase).upper()
+        if state.required_next_phase is not None:
+            _phase_p2inj = state.required_next_phase.upper()
+        if _phase_p2inj in ("DECIDE", "EXECUTE", "DESIGN") and state._analyze_root_cause_files:
+            _scope_key = f"{state._llm_step}:scope_constraint:{_phase_p2inj}"
+            if _scope_key not in state._injected_signals:
+                state._injected_signals.add(_scope_key)
+                _files_str = "\n".join(f"  - {f}" for f in state._analyze_root_cause_files)
+                _scope_msg = (
+                    f"[ANALYZE-confirmed root-cause files]\n{_files_str}\n"
+                )
+                if state._analyze_scope_summary:
+                    _scope_msg += f"Scope: {state._analyze_scope_summary}\n"
+                _scope_msg += (
+                    "\nYou must keep the patch consistent with this scope. "
+                    "If you believe additional files are necessary, explicitly "
+                    "justify them with new evidence before submitting."
+                )
+                agent_self.messages.append({"role": "user", "content": _scope_msg})
+                print(
+                    f"    [P2-scope-inject] phase={_phase_p2inj}"
+                    f" files={state._analyze_root_cause_files}",
+                    flush=True,
+                )
+    except Exception as _p2_inj_exc:
+        print(f"    [P2-scope-inject] error (non-fatal): {_p2_inj_exc}", flush=True)
 
     # Plan-B: set current phase + schema on model for submit_phase_record tool
     try:

@@ -120,6 +120,11 @@ class StepMonitorState:
         self._observe_tool_signal: bool = False
         # p23: causal binding — last ANALYZE root_cause, passed to EXECUTE gate.
         self.last_analyze_root_cause: str = ""
+        # P2: scope consistency gate — ANALYZE-declared root cause file scope
+        self._analyze_root_cause_files: list[str] = []
+        self._analyze_scope_summary: str = ""
+        self._last_patch_files: list[str] = []  # deterministic from git diff --name-only
+        self._scope_drift_count: int = 0  # count of scope drift violations this attempt
         # p221: per-phase accumulated assistant text for phase record extraction.
         # Agent outputs short thinking texts across many steps. Accumulate them so
         # extract_phase_record has enough material at VerdictAdvance time.
@@ -203,6 +208,9 @@ class StepMonitorState:
         state._execute_entry_step = d.get("execute_entry_step", -1)
         state._execute_write_seen = d.get("execute_write_seen", False)
         state.last_analyze_root_cause = d.get("last_analyze_root_cause", "")
+        state._analyze_root_cause_files = d.get("analyze_root_cause_files", [])
+        state._analyze_scope_summary = d.get("analyze_scope_summary", "")
+        state._scope_drift_count = d.get("scope_drift_count", 0)
         state._bypassed_principals = set(d.get("bypassed_principals", []))
         # Restore verify_history length marker (actual history not serialized)
         state._prev_verify_history_len = d.get("verify_history_len", 0)
@@ -245,6 +253,9 @@ class StepMonitorState:
             result["execute_entry_step"] = self._execute_entry_step
             result["execute_write_seen"] = self._execute_write_seen
             result["last_analyze_root_cause"] = self.last_analyze_root_cause
+            result["analyze_root_cause_files"] = self._analyze_root_cause_files
+            result["analyze_scope_summary"] = self._analyze_scope_summary
+            result["scope_drift_count"] = self._scope_drift_count
             result["bypassed_principals"] = list(self._bypassed_principals)
             # phase_records: serialize each PhaseRecord
             _prs = []
