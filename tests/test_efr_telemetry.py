@@ -68,7 +68,7 @@ def test_repair_prompt_includes_test_output():
 
 def test_repair_prompt_truncates_long_output():
     """Long test output is truncated in repair prompt."""
-    cv = {"f2p_passed": 0, "f2p_failed": 1, "output_tail": "x" * 1000}
+    cv = {"f2p_passed": 0, "f2p_failed": 1, "output_tail": "x" * 5000}
     ft = classify_failure(cv)
     routing = get_routing(ft)
     prompt = build_repair_prompt(ft, cv, routing)

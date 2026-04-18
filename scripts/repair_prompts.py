@@ -28,8 +28,8 @@ def _extract_evidence(cv_result: dict) -> dict:
         # fallback: try stdout field
         output_tail = (cv_result.get("stdout") or "").strip()
     # Truncate to reasonable size for prompt injection
-    if len(output_tail) > 400:
-        output_tail = output_tail[:400] + "..."
+    if len(output_tail) > 4000:
+        output_tail = output_tail[:4000] + "..."
     eval_resolved = cv_result.get("eval_resolved")
     return {
         "f2p_passed": f2p_passed,

@@ -1894,7 +1894,7 @@ class JinguAgent:
                             "(3) try a COMPLETELY different fix strategy targeting different logic. "
                             f"BANNED: Do not touch {', '.join(sorted(_nprg_curr_files))} "
                             "with the same change pattern."
-                        )[:600]
+                        )
                     if _nprg_l2_pre:
                         print(f"    [nprg_triggered] level=L2 action=FORCE_DIRECTION_CHANGE "
                               f"files={sorted(_nprg_curr_files)}", flush=True)
@@ -1909,7 +1909,7 @@ class JinguAgent:
                             "(2) re-read the failing test to understand what it actually checks, "
                             "(3) write a fix targeting different code. "
                             f"BANNED files: {', '.join(sorted(_nprg_curr_files))}"
-                        )[:600]
+                        )
 
             # ── Exp J: Hard similarity rejection (upgraded from Exp H) ─────────
             # After attempt 2+, measure Jaccard similarity between current and previous
@@ -2218,7 +2218,7 @@ class JinguAgent:
                                         "You must completely change your approach. "
                                         "Do NOT expand the previous change. "
                                         "Reread the failing tests from scratch and fix the actual root cause."
-                                    )[:600],
+                                    ),
                                     control_action="STOP_FAIL",
                                     principal_violations=retry_plan.principal_violations,
                                 )
@@ -2241,7 +2241,7 @@ class JinguAgent:
                                             "You must write a fundamentally different fix. "
                                             "Abandon your current hypothesis entirely. "
                                             "Reread the failing tests with fresh eyes and form a new hypothesis."
-                                        )[:600],
+                                        ),
                                         control_action="ADJUST",
                                         principal_violations=retry_plan.principal_violations,
                                     )
@@ -2276,7 +2276,7 @@ class JinguAgent:
                                                 "(3) Identify a completely different root cause. "
                                                 "(4) Write a fundamentally different fix — different file or different function. "
                                                 "Do NOT make small variations of previous patches."
-                                            )[:600],
+                                            ),
                                             control_action="ADJUST",
                                             principal_violations=retry_plan.principal_violations,
                                         )
@@ -2323,7 +2323,7 @@ class JinguAgent:
                                         f"[PREDICTION ERROR — {_pred_err_type.upper()}]\n"
                                         f"{_pred_feedback}\n\n"
                                         + retry_plan.next_attempt_prompt
-                                    )[:600],
+                                    ),
                                     control_action=retry_plan.control_action,
                                     principal_violations=retry_plan.principal_violations,
                                 )
@@ -2538,7 +2538,7 @@ class JinguAgent:
                             _approach_summary = _extract_approach_summary(jingu_body, patch, fp)
                             if _approach_summary:
                                 _past_approach_summaries.append(_approach_summary)
-                            last_failure = retry_plan.next_attempt_prompt[:600]
+                            last_failure = retry_plan.next_attempt_prompt
                             # EFR telemetry: base last_failure from retry_plan
                             print(f"    [efr-base] attempt={attempt} source=retry_plan "
                                   f"last_failure_len={len(last_failure)}", flush=True)
@@ -2634,7 +2634,7 @@ class JinguAgent:
                             _approach_summary = _extract_approach_summary(jingu_body, patch, fp)
                             if _approach_summary:
                                 _past_approach_summaries.append(_approach_summary)
-                            last_failure = exec_feedback[:400]
+                            last_failure = exec_feedback
                             print(f"    [efr-base] attempt={attempt} source=exec_feedback "
                                   f"last_failure_len={len(last_failure)}", flush=True)
                             _jb_ft = (jingu_body or {}).get("failure_type")
@@ -2732,7 +2732,7 @@ class JinguAgent:
                                     "Use git diff format exactly.")
                         else:
                             hint = f"Gate rejected patch ({codes}). Generate a better patch."
-                    last_failure = hint[:400]
+                    last_failure = hint
                     t_gate.stop()
                     continue
             else:
