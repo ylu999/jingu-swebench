@@ -2571,7 +2571,11 @@ class JinguAgent:
                             _jb_routing = (jingu_body or {}).get("failure_routing")
                             _jb_cv = (jingu_body or {}).get("controlled_verify") or {}
                             if _jb_ft and _jb_routing:
-                                _repair = build_repair_prompt(_jb_ft, _jb_cv, _jb_routing)
+                                _patch_ctx = {
+                                    "files_written": (jingu_body or {}).get("files_written"),
+                                    "patch_summary": (jingu_body or {}).get("patch_summary"),
+                                } if _jb_ft == "wrong_direction" else None
+                                _repair = build_repair_prompt(_jb_ft, _jb_cv, _jb_routing, patch_context=_patch_ctx)
                                 last_failure = _repair + "\n\n" + last_failure
                                 # p-fix: propagate repair routing target to next attempt cp_state
                                 _next_attempt_start_phase = _jb_routing['next_phase'].upper()
@@ -2637,7 +2641,11 @@ class JinguAgent:
                             _jb_routing = (jingu_body or {}).get("failure_routing")
                             _jb_cv = (jingu_body or {}).get("controlled_verify") or {}
                             if _jb_ft and _jb_routing:
-                                _repair = build_repair_prompt(_jb_ft, _jb_cv, _jb_routing)
+                                _patch_ctx = {
+                                    "files_written": (jingu_body or {}).get("files_written"),
+                                    "patch_summary": (jingu_body or {}).get("patch_summary"),
+                                } if _jb_ft == "wrong_direction" else None
+                                _repair = build_repair_prompt(_jb_ft, _jb_cv, _jb_routing, patch_context=_patch_ctx)
                                 last_failure = _repair + "\n\n" + last_failure
                                 # p-fix: propagate repair routing target to next attempt cp_state
                                 _next_attempt_start_phase = _jb_routing['next_phase'].upper()

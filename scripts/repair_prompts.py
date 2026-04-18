@@ -42,10 +42,14 @@ def _extract_evidence(cv_result: dict) -> dict:
 # Per-type repair instructions (deterministic, no LLM)
 _REPAIR_INSTRUCTIONS: dict[str, str] = {
     "wrong_direction": (
-        "Re-analyze the root cause from scratch. Your previous fix did NOT address "
-        "the actual problem — zero FAIL_TO_PASS tests passed. "
-        "Do NOT propose a fix yet. First understand WHY the tests fail, "
-        "then form a new hypothesis before writing any code."
+        "CRITICAL CONSTRAINT: Your previous fix was COMPLETELY WRONG — zero tests passed.\n"
+        "You MUST change direction. The following rules are MANDATORY:\n"
+        "1. You MUST NOT modify the same file(s) in the same way as attempt 1.\n"
+        "2. You MUST explicitly state why your previous approach was wrong.\n"
+        "3. You MUST form a NEW hypothesis about the root cause before writing code.\n"
+        "4. You MUST NOT skip re-analysis — jumping straight to code will repeat the failure.\n"
+        "If you cannot explain what was wrong with the previous approach, "
+        "you are not ready to write code."
     ),
     "incomplete_fix": (
         "Your fix made partial progress — some FAIL_TO_PASS tests now pass, "
@@ -68,7 +72,12 @@ _REPAIR_INSTRUCTIONS: dict[str, str] = {
 }
 
 
-def build_repair_prompt(failure_type: str, cv_result: dict, routing: dict) -> str:
+def build_repair_prompt(
+    failure_type: str,
+    cv_result: dict,
+    routing: dict,
+    patch_context: dict | None = None,
+) -> str:
     """Build a phase-specific repair prompt from classified failure.
 
     Args:
@@ -76,6 +85,8 @@ def build_repair_prompt(failure_type: str, cv_result: dict, routing: dict) -> st
         cv_result: The controlled_verify result dict (cv_flat from jingu_body)
         routing: The routing rule from get_routing() — contains next_phase,
                  repair_goal, required_principals
+        patch_context: Optional dict with previous attempt patch info:
+                       files_written (list[str]), patch_summary (dict)
 
     Returns:
         A non-empty repair prompt string (NBR-compliant).
@@ -118,6 +129,26 @@ def build_repair_prompt(failure_type: str, cv_result: dict, routing: dict) -> st
 
     if evidence_lines:
         parts.append("Evidence from previous attempt:\n" + "\n".join(evidence_lines))
+
+    # For wrong_direction: include previous patch context as binding constraint
+    if failure_type == "wrong_direction" and patch_context:
+        prev_files = patch_context.get("files_written") or []
+        prev_summary = patch_context.get("patch_summary") or {}
+        if prev_files:
+            constraint_lines = [
+                "PREVIOUS ATTEMPT PATCH (do NOT repeat this direction):",
+                f"  Files modified: {', '.join(prev_files)}",
+            ]
+            if prev_summary.get("lines_added") or prev_summary.get("lines_removed"):
+                constraint_lines.append(
+                    f"  Scope: {prev_summary.get('lines_added', 0)} lines added, "
+                    f"{prev_summary.get('lines_removed', 0)} lines removed"
+                )
+            constraint_lines.append(
+                "You must either fix a DIFFERENT file, or fix the same file "
+                "with a fundamentally different approach (different function/method)."
+            )
+            parts.append("\n".join(constraint_lines))
 
     result = "\n\n".join(parts)
     # NBR safety: must never return empty

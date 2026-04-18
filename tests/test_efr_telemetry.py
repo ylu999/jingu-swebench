@@ -82,3 +82,38 @@ def test_all_failure_types_have_routing():
         assert "next_phase" in routing
         assert "repair_goal" in routing
         assert routing["next_phase"] in ("ANALYZE", "DESIGN", "EXECUTE", "JUDGE")
+
+
+def test_wrong_direction_binding_constraint():
+    """wrong_direction with patch_context includes binding language and previous files."""
+    cv = {"f2p_passed": 0, "f2p_failed": 3}
+    ft = classify_failure(cv)
+    routing = get_routing(ft)
+    patch_ctx = {
+        "files_written": ["django/utils/dateparse.py"],
+        "patch_summary": {"lines_added": 1, "lines_removed": 1},
+    }
+    prompt = build_repair_prompt(ft, cv, routing, patch_context=patch_ctx)
+    assert "MUST change direction" in prompt or "MUST NOT modify the same file" in prompt
+    assert "dateparse.py" in prompt
+    assert "PREVIOUS ATTEMPT PATCH" in prompt
+
+
+def test_wrong_direction_without_patch_context():
+    """wrong_direction without patch_context still works (backward compat)."""
+    cv = {"f2p_passed": 0, "f2p_failed": 3}
+    ft = classify_failure(cv)
+    routing = get_routing(ft)
+    prompt = build_repair_prompt(ft, cv, routing)
+    assert "CRITICAL CONSTRAINT" in prompt
+    assert "PREVIOUS ATTEMPT PATCH" not in prompt
+
+
+def test_non_wrong_direction_ignores_patch_context():
+    """incomplete_fix does not include patch binding even if context provided."""
+    cv = {"f2p_passed": 3, "f2p_failed": 2}
+    ft = classify_failure(cv)
+    routing = get_routing(ft)
+    patch_ctx = {"files_written": ["foo.py"], "patch_summary": {}}
+    prompt = build_repair_prompt(ft, cv, routing, patch_context=patch_ctx)
+    assert "PREVIOUS ATTEMPT PATCH" not in prompt
