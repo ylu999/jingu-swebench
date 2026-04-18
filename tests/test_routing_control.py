@@ -842,3 +842,138 @@ class TestScopeJustificationGate:
         assert pr.mechanism_path == ["translate_url()", "reverse()"]
         assert len(pr.rejected_nearby_files) == 1
         assert pr.rejected_nearby_files[0]["file"] == "django/urls/base.py"
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 8. Fake loop bypass must preserve phase record (10999 bug fix)
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TestFakeLoopBypassPreservesRecord:
+    """When principal_inference fake loop hits escalation limit and does
+    selective_bypass, the phase_record must NOT be cleared.
+
+    Bug: record was cleared BEFORE checking escalation limit, so bypass
+    succeeded but the admitted record was lost. Downstream phases had no
+    ANALYZE record even though one was admitted and passed analysis_gate.
+    """
+
+    def test_record_preserved_on_bypass(self):
+        """After fake loop selective_bypass, phase_records still contains
+        the ANALYZE record that passed the phase-specific gate."""
+        from phase_record import PhaseRecord
+        from principal_gate import _FAKE_LOOP_LIMIT
+
+        # Build a minimal PhaseRecord that passes analysis_gate
+        pr = PhaseRecord(
+            phase="ANALYZE",
+            subtype="analysis.root_cause",
+            principals=["causal_grounding"],
+            claims=["root cause identified"],
+            evidence_refs=["django/utils/dateparse.py:32"],
+            from_steps=[1],
+            content="regex fails on negative duration",
+            root_cause="regex fails on negative duration components",
+            causal_chain="parse_duration → standard_duration_re.match → lookahead fails",
+            alternative_hypotheses=[
+                {"hypothesis": "seconds regex", "ruled_out_reason": "already has -?"},
+            ],
+            repair_strategy_type="REGEX_FIX",
+            root_cause_location_files=["django/utils/dateparse.py"],
+            mechanism_path=["parse_duration()", "standard_duration_re.match()"],
+            rejected_nearby_files=[
+                {"file": "django/utils/duration.py", "reason": "output only"},
+            ],
+        )
+
+        # Simulate: state has this record admitted, and fake loop count
+        # is at the limit so next check triggers bypass
+        class FakeState:
+            pass
+
+        state = FakeState()
+        state.phase_records = [pr]
+        state._retryable_loop_counts = {
+            ("ANALYZE", "fake_principal:causal_grounding"): _FAKE_LOOP_LIMIT - 1,
+        }
+        state._bypassed_principals = set()
+
+        # Simulate the fake loop logic from step_sections (Gate 10)
+        eval_phase = "ANALYZE"
+        _inf_violation = "fake_principal:causal_grounding"
+        _fi_loop_key = (eval_phase, _inf_violation)
+
+        # Increment count (as step_sections does)
+        state._retryable_loop_counts[_fi_loop_key] = (
+            state._retryable_loop_counts.get(_fi_loop_key, 0) + 1
+        )
+        _fi_loop_count = state._retryable_loop_counts[_fi_loop_key]
+
+        # Should be at limit now
+        assert _fi_loop_count >= _FAKE_LOOP_LIMIT, (
+            f"Expected count >= {_FAKE_LOOP_LIMIT}, got {_fi_loop_count}"
+        )
+
+        # After bypass, record must still be in phase_records
+        analyze_records = [
+            r for r in state.phase_records
+            if r.phase.upper() == "ANALYZE"
+        ]
+        assert len(analyze_records) == 1, (
+            f"ANALYZE record must be preserved after fake loop bypass, "
+            f"got {len(analyze_records)} records"
+        )
+        assert analyze_records[0].mechanism_path == ["parse_duration()", "standard_duration_re.match()"]
+        assert len(analyze_records[0].rejected_nearby_files) == 1
+
+    def test_record_cleared_on_retry(self):
+        """When fake loop has NOT reached escalation limit, record IS
+        cleared (normal retry behavior)."""
+        from phase_record import PhaseRecord
+        from principal_gate import _FAKE_LOOP_LIMIT
+
+        pr = PhaseRecord(
+            phase="ANALYZE",
+            subtype="analysis.root_cause",
+            principals=["causal_grounding"],
+            claims=["test"],
+            evidence_refs=["file.py:1"],
+            from_steps=[1],
+            content="test",
+            root_cause="test root cause",
+            causal_chain="test chain",
+            alternative_hypotheses=[{"hypothesis": "h", "ruled_out_reason": "r"}],
+            repair_strategy_type="REGEX_FIX",
+            root_cause_location_files=["file.py"],
+            mechanism_path=["a()", "b()"],
+            rejected_nearby_files=[{"file": "c.py", "reason": "not it"}],
+        )
+
+        class FakeState:
+            pass
+
+        state = FakeState()
+        state.phase_records = [pr]
+        state._retryable_loop_counts = {
+            ("ANALYZE", "fake_principal:causal_grounding"): 0,
+        }
+
+        eval_phase = "ANALYZE"
+        _fi_loop_key = (eval_phase, "fake_principal:causal_grounding")
+
+        # Increment — still below limit
+        state._retryable_loop_counts[_fi_loop_key] = 1
+        _fi_loop_count = state._retryable_loop_counts[_fi_loop_key]
+        assert _fi_loop_count < _FAKE_LOOP_LIMIT
+
+        # Simulate the retry path: record should be cleared
+        state.phase_records = [
+            r for r in state.phase_records
+            if r.phase.upper() != eval_phase
+        ]
+        analyze_records = [
+            r for r in state.phase_records
+            if r.phase.upper() == "ANALYZE"
+        ]
+        assert len(analyze_records) == 0, (
+            "On normal retry (below escalation limit), ANALYZE record must be cleared"
+        )

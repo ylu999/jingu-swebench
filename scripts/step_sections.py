@@ -1437,10 +1437,6 @@ def evaluate_transition(
                 f" violation={_inf_violation} repair={_inf_repair}",
                 flush=True,
             )
-            state.phase_records = [
-                r for r in state.phase_records
-                if r.phase.upper() != eval_phase
-            ]
             _fi_loop_key = (eval_phase, _inf_violation)
             state._retryable_loop_counts[_fi_loop_key] = (
                 state._retryable_loop_counts.get(_fi_loop_key, 0) + 1
@@ -1479,12 +1475,16 @@ def evaluate_transition(
                     f" phase={eval_phase} violation={_inf_violation}"
                     f" count={_fi_loop_count} >= {_FAKE_LOOP_LIMIT}"
                     f" → bypassed_principals={_fi_esc.bypassed_principals}"
-                    f" (selective bypass, other principals still enforced)",
+                    f" (selective bypass, record preserved, other principals still enforced)",
                     flush=True,
                 )
                 state.pending_redirect_hint = ""
             else:
-                # Fake check rejected but not yet at escalation limit
+                # Fake check rejected but not yet at escalation limit — clear record for retry
+                state.phase_records = [
+                    r for r in state.phase_records
+                    if r.phase.upper() != eval_phase
+                ]
                 result.verdict = "retry"
                 result.source = "gate_rejection"
                 result.reason = f"fake_principal:{_inf_violation}"
