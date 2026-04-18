@@ -174,3 +174,31 @@ The 3 simplest routes are already wired:
 
 **Outcome:** O1=60% (vs 65% baseline = -5%, within noise). No flips (O2=0), no regressions (O3=0).
 **Note:** All 6 resolved instances resolved on attempt 1. No attempt-2 rescues in this batch.
+
+### Batch B (efr-batch-b): 10 instances (11119-11239)
+- **Commit:** 9db8683 (same as Batch A)
+- **Batch task:** 65bf2d8f038b4a7fb61e8dc2bee90dd9
+- **Eval:** 7/10 resolved (70.0%)
+- **Resolved:** 11119, 11133, 11163, 11179, 11206, 11211, 11239
+- **Unresolved:** 11138, 11141, 11149 (all wrong_patch)
+
+**New failure type observed: `verify_gap`** — F2P all pass but eval_resolved=False (P2P regression).
+- 3 instances had verify_gap on attempt 1
+- verify_gap routes to EXECUTE (same-phase, cross_phase=False)
+
+**EFR Signal Metrics (Batch B):**
+
+| Metric | Value | Pass? |
+|--------|-------|-------|
+| S1 efr_emit | 5/5 failed (100%) | ✅ |
+| S2 efr_consume | 5/5 (100%) | ✅ |
+| S3 cross_phase | 2/5 (40% — verify_gap routes same-phase) | ✅ (>0%) |
+| S4 efr_ack | 3/3 multi-attempt with ack (100%) | ✅ |
+
+### Combined A+B Summary (20 instances)
+- **Resolved:** 13/20 (65.0%) — matches baseline exactly
+- **Failure types seen:** wrong_direction (6), incomplete_fix (2), verify_gap (3)
+- **All 4 EFR signals fire at 100% on multi-attempt instances**
+- **efr-ack entered prescribed phase: 100%**
+- **No regressions (O3=0), no flips yet (O2=0)**
+- **Baseline comparison:** 65% = 65% baseline — no regression, no improvement yet
