@@ -98,3 +98,38 @@ The 3 simplest routes are already wired:
 6. Smoke 2/3
 7. Batch A/B
 8. 20-instance integration batch
+
+## Results
+
+### Smoke 0 (efr-smoke-1): django__django-11095
+- **Commit:** f0d2fec
+- **Result:** Resolved on attempt 1 → no EFR signals (no failure → no feedback)
+- **Learning:** Need an instance that fails attempt 1 to test EFR chain
+
+### Smoke 1 (efr-smoke-2): django__django-10097
+- **Commit:** f0d2fec (pre-fix)
+- **Result:** CRASHED — `name 'cp_state_holder' is not defined` in [efr-emit]
+- **Fix:** commit f0fd8f2 — use `self._cp_state_holder` instead of local `cp_state_holder`
+- **Learning:** [efr-emit] is in `run_attempt()` scope, not `run_with_jingu()` where local var lives
+
+### Smoke 2 (efr-smoke-3): django__django-10097
+- **Commit:** f0fd8f2 (fix 1 applied)
+- **Result:** ALL SIGNALS PRESENT but [efr-ack] shows prescribed_phase=OBSERVE (wrong)
+- **Fix:** commit 62e3ad0 — move ack save to end of attempt loop (after routing)
+- **Signals observed:**
+  - `[efr-emit]` ✅ failure_type=incomplete_fix, cross_phase=True
+  - `[efr-consume]` ✅ repair_len=876, has_evidence=True, has_phase_decl=True
+  - `[efr-ack]` ⚠️ prescribed_phase=OBSERVE (should be DESIGN/ANALYZE)
+
+### Smoke 3 (efr-smoke-4): django__django-10097 — DEFINITIVE
+- **Commit:** 62e3ad0
+- **Task:** ea051848282f4700a170dc4e13fe4b56
+- **Result:** ALL SIGNALS CORRECT
+- **Signals:**
+  - `[efr-emit]` ✅ failure_type=incomplete_fix repair_target=DESIGN cross_phase=True evidence_quality=rich
+  - `[efr-base]` ✅ source=retry_plan last_failure_len=600
+  - `[efr-consume]` ✅ failure_type=incomplete_fix repair_len=876 has_evidence=True has_phase_decl=True
+  - `[efr-ack]` ✅ prescribed_phase=ANALYZE entered=True first_phase=ANALYZE
+- **Phase routing:** incomplete_fix → DESIGN (in failure_routing) → ANALYZE (protocol-route override)
+- **Ack validation:** Agent entered prescribed ANALYZE phase as first phase ✅
+- **Eval:** 0/1 resolved (10097 historically hard — not an EFR issue)
