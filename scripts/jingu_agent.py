@@ -1729,9 +1729,8 @@ class JinguAgent:
                 print(f"    [efr-ack] attempt={attempt} prescribed_phase={_next_attempt_start_phase_for_ack} "
                       f"entered={_entered_prescribed} first_phase={_first_phase} "
                       f"all_phases={_entered_phases} failure_type={_last_failure_type}", flush=True)
-            # Save prescribed phase for next attempt's ack check
-            if attempt < self._max_attempts:
-                _next_attempt_start_phase_for_ack = _next_attempt_start_phase
+            # NOTE: _next_attempt_start_phase_for_ack is saved at end of loop
+            # (after all routing logic has set _next_attempt_start_phase)
 
             # Early stop verdict handling
             if _attempt_monitor is not None and _attempt_monitor.early_stop_verdict is not None:
@@ -2869,6 +2868,10 @@ class JinguAgent:
                 pass
             except Exception as _proto_route_exc:
                 print(f"    [protocol-route] error (non-fatal): {_proto_route_exc}", flush=True)
+
+            # Save prescribed phase for next attempt's ack check (must be after all routing)
+            if attempt < self._max_attempts:
+                _next_attempt_start_phase_for_ack = _next_attempt_start_phase
 
         t_inst.stop()
 
