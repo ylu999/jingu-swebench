@@ -1,7 +1,7 @@
 {
   "version": "1.0.0",
   "compiler_version": "0.1.0",
-  "generated_at": "2026-04-17T03:22:56.131268+00:00",
+  "generated_at": "2026-04-18T01:45:54.234896+00:00",
   "generator_commit": "1ffc8dc",
   "capabilities": [
     "prompt_only",
@@ -22,7 +22,7 @@
     "observation.fact_gathering": {
       "phase": "OBSERVE",
       "subtype": "observation.fact_gathering",
-      "compiled_at": "2026-04-17T03:22:56.129132+00:00",
+      "compiled_at": "2026-04-18T01:45:54.229210+00:00",
       "phase_spec": {
         "name": "OBSERVE",
         "goal": "Gather evidence from the environment: read files, traces, logs, tests.",
@@ -170,7 +170,7 @@
     "analysis.root_cause": {
       "phase": "ANALYZE",
       "subtype": "analysis.root_cause",
-      "compiled_at": "2026-04-17T03:22:56.129928+00:00",
+      "compiled_at": "2026-04-18T01:45:54.231311+00:00",
       "phase_spec": {
         "name": "ANALYZE",
         "goal": "Root-cause analysis: connect evidence to a causal hypothesis.",
@@ -219,6 +219,13 @@
           ]
         },
         {
+          "name": "alternative_hypothesis_check",
+          "role": "required",
+          "applies_to": [
+            "analysis.root_cause"
+          ]
+        },
+        {
           "name": "ontology_alignment",
           "role": "expected",
           "applies_to": [
@@ -227,13 +234,6 @@
         },
         {
           "name": "phase_boundary_discipline",
-          "role": "expected",
-          "applies_to": [
-            "analysis.root_cause"
-          ]
-        },
-        {
-          "name": "alternative_hypothesis_check",
           "role": "expected",
           "applies_to": [
             "analysis.root_cause"
@@ -329,7 +329,7 @@
               ]
             },
             "minItems": 1,
-            "description": "At least 1 alternative hypothesis with rejection reasoning \u2014 prevents premature trajectory collapse"
+            "description": "At least 1 alternative hypothesis with rejection reasoning — prevents premature trajectory collapse"
           },
           "invariant_capture": {
             "type": "object",
@@ -351,6 +351,19 @@
               "risk_if_violated"
             ],
             "description": "Behavioral constraints the fix must preserve. What must remain true after the fix? What invalid behavior must still be rejected? What valid behavior must remain accepted?"
+          },
+          "root_cause_location_files": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "minItems": 1,
+            "description": "Files where the root cause lives (e.g. ['django/urls/resolvers.py']). Downstream phases (DECIDE/EXECUTE) must keep patches consistent with this scope. If your patch targets different files, you must justify the deviation with new evidence."
+          },
+          "root_cause_scope_summary": {
+            "type": "string",
+            "minLength": 10,
+            "description": "One-sentence summary of where the bug lives and what layer it belongs to. Used to ground downstream DECIDE/EXECUTE phases."
           },
           "repair_strategy_type": {
             "type": "string",
@@ -381,10 +394,11 @@
           "evidence_refs",
           "alternative_hypotheses",
           "repair_strategy_type",
+          "root_cause_location_files",
           "principals"
         ]
       },
-      "prompt": "## Phase: ANALYZE\nGoal: Root-cause analysis: connect evidence to a causal hypothesis.\nSubtype: analysis.root_cause (root_cause)\n\n## Required Fields\n- root_cause\n- causal_chain\n- evidence_refs\n- alternative_hypotheses\n\n## Forbidden Moves\n- do not write code\n- do not skip evidence\n- do not jump to a fix without causal reasoning\n\n## Required Principals\nYou MUST declare: causal_grounding, evidence_linkage, alternative_hypothesis_check\n\n## Forbidden Principals\nDo NOT declare: action_grounding, minimal_change\n\n## Guidance\nIdentify the root cause with causal evidence. Do NOT write any fix yet.\n\nInvestigate the code, then call submit_phase_record with your findings.\n\nRules: Do NOT propose fixes here. Focus on understanding why the test fails.\n\nIf any required field is missing or empty, you will be returned to ANALYZE.\n\nYou MUST explicitly declare your repair strategy type. Choose exactly one:\n  REPAIR_STRATEGY_TYPE: REGEX_FIX | PARSER_REWRITE | DATAFLOW_FIX | STATE_COPY_FIX | INVARIANT_FIX | MISSING_SECONDARY_FIX | API_CONTRACT_FIX\nThis field is REQUIRED. If missing, your analysis will be REJECTED.",
+      "prompt": "## Phase: ANALYZE\nGoal: Root-cause analysis: connect evidence to a causal hypothesis.\nSubtype: analysis.root_cause (root_cause)\n\n## Required Fields\n- root_cause\n- causal_chain\n- evidence_refs\n- alternative_hypotheses\n\n## Forbidden Moves\n- do not write code\n- do not skip evidence\n- do not jump to a fix without causal reasoning\n\n## Required Principals\nYou MUST declare: causal_grounding, evidence_linkage, alternative_hypothesis_check\n\n## Forbidden Principals\nDo NOT declare: action_grounding, minimal_change\n\n## Guidance\nIdentify the root cause with causal evidence. Do NOT write any fix yet.\n\nInvestigate the code, then call submit_phase_record with your findings.\n\nRules: Do NOT propose fixes here. Focus on understanding why the test fails.\n\nIf any required field is missing or empty, you will be returned to ANALYZE.\n\nYou MUST explicitly declare your repair strategy type. Choose exactly one:\n  REPAIR_STRATEGY_TYPE: REGEX_FIX | PARSER_REWRITE | DATAFLOW_FIX | STATE_COPY_FIX | INVARIANT_FIX | MISSING_SECONDARY_FIX | API_CONTRACT_FIX\nThis field is REQUIRED. If missing, your analysis will be REJECTED.\n\nYou MUST declare root_cause_location_files: the file(s) where the bug lives.\nDownstream DECIDE/EXECUTE phases are CONSTRAINED to this file scope.\nIf the patch later targets different files, it will be REJECTED unless\nyou update the analysis with new evidence justifying the scope change.",
       "repair_templates": {
         "code_grounding": {
           "hint": "Point to exact code location (file:line or function name) causing the issue",
@@ -421,15 +435,15 @@
             "next_phase": "OBSERVE",
             "strategy": "redirect to OBSERVE for repair"
           },
+          "alternative_hypothesis_check": {
+            "next_phase": "OBSERVE",
+            "strategy": "redirect to OBSERVE for repair"
+          },
           "ontology_alignment": {
             "next_phase": "OBSERVE",
             "strategy": "redirect to OBSERVE for repair"
           },
           "phase_boundary_discipline": {
-            "next_phase": "OBSERVE",
-            "strategy": "redirect to OBSERVE for repair"
-          },
-          "alternative_hypothesis_check": {
             "next_phase": "OBSERVE",
             "strategy": "redirect to OBSERVE for repair"
           },
@@ -447,7 +461,7 @@
     "decision.fix_direction": {
       "phase": "DECIDE",
       "subtype": "decision.fix_direction",
-      "compiled_at": "2026-04-17T03:22:56.130257+00:00",
+      "compiled_at": "2026-04-18T01:45:54.232190+00:00",
       "phase_spec": {
         "name": "DECIDE",
         "goal": "Choose the fix direction based on analysis.",
@@ -616,7 +630,7 @@
     "design.solution_shape": {
       "phase": "DESIGN",
       "subtype": "design.solution_shape",
-      "compiled_at": "2026-04-17T03:22:56.130602+00:00",
+      "compiled_at": "2026-04-18T01:45:54.232935+00:00",
       "phase_spec": {
         "name": "DESIGN",
         "goal": "Design the solution shape before writing code.",
@@ -790,7 +804,7 @@
     "execution.code_patch": {
       "phase": "EXECUTE",
       "subtype": "execution.code_patch",
-      "compiled_at": "2026-04-17T03:22:56.130927+00:00",
+      "compiled_at": "2026-04-18T01:45:54.233778+00:00",
       "phase_spec": {
         "name": "EXECUTE",
         "goal": "Write the minimal code patch that fixes the issue.",
@@ -905,11 +919,6 @@
           "hint": "List the files your patch modifies in files_modified",
           "field": "files_modified",
           "threshold": 0.5
-        },
-        "check_fake_principals": {
-          "hint": "Your EXECUTE submission must demonstrate action_grounding: (1) patch_description must explain WHAT the patch does and WHY it fixes the root cause (>= 20 chars with causal reasoning), (2) files_modified must list the actual files changed, (3) evidence_refs should reference specific code locations. Also ensure principals field contains principal NAMES (e.g. minimal_change, action_grounding) not descriptions.",
-          "field": "patch_description",
-          "threshold": 0.5
         }
       },
       "routing": {
@@ -932,7 +941,7 @@
     "judge.verification": {
       "phase": "JUDGE",
       "subtype": "judge.verification",
-      "compiled_at": "2026-04-17T03:22:56.131260+00:00",
+      "compiled_at": "2026-04-18T01:45:54.234872+00:00",
       "phase_spec": {
         "name": "JUDGE",
         "goal": "Verify the fix: run tests, check correctness, assess completeness.",
