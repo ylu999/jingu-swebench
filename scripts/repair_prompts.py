@@ -116,21 +116,7 @@ def build_repair_prompt(
     if instruction:
         parts.append(instruction)
 
-    # Evidence section
-    evidence_lines = []
-    evidence_lines.append(
-        f"F2P results: {evidence['f2p_passed']} passed, "
-        f"{evidence['f2p_failed']} failed"
-    )
-    if evidence["eval_resolved"] is not None:
-        evidence_lines.append(f"Eval resolved: {evidence['eval_resolved']}")
-    if evidence["failing_tests"]:
-        evidence_lines.append(f"Test output:\n{evidence['failing_tests']}")
-
-    if evidence_lines:
-        parts.append("Evidence from previous attempt:\n" + "\n".join(evidence_lines))
-
-    # For wrong_direction: include previous patch context as binding constraint
+    # For wrong_direction: patch constraint BEFORE evidence (survives truncation)
     if failure_type == "wrong_direction" and patch_context:
         prev_files = patch_context.get("files_written") or []
         prev_summary = patch_context.get("patch_summary") or {}
@@ -149,6 +135,20 @@ def build_repair_prompt(
                 "with a fundamentally different approach (different function/method)."
             )
             parts.append("\n".join(constraint_lines))
+
+    # Evidence section (at end — may be truncated, that's OK)
+    evidence_lines = []
+    evidence_lines.append(
+        f"F2P results: {evidence['f2p_passed']} passed, "
+        f"{evidence['f2p_failed']} failed"
+    )
+    if evidence["eval_resolved"] is not None:
+        evidence_lines.append(f"Eval resolved: {evidence['eval_resolved']}")
+    if evidence["failing_tests"]:
+        evidence_lines.append(f"Test output:\n{evidence['failing_tests']}")
+
+    if evidence_lines:
+        parts.append("Evidence from previous attempt:\n" + "\n".join(evidence_lines))
 
     result = "\n\n".join(parts)
     # NBR safety: must never return empty
