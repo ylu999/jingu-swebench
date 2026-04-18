@@ -43,6 +43,8 @@ class PhaseRecord:
     alternative_hypotheses: list[dict] = field(default_factory=list)  # [{hypothesis, ruled_out_reason}]
     repair_strategy_type: str = ""  # ANALYZE: enum from REPAIR_STRATEGY_TYPES
     root_cause_location_files: list[str] = field(default_factory=list)  # ANALYZE: files where root cause lives
+    mechanism_path: list[str] = field(default_factory=list)  # ANALYZE: code path from symptom to mechanism
+    rejected_nearby_files: list[dict] = field(default_factory=list)  # ANALYZE: [{file, reason}]
     # DECIDE
     options: list[dict] = field(default_factory=list)  # [{name, pros: str[], cons: str[]}]
     chosen: str = ""
@@ -95,6 +97,10 @@ class PhaseRecord:
             d["repair_strategy_type"] = self.repair_strategy_type
         if self.root_cause_location_files:
             d["root_cause_location_files"] = self.root_cause_location_files
+        if self.mechanism_path:
+            d["mechanism_path"] = self.mechanism_path
+        if self.rejected_nearby_files:
+            d["rejected_nearby_files"] = self.rejected_nearby_files
         # DECIDE
         if self.options:
             d["options"] = self.options

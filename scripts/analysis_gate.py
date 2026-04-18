@@ -348,12 +348,42 @@ def evaluate_analysis(pr: PhaseRecord, *, structured_output: bool = False, compi
             "soft: root_cause_location_files missing — downstream scope gate disabled"
         )
 
+    # Rule 7: scope_justification (P3 — root-cause correctness gate)
+    # Trigger: single root-cause file + no rejected_nearby_files + no mechanism_path
+    # This catches symptom-layer analysis: agent stops at the caller/wrapper instead
+    # of tracing to the actual mechanism. Only fires when single file declared.
+    _mechanism_path = getattr(pr, "mechanism_path", None) or []
+    _rejected_nearby = getattr(pr, "rejected_nearby_files", None) or []
+    _has_mechanism = len(_mechanism_path) >= 2  # at least 2 hops (symptom -> mechanism)
+    _has_rejected = any(
+        isinstance(r, dict) and len((r.get("reason") or "").strip()) > 5
+        for r in _rejected_nearby
+    )
+    if len(_rcf) == 1 and not _has_mechanism and not _has_rejected:
+        score7 = 0.0
+    elif len(_rcf) == 1 and (_has_mechanism or _has_rejected):
+        score7 = 0.5 if not (_has_mechanism and _has_rejected) else 1.0
+    else:
+        # Multiple files or no files: gate not applicable
+        score7 = 1.0
+    scores["scope_justification"] = score7
+
+    # P3 enforcement: v0 = always soft (score-only, never hard-reject).
+    # Collects baseline data on mechanism_path/rejected_nearby_files adoption.
+    # Promote to hard gate after validating on real trajectories.
+    if score7 < _THRESHOLD:
+        scores["scope_justification_note"] = (
+            "soft_v0: scope justification missing — score recorded, not blocking"
+        )
+
     extracted = {
         "root_cause": pr.root_cause[:100] if pr.root_cause else "",
         "causal_chain": pr.causal_chain[:100] if pr.causal_chain else "",
         "invariant_capture": pr.invariant_capture if pr.invariant_capture else {},
         "repair_strategy_type": _strategy,
         "root_cause_location_files": _rcf,
+        "mechanism_path": _mechanism_path,
+        "rejected_nearby_files": _rejected_nearby,
     }
 
     # p217: Build structured GateRejection on failure (when SDG enabled)

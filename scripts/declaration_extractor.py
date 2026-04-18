@@ -340,6 +340,18 @@ def build_phase_record_from_structured(
             _file_patterns = re.findall(r'(?:/testbed/)?([a-zA-Z_][\w/]*\.(?:py|js|ts|go|rs|java|c|cpp|h|rb))\b', _rc_text)
             root_cause_location_files = list(dict.fromkeys(_file_patterns))[:5]  # dedupe, max 5
 
+    # P3: mechanism_path and rejected_nearby_files
+    raw_mechanism_path = parsed.get("mechanism_path", [])
+    mechanism_path = raw_mechanism_path if isinstance(raw_mechanism_path, list) else []
+    mechanism_path = [str(m).strip() for m in mechanism_path if m][:10]
+
+    raw_rejected_nearby = parsed.get("rejected_nearby_files", [])
+    rejected_nearby_files = raw_rejected_nearby if isinstance(raw_rejected_nearby, list) else []
+    rejected_nearby_files = [
+        r for r in rejected_nearby_files
+        if isinstance(r, dict) and r.get("file") and r.get("reason")
+    ]
+
     # DECIDE
     raw_options = parsed.get("options", [])
     options = raw_options if isinstance(raw_options, list) else []
@@ -393,6 +405,8 @@ def build_phase_record_from_structured(
         alternative_hypotheses=alternative_hypotheses,
         repair_strategy_type=repair_strategy_type,
         root_cause_location_files=root_cause_location_files,
+        mechanism_path=mechanism_path,
+        rejected_nearby_files=rejected_nearby_files,
         options=options,
         chosen=chosen,
         rationale=rationale,

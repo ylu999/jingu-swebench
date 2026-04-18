@@ -728,3 +728,114 @@ class TestScopeConsistencyGate:
         assert d["analyze_root_cause_files"] == ["django/urls/resolvers.py"]
         assert d["analyze_scope_summary"] == "Bug in match()"
         assert d["scope_drift_count"] == 1
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# P3: Scope Justification Gate (root-cause correctness)
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TestScopeJustificationGate:
+    """P3 v0: scope_justification checks single-file analysis has mechanism justification."""
+
+    def _make_pr(self, **overrides):
+        from phase_record import PhaseRecord
+        defaults = dict(
+            phase="ANALYZE",
+            subtype="analysis.root_cause",
+            principals=["causal_grounding"],
+            claims=[],
+            evidence_refs=["django/urls/resolvers.py:618"],
+            from_steps=[1, 2],
+            content="Analysis content",
+            root_cause="In django/urls/resolvers.py the _reverse_with_prefix method...",
+            causal_chain="test -> translate_url -> reverse -> _reverse_with_prefix -> symmetric_difference check fails",
+            invariant_capture={},
+            repair_strategy_type="INVARIANT_FIX",
+            root_cause_location_files=["django/urls/resolvers.py"],
+            mechanism_path=[],
+            rejected_nearby_files=[],
+        )
+        defaults.update(overrides)
+        return PhaseRecord(**defaults)
+
+    def test_single_file_no_justification_scores_zero(self):
+        """Single file + no mechanism_path + no rejected_nearby → score=0."""
+        from analysis_gate import evaluate_analysis
+        pr = self._make_pr()
+        v = evaluate_analysis(pr)
+        assert v.scores["scope_justification"] == 0.0
+        # v0: soft gate, should NOT hard-reject
+        assert "scope_justification" not in v.failed_rules
+
+    def test_single_file_with_mechanism_path_scores_half(self):
+        """Single file + mechanism_path (no rejected) → score=0.5."""
+        from analysis_gate import evaluate_analysis
+        pr = self._make_pr(mechanism_path=["translate_url()", "reverse()", "RegexPattern.match()"])
+        v = evaluate_analysis(pr)
+        assert v.scores["scope_justification"] == 0.5
+
+    def test_single_file_with_both_scores_full(self):
+        """Single file + mechanism_path + rejected_nearby → score=1.0."""
+        from analysis_gate import evaluate_analysis
+        pr = self._make_pr(
+            mechanism_path=["translate_url()", "reverse()", "RegexPattern.match()"],
+            rejected_nearby_files=[{
+                "file": "django/urls/base.py",
+                "reason": "caller/symptom layer only; does not define matching logic",
+            }],
+        )
+        v = evaluate_analysis(pr)
+        assert v.scores["scope_justification"] == 1.0
+
+    def test_multiple_files_always_passes(self):
+        """Multiple root_cause_location_files → gate not applicable, score=1.0."""
+        from analysis_gate import evaluate_analysis
+        pr = self._make_pr(
+            root_cause_location_files=["django/urls/resolvers.py", "django/urls/base.py"],
+        )
+        v = evaluate_analysis(pr)
+        assert v.scores["scope_justification"] == 1.0
+
+    def test_no_files_always_passes(self):
+        """No root_cause_location_files → gate not applicable, score=1.0."""
+        from analysis_gate import evaluate_analysis
+        pr = self._make_pr(root_cause_location_files=[])
+        v = evaluate_analysis(pr)
+        assert v.scores["scope_justification"] == 1.0
+
+    def test_v0_never_hard_rejects(self):
+        """P3 v0 is soft-only: even worst case should not appear in failed_rules."""
+        from analysis_gate import evaluate_analysis
+        pr = self._make_pr()  # single file, no justification
+        v = evaluate_analysis(pr)
+        assert "scope_justification" not in v.failed_rules
+        assert "scope_justification_note" in v.scores
+
+    def test_schema_includes_p3_fields(self):
+        """ANALYZE contract schema must include mechanism_path and rejected_nearby_files."""
+        from cognition_contracts.analysis_root_cause import SCHEMA_PROPERTIES
+        assert "mechanism_path" in SCHEMA_PROPERTIES
+        assert "rejected_nearby_files" in SCHEMA_PROPERTIES
+
+    def test_declaration_extractor_extracts_p3_fields(self):
+        """declaration_extractor must pass through mechanism_path and rejected_nearby_files."""
+        from declaration_extractor import build_phase_record_from_structured
+        pr = build_phase_record_from_structured(
+            parsed={
+                "root_cause": "In django/urls/resolvers.py the match fails",
+                "causal_chain": "test -> resolve -> match -> fail",
+                "evidence_refs": ["resolvers.py:618"],
+                "alternative_hypotheses": [{"hypothesis": "h1", "ruled_out_reason": "r1"}],
+                "repair_strategy_type": "INVARIANT_FIX",
+                "principals": ["causal_grounding"],
+                "root_cause_location_files": ["django/urls/resolvers.py"],
+                "mechanism_path": ["translate_url()", "reverse()"],
+                "rejected_nearby_files": [
+                    {"file": "django/urls/base.py", "reason": "symptom only"}
+                ],
+            },
+            phase="ANALYZE",
+        )
+        assert pr.mechanism_path == ["translate_url()", "reverse()"]
+        assert len(pr.rejected_nearby_files) == 1
+        assert pr.rejected_nearby_files[0]["file"] == "django/urls/base.py"

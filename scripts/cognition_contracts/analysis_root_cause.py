@@ -107,6 +107,18 @@ FIELD_SPECS: list[FieldSpec] = [
         required=False,
         semantic_check="invariant_identified",
     ),
+    FieldSpec(
+        name="mechanism_path",
+        description="Code path from symptom to mechanism (e.g. caller -> resolver -> matcher)",
+        required=False,
+        semantic_check="traces_to_mechanism",
+    ),
+    FieldSpec(
+        name="rejected_nearby_files",
+        description="Files considered but rejected as root cause, with reasons",
+        required=False,
+        semantic_check="justifies_scope_choice",
+    ),
 ]
 
 # Convenience: name -> FieldSpec lookup
@@ -147,6 +159,16 @@ GATE_RULES: list[GateRule] = [
             "What valid behavior must remain accepted?"
         ),
     ),
+    GateRule(
+        name="scope_justification",
+        field="rejected_nearby_files",
+        repair_hint=(
+            "You identified a single root-cause file but did not justify why it is "
+            "the mechanism, not just the symptom. Provide: (1) mechanism_path tracing "
+            "from symptom to actual mechanism, (2) at least 1 rejected_nearby_files "
+            "entry explaining why a nearby file (caller/wrapper) is NOT the root cause."
+        ),
+    ),
 ]
 
 GATE_RULE_MAP: dict[str, GateRule] = {r.name: r for r in GATE_RULES}
@@ -179,7 +201,15 @@ PROMPT_GUIDANCE = (
     "You MUST declare root_cause_location_files: the file(s) where the bug lives.\n"
     "Downstream DECIDE/EXECUTE phases are CONSTRAINED to this file scope.\n"
     "If the patch later targets different files, it will be REJECTED unless\n"
-    "you update the analysis with new evidence justifying the scope change.\n"
+    "you update the analysis with new evidence justifying the scope change.\n\n"
+    "ROOT-CAUSE SCOPE JUSTIFICATION (P3):\n"
+    "If you identify a SINGLE root cause file, you MUST also provide:\n"
+    "  - mechanism_path: the code path from symptom to mechanism\n"
+    "    (e.g. ['translate_url()', 'reverse()', 'RegexPattern.match()'])\n"
+    "  - rejected_nearby_files: at least 1 file you considered but rejected,\n"
+    "    with reason (e.g. 'caller/symptom layer only, delegates to X')\n"
+    "This proves you traced past the symptom layer to the actual mechanism.\n"
+    "If missing, your analysis will be returned for deeper investigation.\n"
 )
 # NOTE: Field descriptions are NO LONGER listed here. They are rendered at
 # runtime from the bundle schema by schema_field_guidance.render_schema_field_guidance().
@@ -269,6 +299,33 @@ SCHEMA_PROPERTIES: dict = {
         "description": (
             "One-sentence summary of where the bug lives and what layer it belongs to. "
             "Used to ground downstream DECIDE/EXECUTE phases."
+        ),
+    },
+    "mechanism_path": {
+        "type": "array",
+        "items": {"type": "string"},
+        "description": (
+            "The code path through which the error occurs, from symptom to mechanism. "
+            "e.g. ['translate_url()', 'reverse()', 'RegexPattern.match()']. "
+            "Must trace from the observable symptom down to the actual mechanism "
+            "that produces incorrect behavior."
+        ),
+    },
+    "rejected_nearby_files": {
+        "type": "array",
+        "items": {
+            "type": "object",
+            "properties": {
+                "file": {"type": "string"},
+                "reason": {"type": "string"},
+            },
+            "required": ["file", "reason"],
+        },
+        "description": (
+            "Files considered but rejected as root cause location. "
+            "For each: the file path and why it is NOT the root cause "
+            "(e.g. 'caller/symptom layer only', 'wrapper that delegates to X'). "
+            "At least 1 required when root_cause_location_files has a single file."
         ),
     },
     "repair_strategy_type": {
