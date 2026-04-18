@@ -1317,7 +1317,7 @@ class JinguAgent:
                               f"f2p_fail={cv_flat.get('f2p_failed', 0)}", flush=True)
                         # EFR telemetry: structured feedback emission
                         _evidence_quality = "rich" if cv_flat.get("output_tail") or cv_flat.get("stdout") else "counts_only"
-                        _current_phase = str(cp_state_holder[0].phase).upper() if cp_state_holder else "?"
+                        _current_phase = str(self._cp_state_holder[0].phase).upper() if self._cp_state_holder else "?"
                         _cross_phase = _routing["next_phase"].upper() != _current_phase
                         print(f"    [efr-emit] failure_type={_ft} repair_target={_routing['next_phase']} "
                               f"current_phase={_current_phase} cross_phase={_cross_phase} "
