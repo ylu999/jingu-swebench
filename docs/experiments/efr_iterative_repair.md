@@ -151,3 +151,26 @@ The 3 simplest routes are already wired:
 - **efr-ack entered prescribed phase:** 2/2 (100%)
 - **H1-H4 all validated at 3-instance scale**
 - **No new code needed** — existing infrastructure works correctly with telemetry
+
+### Batch A (efr-batch-a): 10 instances (10097-11099)
+- **Commit:** 9db8683
+- **Batch task:** a2548b56c7344fc5b9139b05d0e9165a
+- **Eval:** 6/10 resolved (60.0%)
+- **Resolved:** 10880, 10914, 10973, 11066, 11095, 11099 (all on attempt 1)
+- **Unresolved:** 10097 (incomplete_fix), 10554/10999/11087 (wrong_direction)
+
+**EFR Signal Metrics:**
+
+| Metric | Value | Threshold | Pass? |
+|--------|-------|-----------|-------|
+| S1 efr_emit_rate | 7/7 (100%) | ≥80% | ✅ |
+| S2 efr_consume_rate | 7/7 (100%) | ≥80% | ✅ |
+| S3 cross_phase_rate | 7/7 (100%) | >0% | ✅ |
+| S4 efr_ack_entered | 7/7 (100%) | ≥50% | ✅ |
+
+**Failure Type Distribution:**
+- wrong_direction: 6 (10554×2, 10999, 11087×2, 10097-A2)
+- incomplete_fix: 2 (10097-A1, 10097-A2-final)
+
+**Outcome:** O1=60% (vs 65% baseline = -5%, within noise). No flips (O2=0), no regressions (O3=0).
+**Note:** All 6 resolved instances resolved on attempt 1. No attempt-2 rescues in this batch.
