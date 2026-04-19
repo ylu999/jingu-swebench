@@ -2895,52 +2895,74 @@ class JinguAgent:
                 print(f"    [nprg_inject] set last_failure to NPRG prompt ({len(_nprg_prompt)}c)", flush=True)
 
             # ── Protocol-driven routing: override next_phase based on missing fields ──
-            # If ANALYZE record is incomplete (missing protocol fields), route back
-            # to ANALYZE regardless of what failure_routing says. Protocol > heuristic.
-            try:
-                from protocol_compiler import validate_record_protocol, _get_protocol_specs
-                _proto_specs = _get_protocol_specs()
-                _jb_proto = jingu_body or {}
-                _proto_recs = _jb_proto.get("phase_records", [])
-                _proto_analyze = next((r for r in _proto_recs if r.get("phase") == "ANALYZE"), None)
-                if _proto_analyze:
-                    _proto_missing = validate_record_protocol(_proto_analyze, "ANALYZE", _proto_specs)
-                    if _proto_missing:
+            # ONLY when EFR routing has NOT already set a failure-type-specific route.
+            # EFR routing (from classify_failure → get_routing) is a precise diagnosis;
+            # protocol routing is a generic fallback for incomplete records.
+            _efr_route_active = bool(_last_failure_type)
+            if _efr_route_active:
+                print(
+                    f"    [protocol-route] SKIP: EFR route active "
+                    f"(failure_type={_last_failure_type} "
+                    f"route={_next_attempt_start_phase})",
+                    flush=True,
+                )
+            else:
+                try:
+                    from protocol_compiler import validate_record_protocol, _get_protocol_specs
+                    _proto_specs = _get_protocol_specs()
+                    _jb_proto = jingu_body or {}
+                    _proto_recs = _jb_proto.get("phase_records", [])
+                    _proto_analyze = next((r for r in _proto_recs if r.get("phase") == "ANALYZE"), None)
+                    if _proto_analyze:
+                        _proto_missing = validate_record_protocol(_proto_analyze, "ANALYZE", _proto_specs)
+                        if _proto_missing:
+                            _old_route = _next_attempt_start_phase
+                            _next_attempt_start_phase = "ANALYZE"
+                            _proto_hint = (
+                                f"[PROTOCOL ROUTING] Your ANALYZE record is incomplete. "
+                                f"Missing fields: {', '.join(_proto_missing)}. "
+                                f"You must return to ANALYZE and provide these fields."
+                            )
+                            last_failure = _proto_hint + "\n\n" + (last_failure or "")
+                            print(
+                                f"    [protocol-route] OVERRIDE: {_old_route} -> ANALYZE "
+                                f"missing={_proto_missing}",
+                                flush=True,
+                            )
+                    elif not _proto_analyze and _proto_recs:
+                        # Had phase records but no ANALYZE — route to ANALYZE
                         _old_route = _next_attempt_start_phase
                         _next_attempt_start_phase = "ANALYZE"
                         _proto_hint = (
-                            f"[PROTOCOL ROUTING] Your ANALYZE record is incomplete. "
-                            f"Missing fields: {', '.join(_proto_missing)}. "
-                            f"You must return to ANALYZE and provide these fields."
+                            "[PROTOCOL ROUTING] No ANALYZE record found. "
+                            "You must complete ANALYZE phase first with all required fields."
                         )
                         last_failure = _proto_hint + "\n\n" + (last_failure or "")
                         print(
                             f"    [protocol-route] OVERRIDE: {_old_route} -> ANALYZE "
-                            f"missing={_proto_missing}",
+                            f"reason=no_analyze_record",
                             flush=True,
                         )
-                elif not _proto_analyze and _proto_recs:
-                    # Had phase records but no ANALYZE — route to ANALYZE
-                    _old_route = _next_attempt_start_phase
-                    _next_attempt_start_phase = "ANALYZE"
-                    _proto_hint = (
-                        "[PROTOCOL ROUTING] No ANALYZE record found. "
-                        "You must complete ANALYZE phase first with all required fields."
-                    )
-                    last_failure = _proto_hint + "\n\n" + (last_failure or "")
-                    print(
-                        f"    [protocol-route] OVERRIDE: {_old_route} -> ANALYZE "
-                        f"reason=no_analyze_record",
-                        flush=True,
-                    )
-            except ImportError:
-                pass
-            except Exception as _proto_route_exc:
-                print(f"    [protocol-route] error (non-fatal): {_proto_route_exc}", flush=True)
+                except ImportError:
+                    pass
+                except Exception as _proto_route_exc:
+                    print(f"    [protocol-route] error (non-fatal): {_proto_route_exc}", flush=True)
 
             # Save prescribed phase for next attempt's ack check (must be after all routing)
             if attempt < self._max_attempts:
                 _next_attempt_start_phase_for_ack = _next_attempt_start_phase
+
+                # ── Route fidelity reconciliation log ──
+                _jb_routing_phase = (jingu_body or {}).get("failure_routing", {}).get("next_phase", "N/A")
+                print(
+                    f"    [route-fidelity] attempt={attempt} "
+                    f"failure_type={_last_failure_type or 'none'} "
+                    f"compiled_route={_jb_routing_phase} "
+                    f"runtime_route={_next_attempt_start_phase} "
+                    f"efr_active={_efr_route_active} "
+                    f"match={_jb_routing_phase.upper() == _next_attempt_start_phase.upper() if _jb_routing_phase != 'N/A' else 'N/A'}",
+                    flush=True,
+                )
 
         t_inst.stop()
 

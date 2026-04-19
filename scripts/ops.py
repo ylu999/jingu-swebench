@@ -481,7 +481,7 @@ _DEFAULT_FILTER = re.compile(
     r'\[attempt |'                            # attempt headers
     r'\[inner-verify\]|\[controlled-verify\]|'
     r'\[failure-classify\]|\[efr-emit\]|\[efr-ack\]|\[cp-reset\]|'  # EFR telemetry chain
-    r'\[direction-gate\]|'                    # direction gate signals
+    r'\[direction-gate\]|\[route-fidelity\]|\[protocol-route\]|'  # direction gate + routing signals
     r'STOPPING|verdict|pee:|task_success|'
     r'ERROR|FAILED|Traceback|\[preflight\]|\[init\]'
 )
