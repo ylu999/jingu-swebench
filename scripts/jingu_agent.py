@@ -59,6 +59,29 @@ from minisweagent.run.benchmarks.utils.batch_progress import RunBatchProgressMan
 from minisweagent.utils.log import logger
 
 
+def check_direction_change(
+    prev_files: set[str], curr_files: set[str], failure_type: str,
+) -> dict:
+    """Check whether agent changed direction after a wrong_direction failure.
+
+    Returns a dict with:
+        direction_changed: bool — True if at least one new file was added
+        new_files: set[str] — files in curr but not in prev
+        overlap: set[str] — files in both
+        should_reject: bool — True if direction_changed is False and failure was wrong_direction
+    """
+    is_wrong_direction = failure_type in ("wrong_direction", "wrong_direction+p216")
+    new_files = curr_files - prev_files
+    overlap = curr_files & prev_files
+    direction_changed = len(new_files) > 0
+    return {
+        "direction_changed": direction_changed,
+        "new_files": new_files,
+        "overlap": overlap,
+        "should_reject": is_wrong_direction and not direction_changed,
+    }
+
+
 def _parse_fail_to_pass(instance: dict) -> list[str]:
     """Parse FAIL_TO_PASS from instance dict, handling both list and JSON-string formats."""
     raw = instance.get("FAIL_TO_PASS", [])
@@ -1952,6 +1975,36 @@ class JinguAgent:
                             (_prev_raw_patch[:1200] + "\n... [truncated]")
                             if len(_prev_raw_patch) > 1200 else _prev_raw_patch
                         )
+
+            # ── Direction Change Gate: hard reject when wrong_direction + same files ──
+            # When previous attempt was classified as wrong_direction, the agent MUST
+            # change target files. If A2 modifies a subset of A1's files, the patch
+            # is dropped from candidates (same mechanism as Exp-J similarity rejection).
+            _dcg_rejected = False
+            if (attempt > 1
+                    and _nprg_curr_files and _nprg_prev_files
+                    and not _dp_rejected):  # skip if already rejected by similarity
+                _dcg = check_direction_change(_nprg_prev_files, _nprg_curr_files, _last_failure_type)
+                print(f"    [direction-gate] attempt={attempt} failure_type={_last_failure_type} "
+                      f"prev_files={sorted(_nprg_prev_files)} curr_files={sorted(_nprg_curr_files)} "
+                      f"new_files={sorted(_dcg['new_files'])} overlap={sorted(_dcg['overlap'])} "
+                      f"direction_changed={_dcg['direction_changed']} "
+                      f"should_reject={_dcg['should_reject']}", flush=True)
+                if jingu_body:
+                    jingu_body["direction_gate"] = {
+                        "prev_files": sorted(_nprg_prev_files),
+                        "curr_files": sorted(_nprg_curr_files),
+                        "new_files": sorted(_dcg["new_files"]),
+                        "direction_changed": _dcg["direction_changed"],
+                    }
+                if _dcg["should_reject"]:
+                    # HARD REJECT: agent did not change direction
+                    _dcg_rejected = True
+                    candidates = [c for c in candidates if c.get("attempt") != attempt]
+                    print(f"    [direction-gate] HARD REJECT: wrong_direction but same files, "
+                          f"dropped from candidates", flush=True)
+                    if jingu_body:
+                        jingu_body["direction_gate_rejected"] = True
 
             self._prev_files_written = _nprg_curr_files
             _prev_raw_patch = patch or _prev_raw_patch  # preserve previous if current empty
