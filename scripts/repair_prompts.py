@@ -44,16 +44,18 @@ _REPAIR_INSTRUCTIONS: dict[str, str] = {
     "wrong_direction": (
         "CRITICAL CONSTRAINT: Your previous fix was COMPLETELY WRONG — zero target tests passed.\n"
         "You MUST change direction entirely. The following rules are MANDATORY:\n"
-        "1. You MUST NOT modify the same file(s) in the same way as attempt 1.\n"
+        "1. You MUST NOT modify the same file(s) as attempt 1. "
+        "The system will BLOCK any write to those files.\n"
         "2. You MUST explicitly state why your previous root cause hypothesis was wrong.\n"
         "3. You MUST form a NEW hypothesis about a DIFFERENT root cause before writing code.\n"
         "4. You MUST NOT skip re-analysis — jumping straight to code will repeat the failure.\n"
         "5. Before writing ANY code, state: (a) what was wrong with A1's approach, "
-        "(b) your new root cause hypothesis, (c) which different file/function you will modify.\n"
+        "(b) your new root cause hypothesis, (c) which DIFFERENT file/function you will modify.\n"
         "If you cannot explain what was wrong with the previous approach, "
         "you are not ready to write code.\n"
-        "WARNING: A system gate will REJECT your patch if you modify the same files "
-        "without changing direction."
+        "ENFORCEMENT: A runtime gate monitors every file write. If you write to any "
+        "banned file (from attempt 1), you will receive an immediate VIOLATION message "
+        "and must switch to a different file."
     ),
     "incomplete_fix": (
         "Your fix made partial progress — some FAIL_TO_PASS tests now pass, "

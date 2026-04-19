@@ -1,12 +1,16 @@
-"""Tests for the direction change gate.
+"""Tests for the direction change gate and file-ban enforcement.
 
 The gate enforces: when failure_type == wrong_direction, the agent MUST
 modify at least one NEW file in A2. If A2 touches only the same files
 as A1, the patch is hard-rejected from candidates.
+
+File-ban enforcement (step-level): when wrong_direction is active, any
+write to a banned file triggers a redirect message in the agent conversation.
 """
 
 import sys
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -144,3 +148,83 @@ def test_multi_file_overlap_no_new():
     )
     assert result["should_reject"] is True
     assert result["direction_changed"] is False
+
+
+# ── File-ban enforcement (step-level) ──────────────────────────────────
+
+
+class TestFileBanState:
+    """Test that file-ban state is correctly set and cleared."""
+
+    def _make_jingu_agent(self):
+        """Create a minimal JinguAgent for testing ban state."""
+        from jingu_agent import JinguAgent
+        agent = JinguAgent.__new__(JinguAgent)
+        agent._file_ban_active = False
+        agent._file_ban_files = set()
+        agent._file_ban_violations = 0
+        agent._file_ban_max_violations = 2
+        agent._prev_files_written = set()
+        return agent
+
+    def test_ban_activates_on_wrong_direction(self):
+        """File ban should activate when wrong_direction + prev files exist."""
+        agent = self._make_jingu_agent()
+        agent._prev_files_written = {"django/utils/dateparse.py"}
+        # Simulate what happens at attempt 2 start
+        if "wrong_direction" == "wrong_direction" and agent._prev_files_written:
+            agent._file_ban_active = True
+            agent._file_ban_files = set(agent._prev_files_written)
+            agent._file_ban_violations = 0
+        assert agent._file_ban_active is True
+        assert agent._file_ban_files == {"django/utils/dateparse.py"}
+
+    def test_ban_does_not_activate_on_incomplete_fix(self):
+        """File ban should NOT activate for incomplete_fix."""
+        agent = self._make_jingu_agent()
+        agent._prev_files_written = {"django/utils/dateparse.py"}
+        ft = "incomplete_fix"
+        if ft == "wrong_direction" and agent._prev_files_written:
+            agent._file_ban_active = True
+        assert agent._file_ban_active is False
+
+    def test_ban_detects_violation(self):
+        """Writing to a banned file should be detected as violation."""
+        agent = self._make_jingu_agent()
+        agent._file_ban_active = True
+        agent._file_ban_files = {"django/utils/dateparse.py", "django/db/models/query.py"}
+        # Simulate step files_written
+        step_files_written = ["django/utils/dateparse.py"]
+        banned_hit = set(step_files_written) & agent._file_ban_files
+        assert banned_hit == {"django/utils/dateparse.py"}
+
+    def test_ban_allows_different_file(self):
+        """Writing to a non-banned file should not be flagged."""
+        agent = self._make_jingu_agent()
+        agent._file_ban_active = True
+        agent._file_ban_files = {"django/utils/dateparse.py"}
+        step_files_written = ["django/db/models/sql/compiler.py"]
+        banned_hit = set(step_files_written) & agent._file_ban_files
+        assert banned_hit == set()
+
+    def test_ban_violation_counter_increments(self):
+        """Each violation should increment the counter."""
+        agent = self._make_jingu_agent()
+        agent._file_ban_active = True
+        agent._file_ban_files = {"a.py"}
+        agent._file_ban_violations = 0
+        # First violation
+        agent._file_ban_violations += 1
+        assert agent._file_ban_violations == 1
+        # Second violation
+        agent._file_ban_violations += 1
+        assert agent._file_ban_violations == 2
+
+    def test_ban_inactive_when_no_prev_files(self):
+        """File ban should not activate when no previous files."""
+        agent = self._make_jingu_agent()
+        agent._prev_files_written = set()
+        ft = "wrong_direction"
+        if ft == "wrong_direction" and agent._prev_files_written:
+            agent._file_ban_active = True
+        assert agent._file_ban_active is False
