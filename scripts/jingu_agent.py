@@ -515,30 +515,39 @@ class JinguAgent:
         )
 
         # File-ban enforcement: detect writes to banned files (wrong_direction compliance)
+        # Uses git diff --name-only (ground truth) instead of message parsing
+        # because mini-swe-agent uses plain text messages, not structured tool_use blocks.
         if self._file_ban_active and not self._state.early_stop_verdict:
             try:
-                from step_event_emitter import extract_tool_usage
-                msgs = getattr(agent_self, "messages", [])
-                _, _, _step_files_written = extract_tool_usage(msgs, step_n)
-                _banned_hit = set(_step_files_written) & self._file_ban_files
-                if _banned_hit:
-                    self._file_ban_violations += 1
-                    _ban_msg = (
-                        f"VIOLATION: You are modifying BANNED file(s): "
-                        f"{', '.join(sorted(_banned_hit))}.\n"
-                        f"Your previous attempt (wrong_direction) already failed by modifying "
-                        f"these exact files. The system requires you to fix DIFFERENT files.\n\n"
-                        f"MANDATORY: Revert your changes to {', '.join(sorted(_banned_hit))} "
-                        f"and identify a different file to modify. "
-                        f"Think about what OTHER code could cause this bug.\n\n"
-                        f"Banned files (from attempt 1): "
-                        f"{', '.join(sorted(self._file_ban_files))}\n"
-                        f"Violations: {self._file_ban_violations}/{self._file_ban_max_violations}"
+                import subprocess as _sp_fb
+                _fb_cid = self._state.container_id
+                if _fb_cid:
+                    _fb_base = self._state.instance.get("base_commit", "HEAD")
+                    _fb_diff = _sp_fb.run(
+                        ["docker", "exec", "-w", "/testbed", _fb_cid,
+                         "git", "diff", "--name-only", _fb_base],
+                        capture_output=True, text=True, timeout=10,
                     )
-                    print(f"    [file-ban] VIOLATION #{self._file_ban_violations}: "
-                          f"agent wrote to banned file(s) {sorted(_banned_hit)}", flush=True)
-                    if not self._state.pending_redirect_hint:
-                        self._state.pending_redirect_hint = _ban_msg
+                    _fb_changed = set(_fb_diff.stdout.strip().split("\n")) if _fb_diff.stdout.strip() else set()
+                    _banned_hit = _fb_changed & self._file_ban_files
+                    if _banned_hit:
+                        self._file_ban_violations += 1
+                        _ban_msg = (
+                            f"VIOLATION: You are modifying BANNED file(s): "
+                            f"{', '.join(sorted(_banned_hit))}.\n"
+                            f"Your previous attempt (wrong_direction) already failed by modifying "
+                            f"these exact files. The system requires you to fix DIFFERENT files.\n\n"
+                            f"MANDATORY: Revert your changes to {', '.join(sorted(_banned_hit))} "
+                            f"and identify a different file to modify. "
+                            f"Think about what OTHER code could cause this bug.\n\n"
+                            f"Banned files (from attempt 1): "
+                            f"{', '.join(sorted(self._file_ban_files))}\n"
+                            f"Violations: {self._file_ban_violations}/{self._file_ban_max_violations}"
+                        )
+                        print(f"    [file-ban] VIOLATION #{self._file_ban_violations}: "
+                              f"agent wrote to banned file(s) {sorted(_banned_hit)}", flush=True)
+                        if not self._state.pending_redirect_hint:
+                            self._state.pending_redirect_hint = _ban_msg
             except Exception as _fb_exc:
                 print(f"    [file-ban] error (non-fatal): {_fb_exc}", flush=True)
 
@@ -1761,7 +1770,7 @@ class JinguAgent:
                 _next_attempt_start_phase = "OBSERVE"  # reset for next iteration
 
                 # File-ban enforcement: activate when wrong_direction + have previous files
-                if _last_failure_type == "wrong_direction" and self._prev_files_written:
+                if _last_failure_type.startswith("wrong_direction") and self._prev_files_written:
                     self._file_ban_active = True
                     self._file_ban_files = set(self._prev_files_written)
                     self._file_ban_violations = 0
