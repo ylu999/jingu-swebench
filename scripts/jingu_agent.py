@@ -743,9 +743,16 @@ class JinguAgent:
                         else:
                             # No write yet — try to extract hypothesis from agent conversation
                             # Only attempt extraction every 3 steps to avoid excessive LLM calls
+                            _max_extract_attempts = 5
                             if (step_n >= 3 and step_n % 3 == 0
-                                    and self._direction_search_attempts < 5):
+                                    and self._direction_search_attempts < _max_extract_attempts):
                                 self._try_extract_direction_search(agent_self, step_n)
+                            # Fallback: if extraction exhausted, auto-admit with file-ban only
+                            if (self._direction_search_attempts >= _max_extract_attempts
+                                    and not self._direction_search_admitted):
+                                self._direction_search_admitted = True
+                                print(f"    [wdrg-v02] AUTO-ADMIT: extraction failed {_max_extract_attempts}x, "
+                                      f"falling back to file-ban enforcement only", flush=True)
                     else:
                         # Post-admission: file-ban enforcement (block only banned file writes)
                         _banned_hit = _fb_changed & self._file_ban_files
