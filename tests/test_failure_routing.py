@@ -295,8 +295,8 @@ class TestSeedMatrix:
 
     def test_next_phase_is_valid(self):
         """next_phase should be a known phase name."""
-        valid_phases = {"ANALYZE", "EXECUTE", "DESIGN", "JUDGE", "OBSERVE"}
+        from canonical_symbols import ALL_PHASES
         for key, entry in SEED_FAILURE_MATRIX.items():
-            assert entry["next_phase"] in valid_phases, (
+            assert entry["next_phase"] in ALL_PHASES, (
                 f"{key} has invalid next_phase: {entry['next_phase']}"
             )
