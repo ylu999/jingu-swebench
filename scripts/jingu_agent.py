@@ -280,12 +280,7 @@ def jingu_process_instance(
     remove_from_preds_file(output_dir / "preds.json", instance_id)
     (instance_dir / f"{instance_id}.traj.json").unlink(missing_ok=True)
 
-    _model_cfg = config.get("model", {})
-    print(f"    [model-diag] model_name={_model_cfg.get('model_name')!r} "
-          f"model_class={_model_cfg.get('model_class')!r}", flush=True)
-    model = get_model(config=_model_cfg)
-    print(f"    [model-diag] after get_model: config.model_name={model.config.model_name!r}",
-          flush=True)
+    model = get_model(config=config.get("model", {}))
     task = instance["problem_statement"]
 
     progress_manager.on_instance_start(instance_id)
@@ -1183,13 +1178,7 @@ class JinguAgent:
         # Config lives in mini-swe-agent/src/minisweagent/config/benchmarks/jingu-swebench.yaml.
         t_cfg = Timer("config load", parent=t_agent)
         config = get_config_from_spec("jingu-swebench.yaml")
-        _yaml_model = config.get("model", {})
-        print(f"    [config-diag] yaml model_name={_yaml_model.get('model_name')!r} "
-              f"model_class={_yaml_model.get('model_class')!r}", flush=True)
         config = recursive_merge(config, BASE_CONFIG)
-        _merged_model = config.get("model", {})
-        print(f"    [config-diag] merged model_name={_merged_model.get('model_name')!r} "
-              f"model_class={_merged_model.get('model_class')!r}", flush=True)
 
         # Build instance_template_extra: tests that must pass + optional retry hint.
         # on_attempt_start() returns the extra_parts list (prompt assembly).
