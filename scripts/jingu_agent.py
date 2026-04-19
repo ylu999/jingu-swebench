@@ -108,6 +108,167 @@ def build_recovery_escalation_prompt(banned_files: set[str], violation_count: in
     )
 
 
+def validate_direction_search_record(
+    record: dict, banned_files: set[str],
+) -> dict:
+    """Validate a structured direction-search hypothesis record (WDRG v0.2).
+
+    The agent must submit this record BEFORE any write in A2 wrong_direction.
+    Hard validation rules:
+      1. alternative_hypotheses must have >= 2 entries
+      2. Each hypothesis must have root_cause, candidate_files, evidence (non-empty)
+      3. chosen_hypothesis must NOT point to any banned file
+      4. why_not_previous must be non-empty
+      5. candidate_files across chosen hypothesis must not be a subset of banned_files
+
+    Returns:
+        {"admitted": bool, "failures": list[str]}
+    """
+    failures = []
+
+    # Rule 1: at least 2 hypotheses
+    hypotheses = record.get("alternative_hypotheses", [])
+    if not isinstance(hypotheses, list) or len(hypotheses) < 2:
+        failures.append(
+            f"Need >= 2 alternative_hypotheses, got {len(hypotheses) if isinstance(hypotheses, list) else 0}"
+        )
+
+    # Rule 2: each hypothesis has required fields
+    for i, hyp in enumerate(hypotheses if isinstance(hypotheses, list) else []):
+        if not isinstance(hyp, dict):
+            failures.append(f"hypothesis[{i}] is not a dict")
+            continue
+        for field in ("root_cause", "candidate_files", "evidence"):
+            val = hyp.get(field)
+            if not val:
+                failures.append(f"hypothesis[{i}].{field} is empty")
+            elif field == "candidate_files" and isinstance(val, list) and len(val) == 0:
+                failures.append(f"hypothesis[{i}].candidate_files is empty list")
+
+    # Rule 3: why_not_previous must exist and be non-empty
+    why_not = record.get("why_not_previous", "")
+    if not why_not or (isinstance(why_not, str) and len(why_not.strip()) < 10):
+        failures.append("why_not_previous is missing or too short (need >= 10 chars)")
+
+    # Rule 4: chosen_hypothesis candidate_files must not overlap with banned files
+    chosen_idx = record.get("chosen_hypothesis_index")
+    if chosen_idx is not None and isinstance(hypotheses, list):
+        if isinstance(chosen_idx, int) and 0 <= chosen_idx < len(hypotheses):
+            chosen = hypotheses[chosen_idx]
+            if isinstance(chosen, dict):
+                cand = chosen.get("candidate_files", [])
+                if isinstance(cand, list):
+                    cand_set = set(cand)
+                    banned_hit = cand_set & banned_files
+                    if banned_hit:
+                        failures.append(
+                            f"chosen hypothesis candidate_files overlap with banned: {sorted(banned_hit)}"
+                        )
+                    # Also check: candidate files must not be subset of banned
+                    if cand_set and cand_set <= banned_files:
+                        failures.append(
+                            "chosen hypothesis candidate_files are ALL banned files"
+                        )
+        else:
+            failures.append(f"chosen_hypothesis_index={chosen_idx} out of range")
+    elif chosen_idx is None:
+        failures.append("chosen_hypothesis_index is missing")
+
+    # Rule 5: chosen reason must be non-empty
+    chosen_reason = record.get("chosen_reason", "")
+    if not chosen_reason or (isinstance(chosen_reason, str) and len(chosen_reason.strip()) < 10):
+        failures.append("chosen_reason is missing or too short (need >= 10 chars)")
+
+    return {"admitted": len(failures) == 0, "failures": failures}
+
+
+# JSON schema for direction-search record (used by structured_extract)
+DIRECTION_SEARCH_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "why_not_previous": {
+            "type": "string",
+            "description": "Explain why the previous hypothesis was wrong. What evidence disproved it?",
+        },
+        "alternative_hypotheses": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "root_cause": {
+                        "type": "string",
+                        "description": "What is actually causing the bug?",
+                    },
+                    "candidate_files": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Which file(s) would you modify? Must be DIFFERENT from banned files.",
+                    },
+                    "evidence": {
+                        "type": "string",
+                        "description": "What code/behavior supports this hypothesis?",
+                    },
+                },
+                "required": ["root_cause", "candidate_files", "evidence"],
+            },
+            "minItems": 2,
+            "description": "At least 2 alternative hypotheses for the bug's root cause.",
+        },
+        "chosen_hypothesis_index": {
+            "type": "integer",
+            "description": "0-based index of the chosen hypothesis from alternative_hypotheses.",
+        },
+        "chosen_reason": {
+            "type": "string",
+            "description": "Why this hypothesis is more likely than the other(s).",
+        },
+    },
+    "required": [
+        "why_not_previous",
+        "alternative_hypotheses",
+        "chosen_hypothesis_index",
+        "chosen_reason",
+    ],
+}
+
+
+def build_pre_write_guard_prompt(banned_files: set[str], reject_failures: list[str] | None = None) -> str:
+    """Build the pre-write guard message for WDRG v0.2.
+
+    Injected when agent tries to write before submitting an admitted hypothesis record.
+    If reject_failures is provided, the previous record submission was rejected.
+    """
+    banned_list = ", ".join(sorted(banned_files))
+    parts = [
+        "⛔ WRITE BLOCKED — Direction Search Record Required ⛔\n",
+        f"You are in attempt 2 after a wrong_direction failure.",
+        f"BANNED FILES (from attempt 1): {banned_list}\n",
+        "Before you can write ANY code, you MUST first analyze the problem",
+        "and provide a structured direction-search record.\n",
+    ]
+    if reject_failures:
+        parts.append("Your previous record was REJECTED for these reasons:")
+        for f in reject_failures:
+            parts.append(f"  - {f}")
+        parts.append("")
+
+    parts.extend([
+        "REQUIRED: Think through the problem, then the system will extract your",
+        "hypothesis record. You need to clearly state in your response:",
+        "  1. WHY your previous approach was wrong (what evidence disproved it?)",
+        "  2. AT LEAST 2 alternative hypotheses, each with:",
+        "     - root_cause: what is actually causing the bug",
+        "     - candidate_files: which files to modify (NOT banned files)",
+        "     - evidence: what supports this hypothesis",
+        "  3. WHICH hypothesis you choose and WHY\n",
+        "The system will automatically extract and validate your reasoning.",
+        "Once validated, your writes will be unblocked.",
+        f"\nDO NOT attempt to modify: {banned_list}",
+        "DO: analyze the codebase, form hypotheses about alternative root causes.",
+    ])
+    return "\n".join(parts)
+
+
 def _parse_fail_to_pass(instance: dict) -> list[str]:
     """Parse FAIL_TO_PASS from instance dict, handling both list and JSON-string formats."""
     raw = instance.get("FAIL_TO_PASS", [])
@@ -400,6 +561,12 @@ class JinguAgent:
         self._file_ban_files: set[str] = set()
         self._file_ban_violations: int = 0
         self._file_ban_max_violations: int = 2  # escalate to stop after N violations
+        # WDRG v0.2: direction-search contract — pre-write guard
+        self._direction_search_required: bool = False  # True when A2 wrong_direction
+        self._direction_search_admitted: bool = False   # True after hypothesis record passes validation
+        self._direction_search_attempts: int = 0        # how many extraction attempts
+        self._direction_search_record: dict | None = None  # last extracted record
+        self._direction_search_last_failures: list[str] = []  # last validation failures
 
     # -- step-level hooks (called by JinguProgressTrackingAgent.step) --------
 
@@ -539,9 +706,9 @@ class JinguAgent:
             patch_non_empty=patch_non_empty,
         )
 
-        # File-ban enforcement: detect writes to banned files (wrong_direction compliance)
-        # Uses git diff --name-only (ground truth) instead of message parsing
-        # because mini-swe-agent uses plain text messages, not structured tool_use blocks.
+        # WDRG v0.2: direction-search pre-write guard + file-ban enforcement
+        # When direction_search_required and NOT admitted: block ALL writes and attempt extraction.
+        # When admitted: fall back to file-ban enforcement (block only banned file writes).
         if self._file_ban_active and not self._state.early_stop_verdict:
             try:
                 import subprocess as _sp_fb
@@ -554,18 +721,43 @@ class JinguAgent:
                         capture_output=True, text=True, timeout=10,
                     )
                     _fb_changed = set(_fb_diff.stdout.strip().split("\n")) if _fb_diff.stdout.strip() else set()
-                    _banned_hit = _fb_changed & self._file_ban_files
-                    if _banned_hit:
-                        self._file_ban_violations += 1
-                        # Use escalated recovery prompt (direction search protocol)
-                        # instead of basic "stop writing this file" message
-                        _ban_msg = build_recovery_escalation_prompt(
-                            self._file_ban_files, self._file_ban_violations,
-                        )
-                        print(f"    [file-ban] VIOLATION #{self._file_ban_violations}: "
-                              f"agent wrote to banned file(s) {sorted(_banned_hit)}", flush=True)
-                        if not self._state.pending_redirect_hint:
-                            self._state.pending_redirect_hint = _ban_msg
+
+                    if self._direction_search_required and not self._direction_search_admitted:
+                        # Pre-write guard: ANY write is blocked until hypothesis admitted
+                        if _fb_changed:
+                            self._file_ban_violations += 1
+                            # Revert the write by resetting to base commit
+                            _sp_fb.run(
+                                ["docker", "exec", "-w", "/testbed", _fb_cid,
+                                 "git", "checkout", "--", "."],
+                                capture_output=True, text=True, timeout=10,
+                            )
+                            _guard_msg = build_pre_write_guard_prompt(
+                                self._file_ban_files,
+                                self._direction_search_last_failures or None,
+                            )
+                            print(f"    [wdrg-v02] WRITE BLOCKED #{self._file_ban_violations}: "
+                                  f"hypothesis not admitted, reverted {sorted(_fb_changed)}", flush=True)
+                            if not self._state.pending_redirect_hint:
+                                self._state.pending_redirect_hint = _guard_msg
+                        else:
+                            # No write yet — try to extract hypothesis from agent conversation
+                            # Only attempt extraction every 3 steps to avoid excessive LLM calls
+                            if (step_n >= 3 and step_n % 3 == 0
+                                    and self._direction_search_attempts < 5):
+                                self._try_extract_direction_search(agent_self, step_n)
+                    else:
+                        # Post-admission: file-ban enforcement (block only banned file writes)
+                        _banned_hit = _fb_changed & self._file_ban_files
+                        if _banned_hit:
+                            self._file_ban_violations += 1
+                            _ban_msg = build_recovery_escalation_prompt(
+                                self._file_ban_files, self._file_ban_violations,
+                            )
+                            print(f"    [file-ban] VIOLATION #{self._file_ban_violations}: "
+                                  f"agent wrote to banned file(s) {sorted(_banned_hit)}", flush=True)
+                            if not self._state.pending_redirect_hint:
+                                self._state.pending_redirect_hint = _ban_msg
             except Exception as _fb_exc:
                 print(f"    [file-ban] error (non-fatal): {_fb_exc}", flush=True)
 
@@ -596,6 +788,82 @@ class JinguAgent:
             pass
 
         return _decision
+
+    def _try_extract_direction_search(self, agent_self: Any, step_n: int) -> None:
+        """Attempt to extract a direction-search hypothesis record from agent conversation.
+
+        Uses structured_extract (separate LLM call) to parse the agent's reasoning
+        into a validated hypothesis record. If validation passes, sets
+        _direction_search_admitted=True and unblocks writes.
+
+        Called periodically (every 3 steps) when direction_search_required and agent
+        hasn't written anything yet (assumed to be in analysis/reasoning phase).
+        """
+        self._direction_search_attempts += 1
+        try:
+            # Get the agent's conversation history (last N messages for context)
+            messages = getattr(agent_self, "messages", [])
+            if not messages or len(messages) < 2:
+                print(f"    [wdrg-v02] extraction skip: insufficient messages", flush=True)
+                return
+
+            # Use the agent's model for structured extraction
+            model = getattr(agent_self, "model", None)
+            if model is None or not hasattr(model, "structured_extract"):
+                print(f"    [wdrg-v02] extraction skip: model has no structured_extract", flush=True)
+                return
+
+            banned_list = ", ".join(sorted(self._file_ban_files))
+            extraction_prompt = (
+                f"Based on the agent's conversation above, extract the direction-search "
+                f"hypothesis record. The agent is trying to fix a bug after a wrong direction. "
+                f"Banned files (from attempt 1): {banned_list}. "
+                f"Extract the agent's reasoning into the required structured format."
+            )
+
+            # Call structured_extract with the direction search schema
+            record = model.structured_extract(
+                messages=messages[-10:],  # last 10 messages for context
+                extraction_prompt=extraction_prompt,
+                schema=DIRECTION_SEARCH_SCHEMA,
+            )
+
+            if not isinstance(record, dict):
+                print(f"    [wdrg-v02] extraction returned non-dict: {type(record)}", flush=True)
+                return
+
+            self._direction_search_record = record
+
+            # Validate the extracted record
+            result = validate_direction_search_record(record, self._file_ban_files)
+            self._direction_search_last_failures = result["failures"]
+
+            if result["admitted"]:
+                self._direction_search_admitted = True
+                chosen_idx = record.get("chosen_hypothesis_index", 0)
+                hypotheses = record.get("alternative_hypotheses", [])
+                chosen = hypotheses[chosen_idx] if 0 <= chosen_idx < len(hypotheses) else {}
+                chosen_files = chosen.get("candidate_files", [])
+                print(f"    [wdrg-v02] ✓ HYPOTHESIS ADMITTED (attempt {self._direction_search_attempts}): "
+                      f"chosen_files={chosen_files}", flush=True)
+                # Inject admission confirmation message
+                if not self._state.pending_redirect_hint:
+                    self._state.pending_redirect_hint = (
+                        f"✅ Direction search record ADMITTED. "
+                        f"You may now write code. Focus on: {', '.join(chosen_files)}\n"
+                        f"Reason: {record.get('chosen_reason', '')[:200]}"
+                    )
+            else:
+                print(f"    [wdrg-v02] ✗ hypothesis REJECTED (attempt {self._direction_search_attempts}): "
+                      f"{result['failures']}", flush=True)
+                # Inject rejection feedback
+                if not self._state.pending_redirect_hint:
+                    self._state.pending_redirect_hint = build_pre_write_guard_prompt(
+                        self._file_ban_files, result["failures"],
+                    )
+
+        except Exception as _ext_exc:
+            print(f"    [wdrg-v02] extraction error (non-fatal): {_ext_exc}", flush=True)
 
     def _emit_step_event(
         self,
@@ -1792,10 +2060,19 @@ class JinguAgent:
                     self._file_ban_active = True
                     self._file_ban_files = set(self._prev_files_written)
                     self._file_ban_violations = 0
+                    # WDRG v0.2: activate direction-search contract (pre-write guard)
+                    self._direction_search_required = True
+                    self._direction_search_admitted = False
+                    self._direction_search_attempts = 0
+                    self._direction_search_record = None
+                    self._direction_search_last_failures = []
                     print(f"    [file-ban] ACTIVATED: wrong_direction, banned_files="
                           f"{sorted(self._file_ban_files)}", flush=True)
+                    print(f"    [wdrg-v02] direction-search contract ACTIVATED: "
+                          f"writes blocked until hypothesis admitted", flush=True)
                 else:
                     self._file_ban_active = False
+                    self._direction_search_required = False
             else:
                 import dataclasses as _dc_boundary
                 cp_state_holder[0] = _dc_boundary.replace(cp_state_holder[0], principal_violation="")

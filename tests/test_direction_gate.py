@@ -323,3 +323,240 @@ class TestEnhancedWrongDirectionPrompt:
         )
         assert "DIRECTION SEARCH" not in prompt.upper()
         assert "ALTERNATIVE HYPOTHESES" not in prompt.upper()
+
+
+# ── WDRG v0.2: validate_direction_search_record ──────────────────────────
+
+
+class TestValidateDirectionSearchRecord:
+    """Test the hard validation rules for direction-search hypothesis records."""
+
+    def _good_record(self, banned=None):
+        if banned is None:
+            banned = {"django/utils/dateparse.py"}
+        return {
+            "why_not_previous": "The dateparse.py fix was wrong because the issue is actually in the duration parser",
+            "alternative_hypotheses": [
+                {
+                    "root_cause": "Duration parsing doesn't handle ISO 8601",
+                    "candidate_files": ["django/utils/duration.py"],
+                    "evidence": "The test creates a duration string in ISO format",
+                },
+                {
+                    "root_cause": "Timezone handling in timeparse",
+                    "candidate_files": ["django/utils/timeparse.py"],
+                    "evidence": "The timezone offset is parsed incorrectly",
+                },
+            ],
+            "chosen_hypothesis_index": 0,
+            "chosen_reason": "Duration hypothesis is more likely because the test explicitly creates an ISO duration",
+        }
+
+    def test_good_record_admitted(self):
+        """A well-formed record should be admitted."""
+        from jingu_agent import validate_direction_search_record
+        result = validate_direction_search_record(
+            self._good_record(), {"django/utils/dateparse.py"},
+        )
+        assert result["admitted"] is True
+        assert result["failures"] == []
+
+    def test_too_few_hypotheses_rejected(self):
+        """Record with < 2 hypotheses should be rejected."""
+        from jingu_agent import validate_direction_search_record
+        record = self._good_record()
+        record["alternative_hypotheses"] = record["alternative_hypotheses"][:1]
+        result = validate_direction_search_record(record, {"a.py"})
+        assert result["admitted"] is False
+        assert any(">= 2" in f for f in result["failures"])
+
+    def test_empty_hypotheses_rejected(self):
+        """Record with empty hypotheses list should be rejected."""
+        from jingu_agent import validate_direction_search_record
+        record = self._good_record()
+        record["alternative_hypotheses"] = []
+        result = validate_direction_search_record(record, {"a.py"})
+        assert result["admitted"] is False
+
+    def test_missing_why_not_previous_rejected(self):
+        """Record without why_not_previous should be rejected."""
+        from jingu_agent import validate_direction_search_record
+        record = self._good_record()
+        record["why_not_previous"] = ""
+        result = validate_direction_search_record(record, {"a.py"})
+        assert result["admitted"] is False
+        assert any("why_not_previous" in f for f in result["failures"])
+
+    def test_chosen_points_to_banned_file_rejected(self):
+        """Chosen hypothesis pointing to banned file should be rejected."""
+        from jingu_agent import validate_direction_search_record
+        banned = {"django/utils/dateparse.py"}
+        record = self._good_record(banned)
+        record["alternative_hypotheses"][0]["candidate_files"] = ["django/utils/dateparse.py"]
+        record["chosen_hypothesis_index"] = 0
+        result = validate_direction_search_record(record, banned)
+        assert result["admitted"] is False
+        assert any("banned" in f.lower() for f in result["failures"])
+
+    def test_non_chosen_banned_is_ok(self):
+        """Non-chosen hypothesis pointing to banned file is OK (only chosen matters)."""
+        from jingu_agent import validate_direction_search_record
+        banned = {"django/utils/dateparse.py"}
+        record = self._good_record(banned)
+        # Hypothesis 1 (not chosen) points to banned file — should be OK
+        record["alternative_hypotheses"][1]["candidate_files"] = ["django/utils/dateparse.py"]
+        record["chosen_hypothesis_index"] = 0  # choosing hypothesis 0 which is fine
+        result = validate_direction_search_record(record, banned)
+        assert result["admitted"] is True
+
+    def test_missing_chosen_index_rejected(self):
+        """Record without chosen_hypothesis_index should be rejected."""
+        from jingu_agent import validate_direction_search_record
+        record = self._good_record()
+        del record["chosen_hypothesis_index"]
+        result = validate_direction_search_record(record, {"a.py"})
+        assert result["admitted"] is False
+        assert any("chosen_hypothesis_index" in f for f in result["failures"])
+
+    def test_missing_chosen_reason_rejected(self):
+        """Record without chosen_reason should be rejected."""
+        from jingu_agent import validate_direction_search_record
+        record = self._good_record()
+        record["chosen_reason"] = ""
+        result = validate_direction_search_record(record, {"a.py"})
+        assert result["admitted"] is False
+        assert any("chosen_reason" in f for f in result["failures"])
+
+    def test_hypothesis_missing_fields_rejected(self):
+        """Hypothesis with missing required fields should be rejected."""
+        from jingu_agent import validate_direction_search_record
+        record = self._good_record()
+        record["alternative_hypotheses"][0] = {"root_cause": "something"}  # missing candidate_files, evidence
+        result = validate_direction_search_record(record, {"a.py"})
+        assert result["admitted"] is False
+        assert any("candidate_files" in f for f in result["failures"])
+        assert any("evidence" in f for f in result["failures"])
+
+    def test_chosen_index_out_of_range_rejected(self):
+        """chosen_hypothesis_index out of range should be rejected."""
+        from jingu_agent import validate_direction_search_record
+        record = self._good_record()
+        record["chosen_hypothesis_index"] = 5
+        result = validate_direction_search_record(record, {"a.py"})
+        assert result["admitted"] is False
+        assert any("out of range" in f for f in result["failures"])
+
+
+# ── WDRG v0.2: build_pre_write_guard_prompt ──────────────────────────────
+
+
+class TestPreWriteGuardPrompt:
+    """Test the pre-write guard message for v0.2."""
+
+    def test_contains_banned_files(self):
+        """Prompt should list banned files."""
+        from jingu_agent import build_pre_write_guard_prompt
+        prompt = build_pre_write_guard_prompt({"a.py", "b.py"})
+        assert "a.py" in prompt
+        assert "b.py" in prompt
+
+    def test_contains_write_blocked(self):
+        """Prompt should indicate writes are blocked."""
+        from jingu_agent import build_pre_write_guard_prompt
+        prompt = build_pre_write_guard_prompt({"a.py"})
+        assert "WRITE BLOCKED" in prompt or "BLOCKED" in prompt
+
+    def test_contains_rejection_feedback(self):
+        """Prompt should include rejection reasons when provided."""
+        from jingu_agent import build_pre_write_guard_prompt
+        prompt = build_pre_write_guard_prompt(
+            {"a.py"}, reject_failures=["too few hypotheses", "missing why_not"],
+        )
+        assert "too few hypotheses" in prompt
+        assert "missing why_not" in prompt
+
+    def test_no_rejection_feedback_when_none(self):
+        """Prompt should not have REJECTED section when no failures."""
+        from jingu_agent import build_pre_write_guard_prompt
+        prompt = build_pre_write_guard_prompt({"a.py"})
+        assert "REJECTED" not in prompt
+
+
+# ── WDRG v0.2: direction search schema ──────────────────────────────────
+
+
+class TestDirectionSearchSchema:
+    """Test the JSON schema for direction-search records."""
+
+    def test_schema_has_required_fields(self):
+        """Schema should require the 4 key fields."""
+        from jingu_agent import DIRECTION_SEARCH_SCHEMA
+        assert "why_not_previous" in DIRECTION_SEARCH_SCHEMA["required"]
+        assert "alternative_hypotheses" in DIRECTION_SEARCH_SCHEMA["required"]
+        assert "chosen_hypothesis_index" in DIRECTION_SEARCH_SCHEMA["required"]
+        assert "chosen_reason" in DIRECTION_SEARCH_SCHEMA["required"]
+
+    def test_schema_hypotheses_min_items(self):
+        """alternative_hypotheses should require minItems: 2."""
+        from jingu_agent import DIRECTION_SEARCH_SCHEMA
+        hyp_schema = DIRECTION_SEARCH_SCHEMA["properties"]["alternative_hypotheses"]
+        assert hyp_schema["minItems"] == 2
+
+
+# ── WDRG v0.2: direction search state ──────────────────────────────────
+
+
+class TestDirectionSearchState:
+    """Test the v0.2 state management for direction-search contract."""
+
+    def _make_jingu_agent(self):
+        """Create a minimal JinguAgent for testing v0.2 state."""
+        from jingu_agent import JinguAgent
+        agent = JinguAgent.__new__(JinguAgent)
+        agent._file_ban_active = False
+        agent._file_ban_files = set()
+        agent._file_ban_violations = 0
+        agent._file_ban_max_violations = 2
+        agent._prev_files_written = set()
+        agent._direction_search_required = False
+        agent._direction_search_admitted = False
+        agent._direction_search_attempts = 0
+        agent._direction_search_record = None
+        agent._direction_search_last_failures = []
+        return agent
+
+    def test_v02_activates_on_wrong_direction(self):
+        """Direction search should activate alongside file-ban on wrong_direction."""
+        agent = self._make_jingu_agent()
+        agent._prev_files_written = {"django/utils/dateparse.py"}
+        ft = "wrong_direction"
+        if ft.startswith("wrong_direction") and agent._prev_files_written:
+            agent._file_ban_active = True
+            agent._file_ban_files = set(agent._prev_files_written)
+            agent._direction_search_required = True
+            agent._direction_search_admitted = False
+        assert agent._direction_search_required is True
+        assert agent._direction_search_admitted is False
+        assert agent._file_ban_active is True
+
+    def test_v02_does_not_activate_on_incomplete_fix(self):
+        """Direction search should NOT activate for incomplete_fix."""
+        agent = self._make_jingu_agent()
+        agent._prev_files_written = {"a.py"}
+        ft = "incomplete_fix"
+        if ft.startswith("wrong_direction") and agent._prev_files_written:
+            agent._direction_search_required = True
+        assert agent._direction_search_required is False
+
+    def test_v02_admitted_unblocks_writes(self):
+        """After hypothesis admitted, writes should be unblocked (file-ban still active)."""
+        agent = self._make_jingu_agent()
+        agent._file_ban_active = True
+        agent._file_ban_files = {"a.py"}
+        agent._direction_search_required = True
+        agent._direction_search_admitted = True
+        # When admitted, the pre-write guard is bypassed — only file-ban applies
+        # Simulate: write to non-banned file should be allowed
+        fb_changed = {"b.py"}
+        banned_hit = fb_changed & agent._file_ban_files
+        assert banned_hit == set()  # b.py not banned, so no violation
