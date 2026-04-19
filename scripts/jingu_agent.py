@@ -57,6 +57,7 @@ from minisweagent.run.benchmarks.swebench import (
 )
 from minisweagent.run.benchmarks.utils.batch_progress import RunBatchProgressManager
 from minisweagent.utils.log import logger
+from canonical_symbols import ALL_PHASES
 
 
 def check_direction_change(
@@ -2898,11 +2899,10 @@ class JinguAgent:
             # ONLY when EFR routing has NOT already set a failure-type-specific route.
             # EFR routing (from classify_failure → get_routing) is a precise diagnosis;
             # protocol routing is a generic fallback for incomplete records.
-            _VALID_PHASES = {"ANALYZE", "DESIGN", "EXECUTE", "OBSERVE", "DECIDE", "JUDGE"}
             _efr_route_active = (
                 bool(_last_failure_type)
                 and bool(_next_attempt_start_phase)
-                and _next_attempt_start_phase.upper() in _VALID_PHASES
+                and _next_attempt_start_phase.upper() in ALL_PHASES
             )
             if _efr_route_active:
                 print(

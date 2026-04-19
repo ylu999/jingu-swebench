@@ -16,6 +16,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
 
 from failure_classifier import classify_failure, get_routing
+from canonical_symbols import ALL_PHASES
 
 
 # ── Verified cases from efr-repair-loop-3inst ──────────────────────────
@@ -76,10 +77,9 @@ def test_efr_route_should_not_be_overridden_when_active():
 
 def test_all_failure_types_route_to_valid_phase():
     """Every failure type routes to a valid cognition phase."""
-    valid_phases = {"ANALYZE", "DESIGN", "EXECUTE", "JUDGE", "OBSERVE", "DECIDE"}
     for ft in ["wrong_direction", "incomplete_fix", "verify_gap", "execution_error"]:
         routing = get_routing(ft)
-        assert routing["next_phase"] in valid_phases, (
+        assert routing["next_phase"] in ALL_PHASES, (
             f"{ft} routes to invalid phase: {routing['next_phase']}"
         )
 
