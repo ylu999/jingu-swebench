@@ -814,18 +814,32 @@ class JinguAgent:
                 return
 
             banned_list = ", ".join(sorted(self._file_ban_files))
-            extraction_prompt = (
-                f"Based on the agent's conversation above, extract the direction-search "
-                f"hypothesis record. The agent is trying to fix a bug after a wrong direction. "
+
+            # Build accumulated_text from last N assistant messages
+            recent_texts = []
+            for msg in messages[-10:]:
+                role = msg.get("role", "")
+                content = msg.get("content", "")
+                if isinstance(content, str) and content.strip():
+                    recent_texts.append(f"[{role}]: {content}")
+            accumulated_text = "\n\n".join(recent_texts)
+            if len(accumulated_text) < 50:
+                print(f"    [wdrg-v02] extraction skip: accumulated_text too short ({len(accumulated_text)})", flush=True)
+                return
+
+            phase_hint = (
+                f"The agent is trying to fix a bug after a wrong direction. "
                 f"Banned files (from attempt 1): {banned_list}. "
                 f"Extract the agent's reasoning into the required structured format."
             )
 
-            # Call structured_extract with the direction search schema
+            # Call structured_extract with correct API signature
             record = model.structured_extract(
-                messages=messages[-10:],  # last 10 messages for context
-                extraction_prompt=extraction_prompt,
-                schema=DIRECTION_SEARCH_SCHEMA,
+                accumulated_text,
+                "DIRECTION_SEARCH",
+                DIRECTION_SEARCH_SCHEMA,
+                phase_hint=phase_hint,
+                max_tokens=2048,
             )
 
             if not isinstance(record, dict):
