@@ -1877,6 +1877,10 @@ class JinguAgent:
             _nprg_enabled_pre = __import__("os").environ.get("NPRG_ENABLED", "1") != "0"
             _nprg_prompt = ""  # deferred: applied AFTER retry controller sets last_failure
             _nprg_curr_files = set((jingu_body or {}).get("files_written", []))
+            # Fallback: extract files from patch diff if files_written is empty
+            if not _nprg_curr_files and patch:
+                import re as _re_nprg
+                _nprg_curr_files = set(_re_nprg.findall(r'^--- a/(.+)$', patch, _re_nprg.MULTILINE))
             _nprg_prev_files = getattr(self, '_prev_files_written', set())
             _nprg_curr_hash = patch_content_hash(patch) if patch else "empty"
             _nprg_prev_hash = patch_content_hash(_prev_raw_patch) if _prev_raw_patch else None
