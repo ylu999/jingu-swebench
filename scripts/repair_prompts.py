@@ -42,14 +42,18 @@ def _extract_evidence(cv_result: dict) -> dict:
 # Per-type repair instructions (deterministic, no LLM)
 _REPAIR_INSTRUCTIONS: dict[str, str] = {
     "wrong_direction": (
-        "CRITICAL CONSTRAINT: Your previous fix was COMPLETELY WRONG — zero tests passed.\n"
-        "You MUST change direction. The following rules are MANDATORY:\n"
+        "CRITICAL CONSTRAINT: Your previous fix was COMPLETELY WRONG — zero target tests passed.\n"
+        "You MUST change direction entirely. The following rules are MANDATORY:\n"
         "1. You MUST NOT modify the same file(s) in the same way as attempt 1.\n"
-        "2. You MUST explicitly state why your previous approach was wrong.\n"
-        "3. You MUST form a NEW hypothesis about the root cause before writing code.\n"
+        "2. You MUST explicitly state why your previous root cause hypothesis was wrong.\n"
+        "3. You MUST form a NEW hypothesis about a DIFFERENT root cause before writing code.\n"
         "4. You MUST NOT skip re-analysis — jumping straight to code will repeat the failure.\n"
+        "5. Before writing ANY code, state: (a) what was wrong with A1's approach, "
+        "(b) your new root cause hypothesis, (c) which different file/function you will modify.\n"
         "If you cannot explain what was wrong with the previous approach, "
-        "you are not ready to write code."
+        "you are not ready to write code.\n"
+        "WARNING: A system gate will REJECT your patch if you modify the same files "
+        "without changing direction."
     ),
     "incomplete_fix": (
         "Your fix made partial progress — some FAIL_TO_PASS tests now pass, "
@@ -120,9 +124,11 @@ def build_repair_prompt(
     if failure_type == "wrong_direction" and patch_context:
         prev_files = patch_context.get("files_written") or []
         prev_summary = patch_context.get("patch_summary") or {}
+        prev_root_cause = patch_context.get("prev_root_cause") or ""
+        prev_strategy = patch_context.get("prev_strategy_type") or ""
         if prev_files:
             constraint_lines = [
-                "PREVIOUS ATTEMPT PATCH (do NOT repeat this direction):",
+                "PREVIOUS ATTEMPT (FAILED — do NOT repeat this direction):",
                 f"  Files modified: {', '.join(prev_files)}",
             ]
             if prev_summary.get("lines_added") or prev_summary.get("lines_removed"):
@@ -130,9 +136,22 @@ def build_repair_prompt(
                     f"  Scope: {prev_summary.get('lines_added', 0)} lines added, "
                     f"{prev_summary.get('lines_removed', 0)} lines removed"
                 )
+            if prev_root_cause:
+                # Show A1's root cause so agent knows exactly what to avoid
+                rc_preview = prev_root_cause
+                constraint_lines.append(
+                    f"  Root cause hypothesis (PROVEN WRONG): {rc_preview}"
+                )
+            if prev_strategy:
+                constraint_lines.append(
+                    f"  Strategy used (FAILED): {prev_strategy}"
+                )
             constraint_lines.append(
-                "You must either fix a DIFFERENT file, or fix the same file "
-                "with a fundamentally different approach (different function/method)."
+                "\nYou MUST change direction. Either:\n"
+                "  (a) Fix a DIFFERENT file targeting a different root cause, OR\n"
+                "  (b) Fix the same file with a fundamentally different mechanism "
+                "(different function, different logic path).\n"
+                "A system gate will REJECT patches that repeat the same file+direction."
             )
             parts.append("\n".join(constraint_lines))
 

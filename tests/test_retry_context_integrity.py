@@ -67,7 +67,7 @@ def test_dual_cause_and_efr_coexist():
 
     # Both EFR phase declaration AND patch context should be present
     assert "[REPAIR PHASE:" in efr_with_ctx
-    assert "PREVIOUS ATTEMPT PATCH" in efr_with_ctx
+    assert "PREVIOUS ATTEMPT" in efr_with_ctx
     assert "dateparse.py" in efr_with_ctx
     assert "duration.py" in efr_with_ctx
 
@@ -84,7 +84,7 @@ def test_dual_cause_and_efr_coexist():
     assert "DUAL-CAUSE" in combined
     assert "REGEX_FIX" in combined
     assert "[REPAIR PHASE:" in combined
-    assert "PREVIOUS ATTEMPT PATCH" in combined
+    assert "PREVIOUS ATTEMPT" in combined
     assert "dateparse.py" in combined
     assert "original failure hint" in combined
 

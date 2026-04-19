@@ -2631,6 +2631,8 @@ class JinguAgent:
                                 _patch_ctx = {
                                     "files_written": (jingu_body or {}).get("files_written"),
                                     "patch_summary": (jingu_body or {}).get("patch_summary"),
+                                    "prev_root_cause": _prev_root_cause,
+                                    "prev_strategy_type": _prev_strategy_type,
                                 } if _jb_ft == "wrong_direction" else None
                                 _repair = build_repair_prompt(_jb_ft, _jb_cv, _jb_routing, patch_context=_patch_ctx)
                                 last_failure = _repair + "\n\n" + last_failure
@@ -2701,6 +2703,8 @@ class JinguAgent:
                                 _patch_ctx = {
                                     "files_written": (jingu_body or {}).get("files_written"),
                                     "patch_summary": (jingu_body or {}).get("patch_summary"),
+                                    "prev_root_cause": _prev_root_cause,
+                                    "prev_strategy_type": _prev_strategy_type,
                                 } if _jb_ft == "wrong_direction" else None
                                 _repair = build_repair_prompt(_jb_ft, _jb_cv, _jb_routing, patch_context=_patch_ctx)
                                 last_failure = _repair + "\n\n" + last_failure
