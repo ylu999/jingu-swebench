@@ -3007,6 +3007,14 @@ class JinguAgent:
                                     _last_failure_type = f"fm:{_jb_fm}"
                                     print(f"    [repair-route-fm] attempt={attempt} failure_mode={_jb_fm} "
                                           f"next_phase={_fm_routing['next_phase']}", flush=True)
+                            # WDRG v0.2: prediction error can also indicate wrong_direction
+                            # when CV is absent (signal_missing). Ensures file-ban + direction
+                            # search contract activates even without CV classification.
+                            if (not _last_failure_type.startswith("wrong_direction")
+                                    and _pred_err_type == "prediction_wrong_direction"):
+                                _last_failure_type = "wrong_direction"
+                                print(f"    [wdrg-v02] prediction_wrong_direction detected, "
+                                      f"setting _last_failure_type=wrong_direction", flush=True)
                             if is_data_driven_routing_enabled():
                                 try:
                                     _p216_phase = (jingu_body or {}).get("last_phase", "ANALYZE").upper()
@@ -3079,6 +3087,14 @@ class JinguAgent:
                                     _last_failure_type = f"fm:{_jb_fm}"
                                     print(f"    [repair-route-fm] attempt={attempt} failure_mode={_jb_fm} "
                                           f"next_phase={_fm_routing['next_phase']}", flush=True)
+                            # WDRG v0.2: prediction error can also indicate wrong_direction
+                            # when CV is absent (signal_missing). Ensures file-ban + direction
+                            # search contract activates even without CV classification.
+                            if (not _last_failure_type.startswith("wrong_direction")
+                                    and _pred_err_type == "prediction_wrong_direction"):
+                                _last_failure_type = "wrong_direction"
+                                print(f"    [wdrg-v02] prediction_wrong_direction detected, "
+                                      f"setting _last_failure_type=wrong_direction", flush=True)
                             if is_data_driven_routing_enabled():
                                 try:
                                     _p216_phase = (jingu_body or {}).get("last_phase", "ANALYZE").upper()
