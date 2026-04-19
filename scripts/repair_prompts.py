@@ -42,20 +42,39 @@ def _extract_evidence(cv_result: dict) -> dict:
 # Per-type repair instructions (deterministic, no LLM)
 _REPAIR_INSTRUCTIONS: dict[str, str] = {
     "wrong_direction": (
-        "CRITICAL CONSTRAINT: Your previous fix was COMPLETELY WRONG — zero target tests passed.\n"
-        "You MUST change direction entirely. The following rules are MANDATORY:\n"
-        "1. You MUST NOT modify the same file(s) as attempt 1. "
-        "The system will BLOCK any write to those files.\n"
-        "2. You MUST explicitly state why your previous root cause hypothesis was wrong.\n"
-        "3. You MUST form a NEW hypothesis about a DIFFERENT root cause before writing code.\n"
-        "4. You MUST NOT skip re-analysis — jumping straight to code will repeat the failure.\n"
-        "5. Before writing ANY code, state: (a) what was wrong with A1's approach, "
-        "(b) your new root cause hypothesis, (c) which DIFFERENT file/function you will modify.\n"
-        "If you cannot explain what was wrong with the previous approach, "
-        "you are not ready to write code.\n"
-        "ENFORCEMENT: A runtime gate monitors every file write. If you write to any "
-        "banned file (from attempt 1), you will receive an immediate VIOLATION message "
-        "and must switch to a different file."
+        "CRITICAL: Your previous fix was COMPLETELY WRONG — zero target tests passed.\n"
+        "You MUST change direction entirely.\n\n"
+        "=== MANDATORY DIRECTION SEARCH PROTOCOL ===\n\n"
+        "STEP 1 — REJECT PREVIOUS HYPOTHESIS:\n"
+        "State explicitly why your previous root cause hypothesis was wrong.\n"
+        "What evidence did you rely on that turned out to be misleading?\n\n"
+        "STEP 2 — GENERATE AT LEAST 2 ALTERNATIVE HYPOTHESES:\n"
+        "For EACH hypothesis, you MUST provide:\n"
+        "  (a) Root cause hypothesis — what is actually causing the bug?\n"
+        "  (b) Candidate files — which file(s) would you modify? "
+        "(MUST be DIFFERENT from banned files)\n"
+        "  (c) Supporting evidence — what code/behavior supports this hypothesis?\n\n"
+        "STEP 3 — SELECT AND JUSTIFY:\n"
+        "Choose ONE hypothesis and explain why it is more likely than the other(s).\n"
+        "Only then proceed to write code.\n\n"
+        "=== ENFORCEMENT ===\n"
+        "- BANNED FILES: The system will BLOCK any write to files from attempt 1.\n"
+        "- If you write to a banned file, you will receive an immediate VIOLATION.\n"
+        "- Candidate files in your hypotheses MUST NOT overlap with banned files.\n"
+        "- If you skip the hypothesis step and jump to code, "
+        "you WILL repeat the same mistake.\n\n"
+        "=== EXAMPLE FORMAT ===\n"
+        "PREVIOUS HYPOTHESIS (WRONG): [what you thought was the cause]\n"
+        "WHY WRONG: [evidence that disproves it]\n\n"
+        "HYPOTHESIS 1:\n"
+        "  Root cause: [description]\n"
+        "  Files to modify: [file1.py, file2.py]\n"
+        "  Evidence: [what supports this]\n\n"
+        "HYPOTHESIS 2:\n"
+        "  Root cause: [description]\n"
+        "  Files to modify: [file3.py]\n"
+        "  Evidence: [what supports this]\n\n"
+        "SELECTED: Hypothesis [N] because [reasoning]\n"
     ),
     "incomplete_fix": (
         "Your fix made partial progress — some FAIL_TO_PASS tests now pass, "
@@ -149,11 +168,14 @@ def build_repair_prompt(
                     f"  Strategy used (FAILED): {prev_strategy}"
                 )
             constraint_lines.append(
-                "\nYou MUST change direction. Either:\n"
-                "  (a) Fix a DIFFERENT file targeting a different root cause, OR\n"
-                "  (b) Fix the same file with a fundamentally different mechanism "
-                "(different function, different logic path).\n"
-                "A system gate will REJECT patches that repeat the same file+direction."
+                f"\nBANNED FILES (will be BLOCKED by runtime gate): {', '.join(prev_files)}"
+            )
+            constraint_lines.append(
+                "\nFollow the DIRECTION SEARCH PROTOCOL above:\n"
+                "  1. State why the previous hypothesis was wrong\n"
+                "  2. Generate ≥2 alternative hypotheses with candidate files + evidence\n"
+                "  3. Select one and explain why\n"
+                "  4. Only then write code — to DIFFERENT files"
             )
             parts.append("\n".join(constraint_lines))
 

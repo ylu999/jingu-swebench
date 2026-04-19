@@ -83,6 +83,31 @@ def check_direction_change(
     }
 
 
+def build_recovery_escalation_prompt(banned_files: set[str], violation_count: int) -> str:
+    """Build an escalated recovery prompt when file-ban violations accumulate.
+
+    Instead of just saying "don't write this file", provides the structured
+    direction search protocol to guide the agent toward alternatives.
+    """
+    banned_list = ", ".join(sorted(banned_files))
+    return (
+        f"⚠️ DIRECTION SEARCH REQUIRED (violation #{violation_count}) ⚠️\n\n"
+        f"You have written to BANNED file(s) {violation_count} time(s).\n"
+        f"BANNED FILES: {banned_list}\n\n"
+        "You MUST follow the direction search protocol:\n"
+        "1. STOP modifying the banned files immediately.\n"
+        "2. Think about what OTHER code paths could cause this bug.\n"
+        "3. Generate at least 2 alternative hypotheses:\n"
+        "   For each: (a) root cause, (b) candidate files (NOT banned), (c) evidence\n"
+        "4. Select the most promising hypothesis and modify THOSE files instead.\n\n"
+        "The bug might be in: a different model method, a manager, a queryset operation,\n"
+        "a signal handler, a middleware, or a utility function that the banned file calls.\n"
+        "Look at the CALLERS of the banned file, or look at PARALLEL implementations.\n\n"
+        f"DO NOT touch: {banned_list}\n"
+        "DO: read the traceback, find alternative code paths, modify a different file."
+    )
+
+
 def _parse_fail_to_pass(instance: dict) -> list[str]:
     """Parse FAIL_TO_PASS from instance dict, handling both list and JSON-string formats."""
     raw = instance.get("FAIL_TO_PASS", [])
@@ -532,17 +557,10 @@ class JinguAgent:
                     _banned_hit = _fb_changed & self._file_ban_files
                     if _banned_hit:
                         self._file_ban_violations += 1
-                        _ban_msg = (
-                            f"VIOLATION: You are modifying BANNED file(s): "
-                            f"{', '.join(sorted(_banned_hit))}.\n"
-                            f"Your previous attempt (wrong_direction) already failed by modifying "
-                            f"these exact files. The system requires you to fix DIFFERENT files.\n\n"
-                            f"MANDATORY: Revert your changes to {', '.join(sorted(_banned_hit))} "
-                            f"and identify a different file to modify. "
-                            f"Think about what OTHER code could cause this bug.\n\n"
-                            f"Banned files (from attempt 1): "
-                            f"{', '.join(sorted(self._file_ban_files))}\n"
-                            f"Violations: {self._file_ban_violations}/{self._file_ban_max_violations}"
+                        # Use escalated recovery prompt (direction search protocol)
+                        # instead of basic "stop writing this file" message
+                        _ban_msg = build_recovery_escalation_prompt(
+                            self._file_ban_files, self._file_ban_violations,
                         )
                         print(f"    [file-ban] VIOLATION #{self._file_ban_violations}: "
                               f"agent wrote to banned file(s) {sorted(_banned_hit)}", flush=True)

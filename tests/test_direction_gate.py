@@ -16,7 +16,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
 
-from jingu_agent import check_direction_change
+from jingu_agent import check_direction_change, build_recovery_escalation_prompt
 
 
 # ── Core logic: should_reject ────────────────────────────────────────────
@@ -228,3 +228,98 @@ class TestFileBanState:
         if ft == "wrong_direction" and agent._prev_files_written:
             agent._file_ban_active = True
         assert agent._file_ban_active is False
+
+
+# ── Recovery escalation prompt ──────────────────────────────────────────
+
+
+class TestRecoveryEscalationPrompt:
+    """Test build_recovery_escalation_prompt produces structured search guidance."""
+
+    def test_contains_banned_files(self):
+        """Prompt should list the banned files."""
+        prompt = build_recovery_escalation_prompt(
+            banned_files={"django/utils/dateparse.py", "django/db/models/query.py"},
+            violation_count=2,
+        )
+        assert "django/db/models/query.py" in prompt
+        assert "django/utils/dateparse.py" in prompt
+
+    def test_contains_violation_count(self):
+        """Prompt should reference the violation count."""
+        prompt = build_recovery_escalation_prompt(
+            banned_files={"a.py"},
+            violation_count=3,
+        )
+        assert "3" in prompt
+        assert "violation" in prompt.lower()
+
+    def test_contains_direction_search_protocol(self):
+        """Prompt should contain the structured hypothesis requirement."""
+        prompt = build_recovery_escalation_prompt(
+            banned_files={"a.py"},
+            violation_count=1,
+        )
+        assert "alternative hypotheses" in prompt.lower() or "2 alternative" in prompt
+        assert "candidate files" in prompt.lower()
+        assert "evidence" in prompt.lower()
+
+    def test_non_empty(self):
+        """Prompt should never be empty."""
+        prompt = build_recovery_escalation_prompt(
+            banned_files=set(),
+            violation_count=0,
+        )
+        assert len(prompt.strip()) > 0
+
+
+# ── Enhanced wrong_direction repair prompt ──────────────────────────────
+
+
+class TestEnhancedWrongDirectionPrompt:
+    """Test that the wrong_direction repair prompt includes direction search protocol."""
+
+    def test_prompt_contains_hypothesis_requirement(self):
+        """Wrong direction prompt should require ≥2 hypotheses."""
+        from repair_prompts import build_repair_prompt
+        prompt = build_repair_prompt(
+            failure_type="wrong_direction",
+            cv_result={"f2p_passed": 0, "f2p_failed": 2},
+            routing={"next_phase": "ANALYZE", "repair_goal": "Change direction", "required_principals": []},
+            patch_context={"files_written": ["django/utils/dateparse.py"], "patch_summary": {}},
+        )
+        assert "2 ALTERNATIVE HYPOTHESES" in prompt.upper() or "AT LEAST 2" in prompt.upper()
+
+    def test_prompt_contains_banned_files(self):
+        """Wrong direction prompt should list banned files."""
+        from repair_prompts import build_repair_prompt
+        prompt = build_repair_prompt(
+            failure_type="wrong_direction",
+            cv_result={"f2p_passed": 0, "f2p_failed": 1},
+            routing={"next_phase": "ANALYZE", "repair_goal": "Change direction", "required_principals": []},
+            patch_context={"files_written": ["django/db/models/deletion.py"], "patch_summary": {}},
+        )
+        assert "BANNED" in prompt.upper()
+        assert "django/db/models/deletion.py" in prompt
+
+    def test_prompt_contains_direction_search_steps(self):
+        """Prompt should contain the 3 steps: reject, generate, select."""
+        from repair_prompts import build_repair_prompt
+        prompt = build_repair_prompt(
+            failure_type="wrong_direction",
+            cv_result={"f2p_passed": 0, "f2p_failed": 1},
+            routing={"next_phase": "ANALYZE", "repair_goal": "Change direction", "required_principals": []},
+        )
+        assert "REJECT PREVIOUS HYPOTHESIS" in prompt.upper() or "STEP 1" in prompt
+        assert "SELECT" in prompt.upper()
+
+    def test_incomplete_fix_prompt_unchanged(self):
+        """incomplete_fix prompt should NOT contain direction search protocol."""
+        from repair_prompts import build_repair_prompt
+        prompt = build_repair_prompt(
+            failure_type="incomplete_fix",
+            cv_result={"f2p_passed": 3, "f2p_failed": 1},
+            routing={"next_phase": "DESIGN", "repair_goal": "Extend fix", "required_principals": []},
+        )
+        assert "DIRECTION SEARCH" not in prompt.upper()
+        assert "ALTERNATIVE HYPOTHESES" not in prompt.upper()
