@@ -56,7 +56,7 @@ def test_dual_cause_and_efr_coexist():
     # EFR repair prompt
     efr_prompt = build_repair_prompt(ft, cv, routing)
     assert "[REPAIR PHASE:" in efr_prompt
-    assert "CRITICAL CONSTRAINT" in efr_prompt
+    assert "ENFORCEMENT" in efr_prompt
 
     # With patch_context (simulates dual-cause information)
     patch_ctx = {

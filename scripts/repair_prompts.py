@@ -17,11 +17,15 @@ def _extract_evidence(cv_result: dict) -> dict:
     Returns a dict with:
         f2p_passed: int
         f2p_failed: int
+        p2p_passed: int
+        p2p_failed: int
         failing_tests: str (truncated output tail)
         eval_resolved: bool or None
     """
     f2p_passed = cv_result.get("f2p_passed") or 0
     f2p_failed = cv_result.get("f2p_failed") or 0
+    p2p_passed = cv_result.get("p2p_passed") or 0
+    p2p_failed = cv_result.get("p2p_failed") or 0
     # output_tail contains pytest output with failing test names
     output_tail = (cv_result.get("output_tail") or "").strip()
     if not output_tail:
@@ -34,6 +38,8 @@ def _extract_evidence(cv_result: dict) -> dict:
     return {
         "f2p_passed": f2p_passed,
         "f2p_failed": f2p_failed,
+        "p2p_passed": p2p_passed,
+        "p2p_failed": p2p_failed,
         "failing_tests": output_tail,
         "eval_resolved": eval_resolved,
     }
@@ -83,10 +89,19 @@ _REPAIR_INSTRUCTIONS: dict[str, str] = {
         "refine your existing approach to handle the missing cases."
     ),
     "verify_gap": (
-        "Your fix may be correct, but verification is incomplete. "
-        "All FAIL_TO_PASS tests pass, yet the instance is not marked resolved. "
-        "Check for PASS_TO_PASS regressions — your fix may have broken existing tests. "
-        "Narrow your change to avoid side effects."
+        "Your fix is on the RIGHT TRACK — all target tests pass.\n"
+        "However, your change broke existing tests (PASS_TO_PASS regressions).\n\n"
+        "REPAIR STRATEGY:\n"
+        "1. Read the failing test shown below to understand what behavior it expects\n"
+        "2. Identify which part of your change caused the regression\n"
+        "3. Narrow your fix — add a condition, guard, or alternative path "
+        "that preserves the existing behavior\n"
+        "4. Do NOT start over or change your overall approach — "
+        "just make it more precise\n\n"
+        "COMMON PATTERNS:\n"
+        "- Your fix changed a condition too broadly (add specificity)\n"
+        "- Your fix removed a code path still needed by other callers (preserve it)\n"
+        "- Your fix changed a return type or default value (keep backward compat)"
     ),
     "execution_error": (
         "Fix only execution-level issues — patch apply failure, syntax error, "
@@ -185,8 +200,22 @@ def build_repair_prompt(
         f"F2P results: {evidence['f2p_passed']} passed, "
         f"{evidence['f2p_failed']} failed"
     )
+    if evidence["p2p_failed"]:
+        evidence_lines.append(
+            f"P2P regressions: {evidence['p2p_failed']} existing test(s) BROKEN "
+            f"(out of {evidence['p2p_passed'] + evidence['p2p_failed']} total)"
+        )
     if evidence["eval_resolved"] is not None:
         evidence_lines.append(f"Eval resolved: {evidence['eval_resolved']}")
+
+    # For verify_gap: highlight that the fix works but broke something
+    if failure_type == "verify_gap" and evidence["p2p_failed"]:
+        evidence_lines.append(
+            "DIAGNOSIS: Your fix is CORRECT (all target tests pass). "
+            "But it BROKE an existing test. You must narrow your change "
+            "to preserve the existing behavior while still fixing the bug."
+        )
+
     if evidence["failing_tests"]:
         evidence_lines.append(f"Test output:\n{evidence['failing_tests']}")
 

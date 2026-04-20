@@ -75,6 +75,47 @@ def test_repair_prompt_truncates_long_output():
     assert "..." in prompt  # truncation marker
 
 
+def test_verify_gap_includes_p2p_regression_info():
+    """verify_gap repair prompt includes p2p regression counts and diagnosis."""
+    cv = {
+        "f2p_passed": 1, "f2p_failed": 0,
+        "p2p_passed": 23, "p2p_failed": 1,
+        "eval_resolved": False,
+        "output_tail": "test_load_empty_dir (migrations.test_loader.LoaderTests) ... FAIL",
+    }
+    ft = classify_failure(cv)
+    assert ft == "verify_gap"
+    routing = get_routing(ft)
+    prompt = build_repair_prompt(ft, cv, routing)
+    assert "P2P regressions: 1" in prompt
+    assert "DIAGNOSIS" in prompt
+    assert "CORRECT" in prompt  # "Your fix is CORRECT"
+    assert "BROKE" in prompt  # "it BROKE an existing test"
+    assert "test_load_empty_dir" in prompt  # failing test name preserved
+
+
+def test_verify_gap_without_p2p_regression():
+    """verify_gap with no p2p data still works (backward compat)."""
+    cv = {"f2p_passed": 1, "f2p_failed": 0, "eval_resolved": False}
+    ft = classify_failure(cv)
+    assert ft == "verify_gap"
+    routing = get_routing(ft)
+    prompt = build_repair_prompt(ft, cv, routing)
+    assert "P2P regressions" not in prompt  # no p2p data = no p2p line
+    assert "DIAGNOSIS" not in prompt
+
+
+def test_incomplete_fix_includes_f2p_counts():
+    """incomplete_fix repair prompt shows both f2p passed and failed counts."""
+    cv = {"f2p_passed": 436, "f2p_failed": 2, "eval_resolved": False}
+    ft = classify_failure(cv)
+    assert ft == "incomplete_fix"
+    routing = get_routing(ft)
+    prompt = build_repair_prompt(ft, cv, routing)
+    assert "436 passed" in prompt
+    assert "2 failed" in prompt
+
+
 def test_all_failure_types_have_routing():
     """Every FailureType has a corresponding routing rule."""
     for ft in ["wrong_direction", "incomplete_fix", "verify_gap", "execution_error"]:
@@ -105,7 +146,7 @@ def test_wrong_direction_without_patch_context():
     ft = classify_failure(cv)
     routing = get_routing(ft)
     prompt = build_repair_prompt(ft, cv, routing)
-    assert "CRITICAL CONSTRAINT" in prompt
+    assert "ENFORCEMENT" in prompt
     assert "PREVIOUS ATTEMPT" not in prompt
 
 

@@ -36,7 +36,7 @@ FAILURE_ROUTING_RULES: dict = {
     },
     "verify_gap": {
         "next_phase": "EXECUTE",
-        "repair_goal": "All targeted tests pass but evaluation still fails. Check for P2P regressions, missing updates, formatting issues, or edge cases not covered by F2P tests.",
+        "repair_goal": "Your fix WORKS (target tests pass) but BROKE an existing test. Read the failing test output below, identify which part of your change caused the regression, and narrow your fix to preserve existing behavior.",
         "required_principals": _principals_for_phase("EXECUTE"),
     },
     "execution_error": {
