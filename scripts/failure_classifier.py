@@ -35,9 +35,9 @@ FAILURE_ROUTING_RULES: dict = {
         "required_principals": _principals_for_phase("DESIGN"),
     },
     "verify_gap": {
-        "next_phase": "EXECUTE",
-        "repair_goal": "Your fix WORKS (target tests pass) but BROKE an existing test. Read the failing test output below, identify which part of your change caused the regression, and narrow your fix to preserve existing behavior.",
-        "required_principals": _principals_for_phase("EXECUTE"),
+        "next_phase": "DESIGN",
+        "repair_goal": "Your fix WORKS (target tests pass) but BROKE an existing test. You must REDESIGN your approach — the previous patch direction causes an unavoidable regression. Analyze the failing test to understand what constraint your fix violates, then design a fundamentally different fix strategy that satisfies BOTH the target tests AND the existing tests.",
+        "required_principals": _principals_for_phase("DESIGN"),
     },
     "execution_error": {
         "next_phase": "EXECUTE",

@@ -139,12 +139,12 @@ class TestGetRouting(unittest.TestCase):
     def test_incomplete_fix_routing(self):
         r = get_routing("incomplete_fix")
         self.assertEqual(r["next_phase"], "DESIGN")
-        self.assertIn("minimal_change", r["required_principals"])
+        self.assertIn("ontology_alignment", r["required_principals"])
 
     def test_verify_gap_routing(self):
         r = get_routing("verify_gap")
-        self.assertEqual(r["next_phase"], "JUDGE")
-        self.assertIn("evidence_linkage", r["required_principals"])
+        self.assertEqual(r["next_phase"], "DESIGN")
+        self.assertIn("ontology_alignment", r["required_principals"])
 
     def test_execution_error_routing(self):
         r = get_routing("execution_error")

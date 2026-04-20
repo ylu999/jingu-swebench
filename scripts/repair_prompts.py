@@ -91,17 +91,19 @@ _REPAIR_INSTRUCTIONS: dict[str, str] = {
     "verify_gap": (
         "Your fix is on the RIGHT TRACK — all target tests pass.\n"
         "However, your change broke existing tests (PASS_TO_PASS regressions).\n\n"
-        "REPAIR STRATEGY:\n"
-        "1. Read the failing test shown below to understand what behavior it expects\n"
-        "2. Identify which part of your change caused the regression\n"
-        "3. Narrow your fix — add a condition, guard, or alternative path "
-        "that preserves the existing behavior\n"
-        "4. Do NOT start over or change your overall approach — "
-        "just make it more precise\n\n"
-        "COMMON PATTERNS:\n"
-        "- Your fix changed a condition too broadly (add specificity)\n"
-        "- Your fix removed a code path still needed by other callers (preserve it)\n"
-        "- Your fix changed a return type or default value (keep backward compat)"
+        "CRITICAL: Incremental patching of the same approach will NOT work.\n"
+        "The previous attempt tried multiple variations and ALL caused the same regression.\n"
+        "You MUST redesign from scratch.\n\n"
+        "REDESIGN STRATEGY:\n"
+        "1. Read the failing test below — understand what invariant it protects\n"
+        "2. Read the target test — understand what behavior it needs\n"
+        "3. Identify WHY these two requirements conflict under your previous approach\n"
+        "4. Design a NEW approach that satisfies BOTH constraints simultaneously\n"
+        "5. The new approach should modify different code paths or use a different mechanism\n\n"
+        "DO NOT:\n"
+        "- Add guards/conditions to the same patch (already tried, doesn't work)\n"
+        "- Narrow the same change (already tried, same regression)\n"
+        "- Keep the same overall structure with minor tweaks"
     ),
     "execution_error": (
         "Fix only execution-level issues — patch apply failure, syntax error, "
@@ -212,8 +214,8 @@ def build_repair_prompt(
     if failure_type == "verify_gap" and evidence["p2p_failed"]:
         evidence_lines.append(
             "DIAGNOSIS: Your fix is CORRECT (all target tests pass). "
-            "But it BROKE an existing test. You must narrow your change "
-            "to preserve the existing behavior while still fixing the bug."
+            "But it BROKE an existing test. Incremental narrowing of the same approach "
+            "was already tried and FAILED. You must REDESIGN your approach entirely."
         )
 
     if evidence["failing_tests"]:
