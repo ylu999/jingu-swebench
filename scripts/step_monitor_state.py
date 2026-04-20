@@ -33,7 +33,7 @@ class StopExecution(Exception):
 # Extracted as a pure function so it can be unit-tested independently of
 # the attempt loop machinery in run_with_jingu().
 _INSTANCE_TERMINAL_REASONS = frozenset({"task_success"})
-_ATTEMPT_TERMINAL_REASONS  = frozenset({"no_signal"})
+_ATTEMPT_TERMINAL_REASONS  = frozenset({"no_signal", "wdrg_scope_violation_limit"})
 
 def early_stop_scope(reason: str) -> str:
     """Return the scope of an early-stop verdict.

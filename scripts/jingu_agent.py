@@ -794,11 +794,9 @@ class JinguAgent:
                                 if self._consecutive_scope_violations >= self._scope_violation_limit:
                                     print(f"    [wdrg-v03] HARD STOP: {self._scope_violation_limit} consecutive "
                                           f"scope violations — agent cannot follow admitted direction", flush=True)
-                                    from step_monitor_state import EarlyStopVerdict
-                                    self._state.early_stop_verdict = EarlyStopVerdict(
+                                    from control.reasoning_state import VerdictStop
+                                    self._state.early_stop_verdict = VerdictStop(
                                         reason="wdrg_scope_violation_limit",
-                                        message=f"Agent exceeded {self._scope_violation_limit} consecutive writes "
-                                                f"outside admitted scope",
                                     )
                             else:
                                 # All writes within scope — reset consecutive counter
