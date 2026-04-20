@@ -1860,6 +1860,7 @@ def _step_verify_if_needed(
                         changed_files=changed_files,
                         previous_result=prev_result,
                         step=_canonical_step,
+                        priority_sentinel_tests=getattr(state, 'priority_sentinel_tests', None) or None,
                     )
 
                     # Record in telemetry (target-aware + sentinel fields)

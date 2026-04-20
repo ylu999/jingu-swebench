@@ -237,14 +237,14 @@ def _parse_f2p_p2p(
     output: str,
     fail_to_pass: list,
     pass_to_pass: list,
-) -> tuple[int, int, int, int]:
+) -> tuple[int, int, int, int, list[str]]:
     """
     Parse test output against FAIL_TO_PASS and PASS_TO_PASS test lists.
 
     Matches individual test results in the output against the official test lists
     to compute eval-aligned metrics, exactly like SWE-bench grading.
 
-    Returns (f2p_passed, f2p_failed, p2p_passed, p2p_failed).
+    Returns (f2p_passed, f2p_failed, p2p_passed, p2p_failed, p2p_failing_names).
 
     BUG-10 fix: this replaces the old approach of just counting total pass/fail,
     which couldn't distinguish F2P from P2P and produced false positives/negatives.
@@ -265,7 +265,7 @@ def _parse_f2p_p2p(
 
     if not output:
         # No output at all — F2P conservatively failed, P2P unknown (assume passed)
-        return 0, len(fail_to_pass), len(pass_to_pass), 0
+        return 0, len(fail_to_pass), len(pass_to_pass), 0, []
 
     # Build sets of test identifiers for matching
     f2p_set = set(fail_to_pass)
@@ -333,17 +333,19 @@ def _parse_f2p_p2p(
 
     p2p_passed = 0
     p2p_failed = 0
+    p2p_failing_names: list[str] = []
     for t in p2p_set:
         if t in passed_tests:
             p2p_passed += 1
         elif t in failed_tests:
             p2p_failed += 1
+            p2p_failing_names.append(t)
         else:
             # Test not found in output — count as passed (conservative for P2P,
             # since missing from output often means the test module wasn't in directives)
             p2p_passed += 1
 
-    return f2p_passed, f2p_failed, p2p_passed, p2p_failed
+    return f2p_passed, f2p_failed, p2p_passed, p2p_failed, p2p_failing_names
 
 
 # ── Main function ─────────────────────────────────────────────────────────────
@@ -563,7 +565,7 @@ def run_controlled_verify(
         elapsed_ms = round((time.monotonic() - t0) * 1000, 1)
 
         # Step 6: parse F2P/P2P results for eval-aligned verdict
-        f2p_pass, f2p_fail, p2p_pass, p2p_fail = _parse_f2p_p2p(
+        f2p_pass, f2p_fail, p2p_pass, p2p_fail, p2p_fail_names = _parse_f2p_p2p(
             output, fail_to_pass, instance.get("PASS_TO_PASS", [])
         )
 
@@ -595,6 +597,7 @@ def run_controlled_verify(
             "f2p_failed": f2p_fail,
             "p2p_passed": p2p_pass,
             "p2p_failed": p2p_fail,
+            "p2p_failing_names": p2p_fail_names,
             "eval_resolved": eval_resolved,
             "verify_scope": _actual_scope,
         }

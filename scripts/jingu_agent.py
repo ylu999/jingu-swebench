@@ -569,6 +569,8 @@ class JinguAgent:
         self._admitted_target_files: set[str] = set()  # v0.3: allowed write set from admitted hypothesis
         self._consecutive_scope_violations: int = 0  # v0.3: consecutive out-of-scope writes
         self._scope_violation_limit: int = 3  # v0.3b: hard stop after this many consecutive
+        # Cross-attempt P2P regression names for sentinel priority
+        self._prev_p2p_regression_names: list[str] = []
 
     # -- step-level hooks (called by JinguProgressTrackingAgent.step) --------
 
@@ -1576,6 +1578,11 @@ class JinguAgent:
         # Plan-A: reset extraction retry counts per attempt
         _monitor.extraction_retry_counts = {}
 
+        # Pass previous P2P regression names as priority sentinels for this attempt
+        if attempt > 1 and self._prev_p2p_regression_names:
+            _monitor.priority_sentinel_tests = list(self._prev_p2p_regression_names)
+            print(f"    [sentinel-priority] injecting {len(self._prev_p2p_regression_names)} "
+                  f"prev regression tests: {self._prev_p2p_regression_names[:3]}", flush=True)
         self._state = _monitor
         # P0.2: cross-attempt routing enforcement
         # _monitor IS self._state — the same StepMonitorState object that gets
@@ -1707,10 +1714,15 @@ class JinguAgent:
                         "f2p_failed": _cv_source.get("f2p_failed"),
                         "p2p_passed": _cv_source.get("p2p_passed"),
                         "p2p_failed": _cv_source.get("p2p_failed"),
+                        "p2p_failing_names": _cv_source.get("p2p_failing_names", []),
                         "eval_resolved": _cv_source.get("eval_resolved"),
                         "output_tail": _cv_source.get("output_tail", ""),
                     }
                     jingu_body["controlled_verify"] = cv_flat
+                    # Store P2P regression names for next attempt's sentinel priority
+                    _p2p_names = _cv_source.get("p2p_failing_names", [])
+                    if _p2p_names:
+                        self._prev_p2p_regression_names = list(_p2p_names)
                     jingu_body["test_results"]["ran_tests"] = True
                     jingu_body["test_results"]["controlled_passed"] = _cv_source["tests_passed"]
                     jingu_body["test_results"]["controlled_failed"] = _cv_source["tests_failed"]

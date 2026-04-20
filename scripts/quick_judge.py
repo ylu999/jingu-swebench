@@ -207,7 +207,7 @@ _SENTINEL_MAX = 3
 _SENTINEL_TIMEOUT_S = 30
 
 
-def select_sentinel_tests(instance, changed_files):
+def select_sentinel_tests(instance, changed_files, *, priority_tests=None):
     """
     Select up to 3 P2P sentinel tests for regression detection.
 
@@ -215,6 +215,7 @@ def select_sentinel_tests(instance, changed_files):
     has introduced a regression.
 
     Priority:
+      0. priority_tests — known regression tests from previous attempt (always included first)
       1. Tests whose module name matches a changed file name (most related)
       2. Shortest test names first (proxy for simplest/fastest)
 
@@ -224,7 +225,26 @@ def select_sentinel_tests(instance, changed_files):
     if not p2p:
         return []
 
+    p2p_set = set(p2p)
+
+    # Priority 0: known regression tests from previous attempt
+    priority_selected = []
+    if priority_tests:
+        for pt in priority_tests:
+            if pt in p2p_set and pt not in priority_selected:
+                priority_selected.append(pt)
+                if len(priority_selected) >= _SENTINEL_MAX:
+                    break
+        if priority_selected:
+            print(f"    [sentinel-priority] {len(priority_selected)} prev regression tests "
+                  f"included in sentinel: {priority_selected[:3]}", flush=True)
+
+    remaining_slots = _SENTINEL_MAX - len(priority_selected)
+    if remaining_slots <= 0:
+        return sorted(priority_selected)
+
     # Build set of changed basenames (without extension) for matching
+    already_selected = set(priority_selected)
     changed_basenames = set()
     for fpath in (changed_files or []):
         basename = os.path.basename(fpath)
@@ -240,16 +260,17 @@ def select_sentinel_tests(instance, changed_files):
         return False
 
     # Partition: matching tests first (most likely to regress), then rest
+    candidates = [t for t in p2p if t not in already_selected]
     matching = sorted(
-        [t for t in p2p if _matches_changed(t)],
+        [t for t in candidates if _matches_changed(t)],
         key=lambda t: (len(t), t),
     )
     rest = sorted(
-        [t for t in p2p if not _matches_changed(t)],
+        [t for t in candidates if not _matches_changed(t)],
         key=lambda t: (len(t), t),
     )
 
-    selected = (matching + rest)[:_SENTINEL_MAX]
+    selected = priority_selected + (matching + rest)[:remaining_slots]
     return sorted(selected)
 
 
@@ -750,7 +771,8 @@ def _build_quick_test_command(instance, test_ids):
 
 
 def run_quick_judge(patch, instance, container_id, changed_files,
-                    previous_result=None, step=0):
+                    previous_result=None, step=0, *,
+                    priority_sentinel_tests=None):
     """
     Run a quick judge: targeted F2P test subset in the eval container.
 
@@ -830,7 +852,10 @@ def run_quick_judge(patch, instance, container_id, changed_files,
 
         if target_status == "passed":
             try:
-                sentinel_ids = select_sentinel_tests(instance, changed_files)
+                sentinel_ids = select_sentinel_tests(
+                    instance, changed_files,
+                    priority_tests=priority_sentinel_tests,
+                )
                 print(f"    [quick-judge] sentinel selected={len(sentinel_ids)}"
                       f"{' ids=' + ','.join(sentinel_ids[:3]) if sentinel_ids else ''}",
                       flush=True)

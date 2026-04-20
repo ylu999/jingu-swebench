@@ -152,6 +152,7 @@ class StepMonitorState:
         self.last_quick_judge_patch: str = ""          # patch hash at last quick judge
         self._quick_judge_selected_tests: list[str] | None = None  # locked test subset for this attempt
         self._pending_quick_judge_message: str = ""  # transient: message to inject after quick judge
+        self.priority_sentinel_tests: list[str] = []  # P2P tests from prev attempt regression (sentinel priority)
         # Phase Submission Enforcement (p14 governance activation)
         # Tracks consecutive steps in the current phase without a submitted phase record.
         # Three-level escalation: soft reminder → hard warning → forced tool_choice.
