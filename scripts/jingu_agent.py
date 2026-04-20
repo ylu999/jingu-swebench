@@ -2388,7 +2388,13 @@ class JinguAgent:
                     jingu_body["dual_patch_similarity"] = round(_dp_sim, 3)
                     jingu_body["dual_patch_too_similar"] = _dp_too_similar
                 # HARD REJECTION: drop this patch from candidates if too similar
-                if _dp_too_similar:
+                # BUT: CV eval_resolved=true overrides similarity rejection —
+                # a verified-correct patch must never be dropped by a heuristic gate.
+                _cv_resolved = ((jingu_body or {}).get("controlled_verify") or {}).get("eval_resolved")
+                if _dp_too_similar and _cv_resolved:
+                    print(f"    [exp-j-similarity] CV OVERRIDE: similarity={_dp_sim:.0%} but "
+                          f"cv_eval_resolved=True — keeping patch in candidates", flush=True)
+                elif _dp_too_similar:
                     _dp_rejected = True
                     # Remove this attempt's candidate if it was already added
                     candidates = [c for c in candidates if c.get("attempt") != attempt]
@@ -2434,7 +2440,11 @@ class JinguAgent:
                         "new_files": sorted(_dcg["new_files"]),
                         "direction_changed": _dcg["direction_changed"],
                     }
-                if _dcg["should_reject"]:
+                _dcg_cv_resolved = ((jingu_body or {}).get("controlled_verify") or {}).get("eval_resolved")
+                if _dcg["should_reject"] and _dcg_cv_resolved:
+                    print(f"    [direction-gate] CV OVERRIDE: same files but "
+                          f"cv_eval_resolved=True — keeping patch in candidates", flush=True)
+                elif _dcg["should_reject"]:
                     # HARD REJECT: agent did not change direction
                     _dcg_rejected = True
                     candidates = [c for c in candidates if c.get("attempt") != attempt]
