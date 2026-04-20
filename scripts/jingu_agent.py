@@ -2394,6 +2394,15 @@ class JinguAgent:
                 if _dp_too_similar and _cv_resolved:
                     print(f"    [exp-j-similarity] CV OVERRIDE: similarity={_dp_sim:.0%} but "
                           f"cv_eval_resolved=True — keeping patch in candidates", flush=True)
+                    if jingu_body:
+                        jingu_body["cv_override"] = {
+                            "type": "similarity",
+                            "attempt": attempt,
+                            "similarity": round(_dp_sim, 3),
+                            "cv_eval_resolved": True,
+                            "counterfactual_verdict": "rejected",
+                            "final_verdict": "admitted",
+                        }
                 elif _dp_too_similar:
                     _dp_rejected = True
                     # Remove this attempt's candidate if it was already added
@@ -2444,6 +2453,16 @@ class JinguAgent:
                 if _dcg["should_reject"] and _dcg_cv_resolved:
                     print(f"    [direction-gate] CV OVERRIDE: same files but "
                           f"cv_eval_resolved=True — keeping patch in candidates", flush=True)
+                    if jingu_body:
+                        jingu_body["cv_override"] = {
+                            "type": "direction",
+                            "attempt": attempt,
+                            "prev_files": sorted(_nprg_prev_files),
+                            "curr_files": sorted(_nprg_curr_files),
+                            "cv_eval_resolved": True,
+                            "counterfactual_verdict": "rejected",
+                            "final_verdict": "admitted",
+                        }
                 elif _dcg["should_reject"]:
                     # HARD REJECT: agent did not change direction
                     _dcg_rejected = True
