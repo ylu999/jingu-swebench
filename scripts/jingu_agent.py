@@ -211,7 +211,6 @@ DIRECTION_SEARCH_SCHEMA = {
                 },
                 "required": ["root_cause", "candidate_files", "evidence"],
             },
-            "minItems": 2,
             "description": "At least 2 alternative hypotheses for the bug's root cause.",
         },
         "chosen_hypothesis_index": {

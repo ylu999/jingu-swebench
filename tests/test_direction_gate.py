@@ -496,11 +496,11 @@ class TestDirectionSearchSchema:
         assert "chosen_hypothesis_index" in DIRECTION_SEARCH_SCHEMA["required"]
         assert "chosen_reason" in DIRECTION_SEARCH_SCHEMA["required"]
 
-    def test_schema_hypotheses_min_items(self):
-        """alternative_hypotheses should require minItems: 2."""
+    def test_schema_hypotheses_no_min_items(self):
+        """alternative_hypotheses must NOT have minItems (Bedrock rejects >1)."""
         from jingu_agent import DIRECTION_SEARCH_SCHEMA
         hyp_schema = DIRECTION_SEARCH_SCHEMA["properties"]["alternative_hypotheses"]
-        assert hyp_schema["minItems"] == 2
+        assert "minItems" not in hyp_schema, "Bedrock rejects minItems>1; enforce in validate_direction_search_record instead"
 
 
 # ── WDRG v0.2: direction search state ──────────────────────────────────
