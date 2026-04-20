@@ -616,6 +616,13 @@ class TestScopeBinding:
         agent._consecutive_scope_violations = 3
         assert agent._consecutive_scope_violations >= agent._scope_violation_limit
 
+    def test_hard_stop_uses_verdict_stop(self):
+        """VerdictStop import must succeed — EarlyStopVerdict bug (commit 9b7b413)."""
+        from control.reasoning_state import VerdictStop
+        v = VerdictStop(reason="wdrg_scope_violation_limit")
+        assert v.reason == "wdrg_scope_violation_limit"
+        assert v.type == "STOP"
+
     def test_auto_admit_has_no_scope_binding(self):
         """Auto-admit fallback should leave admitted_target_files empty."""
         agent = self._make_agent()
