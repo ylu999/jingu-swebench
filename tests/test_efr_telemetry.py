@@ -24,7 +24,7 @@ _CV_CASES: list[tuple[dict, str, str]] = [
     ({"verification_kind": "controlled_error"}, "execution_error", "EXECUTE"),
     ({"f2p_passed": 3, "f2p_failed": 2}, "incomplete_fix", "DESIGN"),
     ({"f2p_passed": 0, "f2p_failed": 5}, "wrong_direction", "ANALYZE"),
-    ({"f2p_passed": 3, "f2p_failed": 0, "eval_resolved": False}, "verify_gap", "EXECUTE"),
+    ({"f2p_passed": 3, "f2p_failed": 0, "eval_resolved": False}, "verify_gap", "DESIGN"),
 ]
 
 

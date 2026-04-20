@@ -2560,8 +2560,12 @@ class JinguAgent:
                     "gate_reason_codes": [],
                     "exit_status": agent_exit,
                 })
+                _cv_bl = (jingu_body or {}).get("controlled_verify") or {}
                 candidates.append({"attempt": attempt, "patch": patch, "score": score,
-                                    "gate_code": "BASELINE_NO_GATE"})
+                                    "gate_code": "BASELINE_NO_GATE",
+                                    "cv_eval_resolved": _cv_bl.get("eval_resolved"),
+                                    "cv_p2p_failed": _cv_bl.get("p2p_failed", 0) or 0,
+                                    "cv_f2p_passed": _cv_bl.get("f2p_passed", 0) or 0})
                 last_failure = ""
                 agent_exit = None
             elif GATE_MODE == "trust_gate":
@@ -2596,12 +2600,17 @@ class JinguAgent:
                           f"hunks={fp['hunks']}  +{fp['lines_added']}/-{fp['lines_removed']}")
                     t_gate.stop()
 
+                    # CV-aware candidate: store verify signals for outcome-aware selection
+                    _cv = (jingu_body or {}).get("controlled_verify") or {}
                     candidates.append({
                         "attempt": attempt,
                         "patch": patch,
                         "score": score,
                         "gate_code": gate_result.gate_code,
                         "gate_reason_codes": gate_result.reason_codes,
+                        "cv_eval_resolved": _cv.get("eval_resolved"),
+                        "cv_p2p_failed": _cv.get("p2p_failed", 0) or 0,
+                        "cv_f2p_passed": _cv.get("f2p_passed", 0) or 0,
                     })
                     # Patch bloat detection
                     if attempt >= 2 and len(attempts_log) >= 2:
@@ -3257,8 +3266,12 @@ class JinguAgent:
                 patch_lines = len(patch.splitlines())
                 print(f"    [gate] OK  score={score:.0f}  lines={patch_lines}")
                 t_gate.stop()
+                _cv_st = (jingu_body or {}).get("controlled_verify") or {}
                 candidates.append({"attempt": attempt, "patch": patch, "score": score,
-                                    "gate_code": "STRUCTURAL_OK"})
+                                    "gate_code": "STRUCTURAL_OK",
+                                    "cv_eval_resolved": _cv_st.get("eval_resolved"),
+                                    "cv_p2p_failed": _cv_st.get("p2p_failed", 0) or 0,
+                                    "cv_f2p_passed": _cv_st.get("f2p_passed", 0) or 0})
                 last_failure = ""
                 agent_exit = None
 
@@ -3492,12 +3505,29 @@ class JinguAgent:
                 failure_record=_last_fr,
             )
 
-        best = max(candidates, key=lambda c: c["score"])
+        # Outcome-aware selection: CV results > heuristic score
+        # Priority: (1) eval_resolved, (2) no p2p regression, (3) f2p pass count, (4) patch score
+        def _attempt_rank(c):
+            return (
+                1 if c.get("cv_eval_resolved") else 0,   # resolved > not
+                0 if (c.get("cv_p2p_failed") or 0) > 0 else 1,  # no regression > regression
+                c.get("cv_f2p_passed") or 0,              # more f2p passed > fewer
+                c["score"],                                # heuristic tie-break
+            )
+        best = max(candidates, key=_attempt_rank)
         gate_code = best.get("gate_code", "ADMITTED")
         best_admission = next(
             (a["admission_reason"] for a in attempts_log if a["attempt"] == best["attempt"]),
             gate_code.lower(),
         )
+        # Log selection ranking for all candidates
+        if len(candidates) > 1:
+            for _c in sorted(candidates, key=_attempt_rank, reverse=True):
+                _rank = _attempt_rank(_c)
+                print(f"    [selection] attempt={_c['attempt']}  rank={_rank}  "
+                      f"cv_resolved={_c.get('cv_eval_resolved')}  "
+                      f"p2p_failed={_c.get('cv_p2p_failed', '?')}  "
+                      f"f2p_passed={_c.get('cv_f2p_passed', '?')}")
         print(f"  [result] ACCEPTED  best_attempt={best['attempt']}  score={best['score']:.0f}  "
               f"gate={gate_code}  admission={best_admission}  elapsed={t_inst.elapsed:.1f}s  "
               f"bedrock_calls={llm_calls}  cost=${inst_usage.get('cost_usd', 0):.4f}")

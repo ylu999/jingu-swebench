@@ -38,7 +38,7 @@ _VERIFIED_CASES = [
     (
         {"f2p_passed": 1, "f2p_failed": 0, "eval_resolved": False},
         "verify_gap",
-        "EXECUTE",
+        "DESIGN",
         "django__django-11141",
     ),
 ]
