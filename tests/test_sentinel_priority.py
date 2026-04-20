@@ -182,3 +182,50 @@ def test_cv_parse_f2p_p2p_empty_output():
     assert len(result) == 5
     _, _, _, _, p2p_names = result
     assert p2p_names == []
+
+
+# ── record_verify preserves p2p_failing_names ────────────────────────────────
+
+def test_record_verify_preserves_p2p_failing_names():
+    """StepMonitorState.record_verify must store p2p_failing_names in verify_history."""
+    from step_monitor_state import StepMonitorState
+
+    state = StepMonitorState(instance_id="test", attempt=1, instance={})
+    cv_result = {
+        "verification_kind": "controlled_fail_to_pass",
+        "tests_passed": 22,
+        "tests_failed": 1,
+        "exit_code": 1,
+        "elapsed_ms": 2000.0,
+        "f2p_passed": 1,
+        "f2p_failed": 0,
+        "p2p_passed": 22,
+        "p2p_failed": 1,
+        "p2p_failing_names": ["test_combining_multiple_models (queries.test_qs_combinators.QuerySetSetOperationTests)"],
+        "eval_resolved": False,
+        "output_tail": "test_combining_multiple_models ... ERROR",
+    }
+    state.record_verify(step=10, result=cv_result)
+
+    assert len(state.verify_history) == 1
+    entry = state.verify_history[0]
+    assert entry["p2p_failing_names"] == ["test_combining_multiple_models (queries.test_qs_combinators.QuerySetSetOperationTests)"]
+    assert entry["p2p_failed"] == 1
+
+
+def test_record_verify_empty_p2p_failing_names():
+    """When no P2P regression, p2p_failing_names defaults to empty list."""
+    from step_monitor_state import StepMonitorState
+
+    state = StepMonitorState(instance_id="test", attempt=1, instance={})
+    cv_result = {
+        "verification_kind": "controlled_fail_to_pass",
+        "tests_passed": 23,
+        "tests_failed": 0,
+        "exit_code": 0,
+        "elapsed_ms": 1500.0,
+    }
+    state.record_verify(step=5, result=cv_result)
+
+    entry = state.verify_history[0]
+    assert entry["p2p_failing_names"] == []
