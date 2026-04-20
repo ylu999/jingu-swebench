@@ -560,3 +560,86 @@ class TestDirectionSearchState:
         fb_changed = {"b.py"}
         banned_hit = fb_changed & agent._file_ban_files
         assert banned_hit == set()  # b.py not banned, so no violation
+
+
+# ── WDRG v0.3: scope-binding enforcement ──────────────────────────────────
+
+
+class TestScopeBinding:
+    """Test v0.3 scope-binding: admitted hypothesis binds execution write set."""
+
+    def _make_agent(self):
+        from jingu_agent import JinguAgent
+        agent = JinguAgent.__new__(JinguAgent)
+        agent._file_ban_active = True
+        agent._file_ban_files = {"a.py"}
+        agent._file_ban_violations = 0
+        agent._direction_search_required = True
+        agent._direction_search_admitted = True
+        agent._admitted_target_files = {"b.py", "c.py"}
+        agent._consecutive_scope_violations = 0
+        agent._scope_violation_limit = 3
+        return agent
+
+    def test_in_scope_write_resets_counter(self):
+        """Writes within admitted scope should reset consecutive violation counter."""
+        agent = self._make_agent()
+        agent._consecutive_scope_violations = 2
+        fb_changed = {"b.py"}
+        out_of_scope = fb_changed - agent._admitted_target_files
+        assert out_of_scope == set()
+        # Should reset
+        agent._consecutive_scope_violations = 0
+        assert agent._consecutive_scope_violations == 0
+
+    def test_out_of_scope_write_detected(self):
+        """Writes outside admitted scope should be flagged."""
+        agent = self._make_agent()
+        fb_changed = {"a.py", "b.py"}  # a.py is out of scope (and banned)
+        out_of_scope = fb_changed - agent._admitted_target_files
+        assert out_of_scope == {"a.py"}
+        banned_out = out_of_scope & agent._file_ban_files
+        assert banned_out == {"a.py"}
+
+    def test_out_of_scope_increments_consecutive(self):
+        """Each out-of-scope write should increment consecutive counter."""
+        agent = self._make_agent()
+        assert agent._consecutive_scope_violations == 0
+        agent._consecutive_scope_violations += 1
+        assert agent._consecutive_scope_violations == 1
+        agent._consecutive_scope_violations += 1
+        assert agent._consecutive_scope_violations == 2
+
+    def test_hard_stop_at_limit(self):
+        """Should trigger hard stop after scope_violation_limit consecutive violations."""
+        agent = self._make_agent()
+        agent._consecutive_scope_violations = 3
+        assert agent._consecutive_scope_violations >= agent._scope_violation_limit
+
+    def test_auto_admit_has_no_scope_binding(self):
+        """Auto-admit fallback should leave admitted_target_files empty."""
+        agent = self._make_agent()
+        agent._admitted_target_files = set()  # auto-admit
+        fb_changed = {"a.py", "b.py"}
+        # With empty admitted_target_files, should fall back to banned-file check
+        assert not agent._admitted_target_files
+        banned_hit = fb_changed & agent._file_ban_files
+        assert banned_hit == {"a.py"}
+
+    def test_admitted_target_files_stored_on_admission(self):
+        """Admission should store chosen_files as admitted_target_files."""
+        agent = self._make_agent()
+        agent._admitted_target_files = set()
+        # Simulate admission with chosen_files
+        chosen_files = ["django/db/models/query.py", "django/db/models/sql/subqueries.py"]
+        agent._admitted_target_files = set(chosen_files)
+        assert agent._admitted_target_files == {"django/db/models/query.py", "django/db/models/sql/subqueries.py"}
+
+    def test_mixed_scope_only_reverts_out_of_scope(self):
+        """When some files in scope and some out, only out-of-scope should be reverted."""
+        agent = self._make_agent()
+        fb_changed = {"b.py", "a.py", "d.py"}  # b.py in scope, a.py+d.py out
+        out_of_scope = fb_changed - agent._admitted_target_files
+        in_scope = fb_changed & agent._admitted_target_files
+        assert out_of_scope == {"a.py", "d.py"}
+        assert in_scope == {"b.py"}

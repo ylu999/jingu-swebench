@@ -566,6 +566,9 @@ class JinguAgent:
         self._direction_search_attempts: int = 0        # how many extraction attempts
         self._direction_search_record: dict | None = None  # last extracted record
         self._direction_search_last_failures: list[str] = []  # last validation failures
+        self._admitted_target_files: set[str] = set()  # v0.3: allowed write set from admitted hypothesis
+        self._consecutive_scope_violations: int = 0  # v0.3: consecutive out-of-scope writes
+        self._scope_violation_limit: int = 3  # v0.3b: hard stop after this many consecutive
 
     # -- step-level hooks (called by JinguProgressTrackingAgent.step) --------
 
@@ -753,17 +756,65 @@ class JinguAgent:
                                 print(f"    [wdrg-v02] AUTO-ADMIT: extraction failed {_max_extract_attempts}x, "
                                       f"falling back to file-ban enforcement only", flush=True)
                     else:
-                        # Post-admission: file-ban enforcement (block only banned file writes)
-                        _banned_hit = _fb_changed & self._file_ban_files
-                        if _banned_hit:
-                            self._file_ban_violations += 1
-                            _ban_msg = build_recovery_escalation_prompt(
-                                self._file_ban_files, self._file_ban_violations,
-                            )
-                            print(f"    [file-ban] VIOLATION #{self._file_ban_violations}: "
-                                  f"agent wrote to banned file(s) {sorted(_banned_hit)}", flush=True)
-                            if not self._state.pending_redirect_hint:
-                                self._state.pending_redirect_hint = _ban_msg
+                        # v0.3: Post-admission scope-binding enforcement
+                        # If admitted_target_files is set, enforce write scope.
+                        # If empty (auto-admit fallback), fall back to banned-file-only check.
+                        if self._admitted_target_files and _fb_changed:
+                            # Check if ALL changed files are in the admitted scope
+                            # Use basename matching: admitted "django/db/models/query.py"
+                            # should match the same path in git diff output
+                            _out_of_scope = _fb_changed - self._admitted_target_files
+                            # Also check: out-of-scope files that are also banned = double violation
+                            _banned_out = _out_of_scope & self._file_ban_files
+                            if _out_of_scope:
+                                self._file_ban_violations += 1
+                                self._consecutive_scope_violations += 1
+                                # Revert ONLY the out-of-scope files (not all files)
+                                for _oos_file in sorted(_out_of_scope):
+                                    _sp_fb.run(
+                                        ["docker", "exec", "-w", "/testbed", _fb_cid,
+                                         "git", "checkout", "--", _oos_file],
+                                        capture_output=True, text=True, timeout=10,
+                                    )
+                                _in_scope = _fb_changed & self._admitted_target_files
+                                print(f"    [wdrg-v03] SCOPE VIOLATION #{self._file_ban_violations} "
+                                      f"(consecutive={self._consecutive_scope_violations}): "
+                                      f"reverted {sorted(_out_of_scope)}, "
+                                      f"kept {sorted(_in_scope)}", flush=True)
+                                if not self._state.pending_redirect_hint:
+                                    self._state.pending_redirect_hint = (
+                                        f"⚠️ SCOPE VIOLATION: You wrote to files outside your admitted direction.\n"
+                                        f"  Reverted: {', '.join(sorted(_out_of_scope))}\n"
+                                        f"  Your admitted write scope: {', '.join(sorted(self._admitted_target_files))}\n"
+                                        f"  Allowed files kept: {', '.join(sorted(_in_scope)) or '(none)'}\n"
+                                        f"  Consecutive violations: {self._consecutive_scope_violations}/{self._scope_violation_limit}\n"
+                                        f"Focus on your admitted files ONLY. Do NOT modify files outside the scope."
+                                    )
+                                # v0.3b: hard stop after consecutive limit
+                                if self._consecutive_scope_violations >= self._scope_violation_limit:
+                                    print(f"    [wdrg-v03] HARD STOP: {self._scope_violation_limit} consecutive "
+                                          f"scope violations — agent cannot follow admitted direction", flush=True)
+                                    from step_monitor_state import EarlyStopVerdict
+                                    self._state.early_stop_verdict = EarlyStopVerdict(
+                                        reason="wdrg_scope_violation_limit",
+                                        message=f"Agent exceeded {self._scope_violation_limit} consecutive writes "
+                                                f"outside admitted scope",
+                                    )
+                            else:
+                                # All writes within scope — reset consecutive counter
+                                self._consecutive_scope_violations = 0
+                        elif _fb_changed:
+                            # Auto-admit fallback: no admitted_target_files, just banned-file check
+                            _banned_hit = _fb_changed & self._file_ban_files
+                            if _banned_hit:
+                                self._file_ban_violations += 1
+                                _ban_msg = build_recovery_escalation_prompt(
+                                    self._file_ban_files, self._file_ban_violations,
+                                )
+                                print(f"    [file-ban] VIOLATION #{self._file_ban_violations}: "
+                                      f"agent wrote to banned file(s) {sorted(_banned_hit)}", flush=True)
+                                if not self._state.pending_redirect_hint:
+                                    self._state.pending_redirect_hint = _ban_msg
             except Exception as _fb_exc:
                 print(f"    [file-ban] error (non-fatal): {_fb_exc}", flush=True)
 
@@ -864,13 +915,17 @@ class JinguAgent:
                 hypotheses = record.get("alternative_hypotheses", [])
                 chosen = hypotheses[chosen_idx] if 0 <= chosen_idx < len(hypotheses) else {}
                 chosen_files = chosen.get("candidate_files", [])
+                # v0.3: bind execution to admitted write scope
+                self._admitted_target_files = set(chosen_files)
                 print(f"    [wdrg-v02] ✓ HYPOTHESIS ADMITTED (attempt {self._direction_search_attempts}): "
                       f"chosen_files={chosen_files}", flush=True)
-                # Inject admission confirmation message
+                # Inject admission confirmation with scope binding notice
                 if not self._state.pending_redirect_hint:
                     self._state.pending_redirect_hint = (
                         f"✅ Direction search record ADMITTED. "
-                        f"You may now write code. Focus on: {', '.join(chosen_files)}\n"
+                        f"You may now write code.\n"
+                        f"ALLOWED WRITE SCOPE: {', '.join(sorted(self._admitted_target_files))}\n"
+                        f"⚠️ Writes to files OUTSIDE this scope will be automatically reverted.\n"
                         f"Reason: {record.get('chosen_reason', '')[:200]}"
                     )
             else:
