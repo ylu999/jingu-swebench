@@ -499,7 +499,9 @@ def jingu_process_instance(
     remove_from_preds_file(output_dir / "preds.json", instance_id)
     (instance_dir / f"{instance_id}.traj.json").unlink(missing_ok=True)
 
-    model = get_model(config=config.get("model", {}))
+    _model_cfg = config.get("model", {})
+    print(f"    [debug-model] model_name={_model_cfg.get('model_name')!r} model_class={_model_cfg.get('model_class')!r}", flush=True)
+    model = get_model(config=_model_cfg)
     task = instance["problem_statement"]
 
     progress_manager.on_instance_start(instance_id)
@@ -1581,6 +1583,7 @@ class JinguAgent:
         t_cfg = Timer("config load", parent=t_agent)
         config = get_config_from_spec("jingu-swebench.yaml")
         config = recursive_merge(config, BASE_CONFIG)
+        print(f"    [debug-config] model.model_name={config.get('model',{}).get('model_name')!r} model.model_class={config.get('model',{}).get('model_class')!r}", flush=True)
 
         # Build instance_template_extra: tests that must pass + optional retry hint.
         # on_attempt_start() returns the extra_parts list (prompt assembly).
