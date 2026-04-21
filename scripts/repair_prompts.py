@@ -1,5 +1,6 @@
 """Phase-specific repair prompts for the failure attribution system.
 p217 addition: build_sdg_repair_prompt() for structured gate rejection feedback.
+v0.3 addition: ResidualGapPayload for evidence-carrying near-miss repair.
 
 Each prompt targets a specific failure type and instructs the agent
 to focus on the corresponding repair phase.
@@ -9,6 +10,10 @@ in run_with_jingu_gate.py between attempts.
 
 Failure types and routing rules come from failure_classifier.py (p208).
 """
+from __future__ import annotations
+
+import re
+from dataclasses import dataclass, field
 
 
 def _extract_evidence(cv_result: dict) -> dict:
@@ -137,17 +142,282 @@ _REPAIR_INSTRUCTIONS: dict[str, str] = {
 # protocol that forbids broad search and requires structured gap analysis
 # before any code change.
 
+
+# ── v0.3 Step 3: Structured Residual Failure Detail ──────────────────────────
+
+# Truncation limits (prevent prompt bloat)
+_MAX_MESSAGE_LEN = 200
+_MAX_TRACEBACK_LEN = 400
+_MAX_FAILING_TESTS_EXPANDED = 3
+
+
+@dataclass
+class ResidualFailureDetail:
+    """One failing test with structured evidence."""
+    test_name: str
+    status: str  # "failed" | "error"
+    message: str  # short assertion/exception summary, capped
+    traceback_excerpt: str  # compact traceback, capped
+    file_hint: str | None = None
+    line_hint: int | None = None
+    symptom_type: str | None = None  # assertion_mismatch / exception / missing_branch / unknown
+
+
+@dataclass
+class ResidualGapPayload:
+    """Structured residual gap evidence for near-miss repair prompt."""
+    residual_gap_size: int
+    failing_tests: list[ResidualFailureDetail] = field(default_factory=list)
+    shared_gap_hypothesis: str | None = None
+    additional_fail_count: int = 0
+    additional_fail_names: list[str] = field(default_factory=list)
+
+
+def _classify_symptom(message: str, traceback: str) -> str:
+    """Light heuristic to classify symptom type from error text."""
+    combined = (message + " " + traceback).lower()
+    if "assertionerror" in combined or "assert " in combined:
+        return "assertion_mismatch"
+    if any(e in combined for e in ("keyerror", "attributeerror", "typeerror", "valueerror")):
+        return "exception"
+    if any(w in combined for w in ("none", "missing", "not found", "not in", "does not exist")):
+        return "missing_branch"
+    return "unknown"
+
+
+def _extract_file_hint(traceback: str) -> tuple[str | None, int | None]:
+    """Extract most likely file:line from traceback excerpt."""
+    # Match Python traceback lines: File "path/to/file.py", line 42
+    matches = re.findall(r'File "([^"]+)", line (\d+)', traceback)
+    if not matches:
+        # Try simpler pattern: path.py:42
+        matches = re.findall(r'(\S+\.py):(\d+)', traceback)
+    if matches:
+        # Take the last match (closest to actual error)
+        file_path, line_no = matches[-1]
+        # Strip /testbed/ prefix for readability
+        file_path = re.sub(r'^/testbed/', '', file_path)
+        return file_path, int(line_no)
+    return None, None
+
+
+def _extract_test_traceback(stdout: str, test_name: str) -> tuple[str, str]:
+    """Extract assertion message and traceback for a specific failing test.
+
+    Searches stdout for the test's FAIL/ERROR block and extracts the
+    assertion message and a compact traceback excerpt.
+
+    Returns (message, traceback_excerpt) — both capped to limits.
+    """
+    if not stdout or not test_name:
+        return "", ""
+
+    # Strategy: find the test name in output, then grab the traceback block.
+    # Django unittest format:
+    #   ======...
+    #   FAIL: test_name (module.Class)
+    #   ------...
+    #   Traceback (most recent call last):
+    #     File "...", line N, in ...
+    #   AssertionError: ...
+    #   ======...  (next block or end)
+    lines = stdout.split("\n")
+    block_lines: list[str] = []
+    found_test = False
+    in_traceback = False
+
+    for line in lines:
+        # Start of new test failure block
+        if line.startswith("=" * 20):
+            if found_test and block_lines:
+                break  # end of our test's block — hit next separator
+            block_lines = []
+            found_test = False
+            in_traceback = False
+            continue
+
+        # Check if this is the header for our test
+        if not found_test and test_name in line:
+            found_test = True
+            continue
+
+        # Dash separator between header and traceback
+        if found_test and line.startswith("-" * 20):
+            in_traceback = True
+            continue
+
+        # Collect traceback lines
+        if found_test and in_traceback:
+            block_lines.append(line)
+
+    if not found_test or not block_lines:
+        # Fallback: search for test name anywhere and grab surrounding lines
+        for i, line in enumerate(lines):
+            if test_name in line and any(w in line.upper() for w in ("FAIL", "ERROR")):
+                start = max(0, i - 2)
+                end = min(len(lines), i + 10)
+                block_lines = lines[start:end]
+                found_test = True
+                break
+
+    if not block_lines:
+        return "", ""
+
+    block_text = "\n".join(block_lines)
+
+    # Extract assertion message (last line with "Error" or "assert")
+    message = ""
+    for bl in reversed(block_lines):
+        bl_s = bl.strip()
+        if bl_s and ("Error" in bl_s or "assert" in bl_s.lower()):
+            message = bl_s
+            break
+    if not message and block_lines:
+        # Fallback: last non-empty line
+        for bl in reversed(block_lines):
+            if bl.strip():
+                message = bl.strip()
+                break
+
+    # Cap lengths
+    message = message[:_MAX_MESSAGE_LEN]
+    traceback_excerpt = block_text[:_MAX_TRACEBACK_LEN]
+
+    return message, traceback_excerpt
+
+
+def build_residual_gap_payload(
+    cv_result: dict,
+    nm_state: dict | None = None,
+) -> ResidualGapPayload | None:
+    """Build structured residual gap payload from CV result.
+
+    Args:
+        cv_result: controlled_verify result dict with f2p counts, stdout,
+                   and f2p_failing_names (added in v0.3).
+        nm_state: NearMissState.to_dict() for stall/backslide info.
+
+    Returns:
+        ResidualGapPayload or None if not a near-miss scenario.
+    """
+    if not cv_result or not isinstance(cv_result, dict):
+        return None
+
+    f2p_failed = cv_result.get("f2p_failed") or 0
+    if f2p_failed == 0:
+        return None  # not a near-miss — all pass
+
+    f2p_failing_names = cv_result.get("f2p_failing_names") or []
+    stdout = cv_result.get("stdout") or ""
+
+    # Build per-test details
+    details: list[ResidualFailureDetail] = []
+    expanded_names = f2p_failing_names[:_MAX_FAILING_TESTS_EXPANDED]
+    for test_name in expanded_names:
+        message, traceback = _extract_test_traceback(stdout, test_name)
+        file_hint, line_hint = _extract_file_hint(traceback)
+        symptom = _classify_symptom(message, traceback)
+        details.append(ResidualFailureDetail(
+            test_name=test_name,
+            status="failed",
+            message=message,
+            traceback_excerpt=traceback,
+            file_hint=file_hint,
+            line_hint=line_hint,
+            symptom_type=symptom,
+        ))
+
+    # Additional failures beyond expansion limit
+    additional_count = max(0, len(f2p_failing_names) - _MAX_FAILING_TESTS_EXPANDED)
+    additional_names = f2p_failing_names[_MAX_FAILING_TESTS_EXPANDED:]
+
+    # Shared gap hypothesis (light heuristic)
+    hypothesis = _compute_shared_gap_hypothesis(details)
+
+    return ResidualGapPayload(
+        residual_gap_size=f2p_failed,
+        failing_tests=details,
+        shared_gap_hypothesis=hypothesis,
+        additional_fail_count=additional_count,
+        additional_fail_names=additional_names,
+    )
+
+
+def _compute_shared_gap_hypothesis(details: list[ResidualFailureDetail]) -> str | None:
+    """Light heuristic for shared gap across failing tests."""
+    if not details:
+        return None
+
+    # Check if failures cluster around same file
+    file_hints = [d.file_hint for d in details if d.file_hint]
+    if len(file_hints) >= 2:
+        from collections import Counter
+        file_counts = Counter(file_hints)
+        top_file, top_count = file_counts.most_common(1)[0]
+        if top_count >= 2:
+            return f"Failures cluster around {top_file}"
+
+    # Check if failures share same symptom type
+    symptoms = [d.symptom_type for d in details if d.symptom_type and d.symptom_type != "unknown"]
+    if len(symptoms) >= 2:
+        from collections import Counter
+        sym_counts = Counter(symptoms)
+        top_sym, top_count = sym_counts.most_common(1)[0]
+        if top_count >= 2:
+            return f"Failures share symptom type: {top_sym}"
+
+    # Single test — use its symptom as hint
+    if len(details) == 1 and details[0].symptom_type:
+        return f"Single residual failure: {details[0].symptom_type}"
+
+    return None
+
+
+def render_residual_gap_evidence(payload: ResidualGapPayload) -> str:
+    """Render ResidualGapPayload into prompt-ready text.
+
+    Format: structured but readable, not JSON dump.
+    """
+    lines = [f"RESIDUAL GAP EVIDENCE\nRemaining failing tests: {payload.residual_gap_size}"]
+
+    for i, detail in enumerate(payload.failing_tests, 1):
+        parts = [f"\n[{i}] {detail.test_name}"]
+        if detail.symptom_type:
+            parts.append(f"  Symptom: {detail.symptom_type}")
+        if detail.message:
+            parts.append(f"  Message: {detail.message}")
+        if detail.file_hint:
+            loc = detail.file_hint
+            if detail.line_hint:
+                loc += f":{detail.line_hint}"
+            parts.append(f"  Location hint: {loc}")
+        if detail.traceback_excerpt:
+            parts.append(f"  Traceback:\n    {detail.traceback_excerpt.replace(chr(10), chr(10) + '    ')}")
+        lines.append("\n".join(parts))
+
+    if payload.additional_fail_count > 0:
+        names = ", ".join(payload.additional_fail_names[:5])
+        lines.append(f"\n(+{payload.additional_fail_count} additional: {names})")
+
+    if payload.shared_gap_hypothesis:
+        lines.append(f"\nShared residual gap hypothesis: {payload.shared_gap_hypothesis}")
+
+    return "\n".join(lines)
+
+
 def _build_residual_gap_protocol(
     evidence: dict,
     patch_context: dict | None = None,
     nm_state: dict | None = None,
+    residual_payload: ResidualGapPayload | None = None,
 ) -> str:
     """Build the 3-step residual gap repair protocol prompt.
 
     Args:
         evidence: from _extract_evidence() — f2p counts, failing test output.
         patch_context: files_written, patch_summary from previous attempt.
-        nm_state: NearMissState.to_dict() — stall/backslide info. Optional for Step 2a.
+        nm_state: NearMissState.to_dict() — stall/backslide info.
+        residual_payload: v0.3 Step 3 — structured failing test details.
 
     Returns:
         Non-empty protocol string with 3 mandatory sections.
@@ -212,6 +482,10 @@ def _build_residual_gap_protocol(
         gap_line += f" WARNING: {evidence['p2p_failed']} existing test(s) also broken."
     parts.append(gap_line)
 
+    # ── v0.3 Step 3: structured residual evidence ──
+    if residual_payload and residual_payload.failing_tests:
+        parts.append(render_residual_gap_evidence(residual_payload))
+
     # ── 3-step output protocol ──
     parts.append(
         "=== MANDATORY 3-STEP OUTPUT PROTOCOL ===\n"
@@ -253,6 +527,7 @@ def build_repair_prompt(
     patch_context: dict | None = None,
     repair_mode: str | None = None,
     nm_state: dict | None = None,
+    residual_payload: ResidualGapPayload | None = None,
 ) -> str:
     """Build a phase-specific repair prompt from classified failure.
 
@@ -266,6 +541,7 @@ def build_repair_prompt(
         repair_mode: v0.3 — "residual_gap_repair" triggers 3-step protocol.
                      None falls back to failure_type-based routing.
         nm_state: v0.3 — NearMissState.to_dict() for stall/backslide context.
+        residual_payload: v0.3 Step 3 — structured failing test details.
 
     Returns:
         A non-empty repair prompt string (NBR-compliant).
@@ -276,11 +552,14 @@ def build_repair_prompt(
     # v0.3: residual_gap_repair → 3-step constrained protocol (mode switch)
     if repair_mode == "residual_gap_repair":
         next_phase = routing.get("next_phase", "EXECUTE")
-        protocol = _build_residual_gap_protocol(evidence, patch_context, nm_state)
+        protocol = _build_residual_gap_protocol(
+            evidence, patch_context, nm_state, residual_payload,
+        )
         # Prepend phase declaration for routing consistency
         header = f"[REPAIR PHASE: {next_phase.upper()}]"
         result = header + "\n\n" + protocol
-        if evidence["failing_tests"]:
+        # Only append raw test output if no structured payload (avoid duplication)
+        if not residual_payload and evidence["failing_tests"]:
             result += "\n\nFailing test output:\n" + evidence["failing_tests"]
         assert result.strip(), "build_repair_prompt produced empty output"
         return result

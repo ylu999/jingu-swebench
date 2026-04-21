@@ -3240,12 +3240,14 @@ class JinguAgent:
                                 # v0.3: near_miss → residual_gap_repair protocol
                                 _v03_repair_mode = None
                                 _v03_nm_state = None
+                                _v03_payload = None
                                 _v03_routing = _jb_routing  # default: use classifier routing
                                 if _jb_ft == "near_miss":
                                     try:
                                         from failure_classifier import (
                                             classify_near_miss_state, get_near_miss_routing,
                                         )
+                                        from repair_prompts import build_residual_gap_payload
                                         _v03_nm = classify_near_miss_state(
                                             _jb_cv, attempt, _f2p_history,
                                         )
@@ -3253,11 +3255,16 @@ class JinguAgent:
                                             _v03_repair_mode = _v03_nm.repair_mode
                                             _v03_nm_state = _v03_nm.to_dict()
                                             _v03_routing = get_near_miss_routing(_v03_nm)
+                                            _v03_payload = build_residual_gap_payload(_jb_cv, _v03_nm_state)
+                                            _v03_tests = [t.test_name for t in (_v03_payload.failing_tests if _v03_payload else [])]
+                                            _v03_hyp = _v03_payload.shared_gap_hypothesis if _v03_payload else None
                                             print(f"    [v03-near-miss] repair_mode={_v03_repair_mode} "
                                                   f"stall={_v03_nm.same_patch_suspected} "
                                                   f"backslide={_v03_nm.backslide_detected} "
                                                   f"gap={_v03_nm.residual_gap_size} "
-                                                  f"route={_v03_routing['next_phase']}",
+                                                  f"route={_v03_routing['next_phase']} "
+                                                  f"payload_tests={_v03_tests} "
+                                                  f"hypothesis={_v03_hyp}",
                                                   flush=True)
                                     except Exception as _v03_exc:
                                         print(f"    [v03-near-miss] fallback (error: {_v03_exc})",
@@ -3267,6 +3274,7 @@ class JinguAgent:
                                     patch_context=_patch_ctx,
                                     repair_mode=_v03_repair_mode,
                                     nm_state=_v03_nm_state,
+                                    residual_payload=_v03_payload,
                                 )
                                 last_failure = _repair + "\n\n" + last_failure
                                 # p-fix: propagate repair routing target to next attempt cp_state
@@ -3357,12 +3365,14 @@ class JinguAgent:
                                 # v0.3: near_miss → residual_gap_repair protocol (no_retry_plan branch)
                                 _v03_repair_mode2 = None
                                 _v03_nm_state2 = None
+                                _v03_payload2 = None
                                 _v03_routing2 = _jb_routing
                                 if _jb_ft == "near_miss":
                                     try:
                                         from failure_classifier import (
                                             classify_near_miss_state, get_near_miss_routing,
                                         )
+                                        from repair_prompts import build_residual_gap_payload
                                         _v03_nm2 = classify_near_miss_state(
                                             _jb_cv, attempt, _f2p_history,
                                         )
@@ -3370,11 +3380,14 @@ class JinguAgent:
                                             _v03_repair_mode2 = _v03_nm2.repair_mode
                                             _v03_nm_state2 = _v03_nm2.to_dict()
                                             _v03_routing2 = get_near_miss_routing(_v03_nm2)
+                                            _v03_payload2 = build_residual_gap_payload(_jb_cv, _v03_nm_state2)
+                                            _v03_tests2 = [t.test_name for t in (_v03_payload2.failing_tests if _v03_payload2 else [])]
                                             print(f"    [v03-near-miss] repair_mode={_v03_repair_mode2} "
                                                   f"stall={_v03_nm2.same_patch_suspected} "
                                                   f"backslide={_v03_nm2.backslide_detected} "
                                                   f"gap={_v03_nm2.residual_gap_size} "
                                                   f"route={_v03_routing2['next_phase']} "
+                                                  f"payload_tests={_v03_tests2} "
                                                   f"branch=no_retry_plan",
                                                   flush=True)
                                     except Exception as _v03_exc2:
@@ -3385,6 +3398,7 @@ class JinguAgent:
                                     patch_context=_patch_ctx,
                                     repair_mode=_v03_repair_mode2,
                                     nm_state=_v03_nm_state2,
+                                    residual_payload=_v03_payload2,
                                 )
                                 last_failure = _repair + "\n\n" + last_failure
                                 # p-fix: propagate repair routing target to next attempt cp_state
