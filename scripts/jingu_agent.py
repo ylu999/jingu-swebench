@@ -1828,31 +1828,37 @@ class JinguAgent:
                               f"f2p_pass={cv_flat.get('f2p_passed', 0)} "
                               f"f2p_fail={cv_flat.get('f2p_failed', 0)}", flush=True)
                         # ScopeLockGate v0.1: build envelope for near_miss/residual_gap
-                        try:
-                            from scope_lock import build_scope_lock_envelope
-                            from run_with_jingu_gate import patch_fingerprint as _sl_pfp, patch_content_hash as _sl_pch
-                            # Use jingu_body's patch fingerprint if available, else compute from submitted patch
-                            _sl_fp = jingu_body.get("patch_fp") if jingu_body else None
-                            if not _sl_fp and patch_for_body:
-                                _sl_fp = _sl_pfp(patch_for_body)
-                            _sl_hash = _sl_pch(patch_for_body) if patch_for_body else ""
-                            if _sl_fp:
-                                _sl_env = build_scope_lock_envelope(
-                                    _sl_fp, cv_flat, _ft,
-                                    attempt=attempt,
-                                    patch_hash=_sl_hash,
-                                )
-                                if _sl_env is not None:
-                                    self._scope_lock_envelope = _sl_env
-                                    print(f"    [scope-lock] envelope built: "
-                                          f"origin_attempt={attempt} "
-                                          f"files={_sl_env.touched_files} "
-                                          f"total={_sl_env.patch_total} "
-                                          f"limit={_sl_env.size_limit} "
-                                          f"type={_ft} "
-                                          f"patch_hash={_sl_hash[:8]}", flush=True)
-                        except Exception as _sl_exc:
-                            print(f"    [scope-lock] envelope build failed (non-fatal): {_sl_exc}", flush=True)
+                        # Guard: only build on first qualifying attempt — never overwrite
+                        # (spec: "A2 reject does NOT update envelope; A3 uses A1 constraints")
+                        if self._scope_lock_envelope is not None:
+                            print(f"    [scope-lock] envelope KEPT from attempt "
+                                  f"{self._scope_lock_envelope.origin_attempt} "
+                                  f"(current attempt={attempt}, skip rebuild)", flush=True)
+                        else:
+                            try:
+                                from scope_lock import build_scope_lock_envelope
+                                from run_with_jingu_gate import patch_fingerprint as _sl_pfp, patch_content_hash as _sl_pch
+                                _sl_fp = jingu_body.get("patch_fp") if jingu_body else None
+                                if not _sl_fp and patch_for_body:
+                                    _sl_fp = _sl_pfp(patch_for_body)
+                                _sl_hash = _sl_pch(patch_for_body) if patch_for_body else ""
+                                if _sl_fp:
+                                    _sl_env = build_scope_lock_envelope(
+                                        _sl_fp, cv_flat, _ft,
+                                        attempt=attempt,
+                                        patch_hash=_sl_hash,
+                                    )
+                                    if _sl_env is not None:
+                                        self._scope_lock_envelope = _sl_env
+                                        print(f"    [scope-lock] envelope built: "
+                                              f"origin_attempt={attempt} "
+                                              f"files={_sl_env.touched_files} "
+                                              f"total={_sl_env.patch_total} "
+                                              f"limit={_sl_env.size_limit} "
+                                              f"type={_ft} "
+                                              f"patch_hash={_sl_hash[:8]}", flush=True)
+                            except Exception as _sl_exc:
+                                print(f"    [scope-lock] envelope build failed (non-fatal): {_sl_exc}", flush=True)
                         # EFR telemetry: structured feedback emission
                         _evidence_quality = "rich" if cv_flat.get("output_tail") or cv_flat.get("stdout") else "counts_only"
                         _current_phase = str(self._cp_state_holder[0].phase).upper() if self._cp_state_holder else "?"
