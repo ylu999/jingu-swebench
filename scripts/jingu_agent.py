@@ -1774,10 +1774,13 @@ class JinguAgent:
                         "p2p_passed": _cv_source.get("p2p_passed"),
                         "p2p_failed": _cv_source.get("p2p_failed"),
                         "p2p_failing_names": _cv_source.get("p2p_failing_names", []),
+                        "f2p_failing_names": _cv_source.get("f2p_failing_names", []),
                         "eval_resolved": _cv_source.get("eval_resolved"),
                         "output_tail": _cv_source.get("output_tail", ""),
                     }
                     jingu_body["controlled_verify"] = cv_flat
+                    # v0.3: store stdout for residual gap payload extraction (not in cv_flat to avoid traj bloat)
+                    self._last_cv_stdout = _cv_source.get("stdout") or ""
                     # Store P2P regression names for next attempt's sentinel priority
                     _p2p_names = _cv_source.get("p2p_failing_names", [])
                     if _p2p_names:
@@ -2191,6 +2194,7 @@ class JinguAgent:
         _next_attempt_start_phase_for_ack: str | None = None  # EFR: prescribed phase for ack check
         _last_failure_type: str = ""  # telemetry: which failure_type drove the routing
         self._f2p_history: list[tuple[int, int]] = []  # v0.3: (f2p_passed, f2p_total) per attempt for stall/backslide
+        self._last_cv_stdout: str = ""  # v0.3: raw CV stdout for residual payload extraction
         cp_state_holder: list = [initial_reasoning_state("OBSERVE")]
         self._cp_state_holder = cp_state_holder
 
@@ -3255,7 +3259,9 @@ class JinguAgent:
                                             _v03_repair_mode = _v03_nm.repair_mode
                                             _v03_nm_state = _v03_nm.to_dict()
                                             _v03_routing = get_near_miss_routing(_v03_nm)
-                                            _v03_payload = build_residual_gap_payload(_jb_cv, _v03_nm_state)
+                                            # Merge stdout into cv for payload extraction (not in cv_flat to avoid traj bloat)
+                                            _v03_cv_with_stdout = {**_jb_cv, "stdout": getattr(self, "_last_cv_stdout", "")}
+                                            _v03_payload = build_residual_gap_payload(_v03_cv_with_stdout, _v03_nm_state)
                                             _v03_tests = [t.test_name for t in (_v03_payload.failing_tests if _v03_payload else [])]
                                             _v03_hyp = _v03_payload.shared_gap_hypothesis if _v03_payload else None
                                             print(f"    [v03-near-miss] repair_mode={_v03_repair_mode} "
@@ -3380,7 +3386,8 @@ class JinguAgent:
                                             _v03_repair_mode2 = _v03_nm2.repair_mode
                                             _v03_nm_state2 = _v03_nm2.to_dict()
                                             _v03_routing2 = get_near_miss_routing(_v03_nm2)
-                                            _v03_payload2 = build_residual_gap_payload(_jb_cv, _v03_nm_state2)
+                                            _v03_cv_with_stdout2 = {**_jb_cv, "stdout": getattr(self, "_last_cv_stdout", "")}
+                                            _v03_payload2 = build_residual_gap_payload(_v03_cv_with_stdout2, _v03_nm_state2)
                                             _v03_tests2 = [t.test_name for t in (_v03_payload2.failing_tests if _v03_payload2 else [])]
                                             print(f"    [v03-near-miss] repair_mode={_v03_repair_mode2} "
                                                   f"stall={_v03_nm2.same_patch_suspected} "
