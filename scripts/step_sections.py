@@ -652,6 +652,8 @@ def admit_phase_record(
             )
 
         # Check 3: solution approach must be present (in any of several possible fields)
+        # Agent often puts approach info in scope_boundary (e.g. "SOLUTION APPROACH: ...").
+        # Accept approach from any of these sources.
         _approach = (
             getattr(_pr, "solution_approach", "")
             or getattr(_pr, "design_comparison", "")
@@ -667,6 +669,12 @@ def admit_phase_record(
                 if isinstance(_av, str) and len(_av.strip()) >= 10:
                     _approach = _av
                     break
+        # Fallback: if scope_boundary is substantial (>30 chars), agent likely
+        # embedded approach info there. Accept it to avoid false rejections.
+        if len(str(_approach).strip()) < 10:
+            _sb_text = str(_sb).strip() if isinstance(_sb, str) else " ".join(str(x) for x in (_sb or []))
+            if len(_sb_text) > 30:
+                _approach = _sb_text  # scope_boundary doubles as approach
 
         if len(str(_approach).strip()) < 10:
             _dq_failures.append(

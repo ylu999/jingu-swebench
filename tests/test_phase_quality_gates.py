@@ -91,6 +91,11 @@ def check_design_quality(pr: MockPhaseRecord, tool_submitted: dict | None = None
             if isinstance(av, str) and len(av.strip()) >= 10:
                 approach = av
                 break
+    # Fallback: substantial scope_boundary doubles as approach
+    if len(str(approach).strip()) < 10:
+        sb_text = str(sb).strip() if isinstance(sb, str) else " ".join(str(x) for x in (sb or []))
+        if len(sb_text) > 30:
+            approach = sb_text
     if len(str(approach).strip()) < 10:
         failures.append("No SOLUTION APPROACH found")
 
@@ -216,7 +221,7 @@ class TestDesignQualityGate:
     def test_no_solution_approach_rejects(self):
         pr = MockPhaseRecord(
             files_to_modify=["django/db/models/sql/compiler.py"],
-            scope_boundary="Only modify the set_values call in SQLCompiler",
+            scope_boundary="Only modify set_values",  # 22 chars, ≤30 so no fallback
             solution_approach="",
         )
         failures = check_design_quality(pr)
@@ -264,3 +269,26 @@ class TestDesignQualityGate:
             solution_approach="Clone query before set_values call in compiler",
         )
         assert check_design_quality(pr) == []
+
+    def test_substantial_scope_boundary_doubles_as_approach(self):
+        """When scope_boundary is >30 chars and no explicit approach, accept it.
+
+        Real-world pattern: agent writes "SOLUTION APPROACH: Delete lines 87-91
+        in django/db/migrations/loader.py..." in scope_boundary field.
+        """
+        pr = MockPhaseRecord(
+            files_to_modify=["django/db/migrations/loader.py"],
+            scope_boundary="SOLUTION APPROACH: Delete lines 87-91 in django/db/migrations/loader.py within the load_disk() method",
+            solution_approach="",  # empty — but scope_boundary has the info
+        )
+        assert check_design_quality(pr) == []
+
+    def test_short_scope_boundary_does_not_count_as_approach(self):
+        """Short scope_boundary (<= 30 chars) should NOT substitute for approach."""
+        pr = MockPhaseRecord(
+            files_to_modify=["django/db/models/query.py"],
+            scope_boundary="modify query module only",  # 24 chars, too short
+            solution_approach="",
+        )
+        failures = check_design_quality(pr)
+        assert any("SOLUTION APPROACH" in f for f in failures)
