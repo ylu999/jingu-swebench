@@ -2662,6 +2662,48 @@ class JinguAgent:
                     candidates = [c for c in candidates if c.get("attempt") != attempt]
                     print(f"    [near-miss-gate-legacy] HARD REJECT: {_nm_legacy_reason}", flush=True)
 
+            # ── ScopeLockGate telemetry: persist gate status for ALL paths (RT4) ──
+            if jingu_body and attempt > 1:
+                _slt: dict = {"attempt": attempt}
+                _sl_env_t = self._scope_lock_envelope
+                if _sl_env_t is not None:
+                    _slt["envelope_present"] = True
+                    _slt["origin_attempt"] = _sl_env_t.origin_attempt
+                    _slt["allowed_files"] = sorted(_sl_env_t.allowed_files)
+                    _slt["size_limit"] = _sl_env_t.size_limit
+                else:
+                    _slt["envelope_present"] = False
+                if _sl_should_enforce:
+                    _slt["eligible"] = True
+                    _slt["admitted"] = _sl_verdict.admitted
+                    _slt["violation_codes"] = _sl_verdict.violation_codes
+                    _slt["observed"] = _sl_verdict.observed
+                    if not _sl_verdict.admitted:
+                        _slt["repair_hint"] = _sl_verdict.repair_hint
+                else:
+                    _slt["eligible"] = False
+                    # classify skip reason
+                    if _sl_env_t is None:
+                        _slt["skip_reason"] = "no_envelope"
+                    elif not _sl_env_t.active:
+                        _slt["skip_reason"] = "envelope_inactive"
+                    elif not (attempt > _sl_env_t.origin_attempt):
+                        _slt["skip_reason"] = "same_or_earlier_attempt"
+                    elif not patch:
+                        _slt["skip_reason"] = "no_patch"
+                    elif _dp_rejected:
+                        _slt["skip_reason"] = "dp_rejected"
+                    elif _dcg_rejected:
+                        _slt["skip_reason"] = "dcg_rejected"
+                    else:
+                        _slt["skip_reason"] = "unknown"
+                jingu_body["scope_lock_telemetry"] = _slt
+                print(f"    [scope-lock-telemetry] attempt={attempt} "
+                      f"envelope={'yes' if _slt.get('envelope_present') else 'no'} "
+                      f"eligible={_slt['eligible']} "
+                      f"{'admitted=' + str(_slt.get('admitted')) if _slt['eligible'] else 'skip=' + _slt.get('skip_reason', '?')}",
+                      flush=True)
+
             self._prev_files_written = _nprg_curr_files
             _prev_raw_patch = patch or _prev_raw_patch  # preserve previous if current empty
             # dual-cause: save root cause from this attempt for next attempt's prompt
