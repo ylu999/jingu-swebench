@@ -83,6 +83,65 @@ def check_direction_change(
     }
 
 
+def judge_near_miss_patch(
+    prev_files: set[str],
+    curr_files: set[str],
+    patch: str,
+    max_lines: int = 30,
+) -> dict:
+    """Near-miss scope gate: hard reject patches that violate repair constraints.
+
+    Returns dict with:
+        pass: bool — True if patch is within scope
+        reject_reason: str | None — reason code if rejected
+        metrics: dict — observable metrics for telemetry
+    """
+    new_files = curr_files - prev_files
+    introduced_new_file = len(new_files) > 0 and len(prev_files) > 0
+
+    # Count lines changed (additions + deletions in diff)
+    lines_added = 0
+    lines_removed = 0
+    for line in (patch or "").splitlines():
+        if line.startswith("+") and not line.startswith("+++"):
+            lines_added += 1
+        elif line.startswith("-") and not line.startswith("---"):
+            lines_removed += 1
+    total_lines = lines_added + lines_removed
+
+    # Heuristic: detect constraint weakening
+    # Look for removed lines that contain guard patterns
+    constraint_weakened = False
+    guard_patterns = ("raise ", "assert ", "if not ", "ValidationError", "ValueError", "TypeError")
+    for line in (patch or "").splitlines():
+        if line.startswith("-") and not line.startswith("---"):
+            stripped = line[1:].strip()
+            if any(p in stripped for p in guard_patterns):
+                # Check if a corresponding replacement exists (modify vs remove)
+                # Simple heuristic: pure removal of guards = weakening
+                constraint_weakened = True
+
+    metrics = {
+        "files_touched": len(curr_files),
+        "total_lines_changed": total_lines,
+        "lines_added": lines_added,
+        "lines_removed": lines_removed,
+        "introduced_new_file": introduced_new_file,
+        "new_files": sorted(new_files) if new_files else [],
+        "constraint_weakened": constraint_weakened,
+    }
+
+    if introduced_new_file:
+        return {"pass": False, "reject_reason": "near_miss_new_file", "metrics": metrics}
+
+    if total_lines > max_lines:
+        return {"pass": False, "reject_reason": "near_miss_patch_too_large", "metrics": metrics}
+
+    # constraint_weakened is a soft signal for now (warn, not reject)
+    # because the heuristic has false positives (legitimate guard modifications)
+    return {"pass": True, "reject_reason": None, "metrics": metrics}
+
+
 def build_recovery_escalation_prompt(banned_files: set[str], violation_count: int) -> str:
     """Build an escalated recovery prompt when file-ban violations accumulate.
 
@@ -2472,6 +2531,35 @@ class JinguAgent:
                     if jingu_body:
                         jingu_body["direction_gate_rejected"] = True
 
+            # ── Near-miss scope gate: hard constraints on A3 repair patches ──
+            _nm_rejected = False
+            if (attempt > 1
+                    and _last_failure_type == "near_miss"
+                    and patch
+                    and not _dp_rejected
+                    and not _dcg_rejected):
+                _nm_verdict = judge_near_miss_patch(
+                    _nprg_prev_files, _nprg_curr_files, patch, max_lines=30,
+                )
+                _nm_m = _nm_verdict["metrics"]
+                print(f"    [near-miss-gate] attempt={attempt} "
+                      f"pass={_nm_verdict['pass']} "
+                      f"reason={_nm_verdict['reject_reason']} "
+                      f"lines={_nm_m['total_lines_changed']} "
+                      f"new_file={_nm_m['introduced_new_file']} "
+                      f"constraint_weakened={_nm_m['constraint_weakened']}",
+                      flush=True)
+                if jingu_body:
+                    jingu_body["near_miss_gate"] = _nm_verdict
+                if not _nm_verdict["pass"]:
+                    _nm_rejected = True
+                    candidates = [c for c in candidates if c.get("attempt") != attempt]
+                    print(f"    [near-miss-gate] HARD REJECT: {_nm_verdict['reject_reason']}, "
+                          f"dropped from candidates", flush=True)
+                elif _nm_m["constraint_weakened"]:
+                    print(f"    [near-miss-gate] WARN: possible constraint weakening detected "
+                          f"(guard pattern removed in diff)", flush=True)
+
             self._prev_files_written = _nprg_curr_files
             _prev_raw_patch = patch or _prev_raw_patch  # preserve previous if current empty
             # dual-cause: save root cause from this attempt for next attempt's prompt
@@ -2511,6 +2599,34 @@ class JinguAgent:
                     f"({_dp_sim:.0%} similar to previous). "
                     "You must produce a fundamentally different fix."
                 )
+                continue  # skip to next attempt
+
+            # Near-miss scope gate: if rejected, skip gate and set focused feedback
+            if _nm_rejected:
+                _nm_reason = _nm_verdict["reject_reason"]
+                _nm_lines = _nm_verdict["metrics"]["total_lines_changed"]
+                print(f"    [near-miss-gate] skipping gate — patch rejected by scope gate", flush=True)
+                attempts_log.append({
+                    "attempt": attempt,
+                    "admission_reason": f"near_miss_rejected:{_nm_reason}",
+                    "patch_fp": patch_fingerprint(patch) if patch else None,
+                    "gate_reason_codes": [_nm_reason.upper()],
+                    "exit_status": agent_exit,
+                })
+                if _nm_reason == "near_miss_new_file":
+                    last_failure = (
+                        "SCOPE VIOLATION: Your near-miss repair introduced a NEW file. "
+                        "You MUST only modify files from the previous attempt. "
+                        "This is a focused repair — do not expand scope."
+                    )
+                elif _nm_reason == "near_miss_patch_too_large":
+                    last_failure = (
+                        f"SCOPE VIOLATION: Your near-miss repair changed {_nm_lines} lines "
+                        f"(limit: 30). A near-miss repair must be SURGICAL — "
+                        f"find the exact condition or branch that fails and fix ONLY that."
+                    )
+                else:
+                    last_failure = f"SCOPE VIOLATION: {_nm_reason}"
                 continue  # skip to next attempt
 
             if not patch:
