@@ -39,6 +39,11 @@ new = '\"jingu\": \"minisweagent.models.jingu_model.JinguModel\",\n    \"litellm
 p.write_text(t.replace(old, new)); \
 print('JinguModel registered in _MODEL_CLASS_MAPPING')"
 
+# Neutralize mini-swe-agent global .env to prevent dotenv from polluting JINGU_MODEL.
+# The .env may accumulate stale vars across Docker layer cache; truncate it.
+RUN rm -f /root/.config/mini-swe-agent/.env 2>/dev/null; \
+    mkdir -p /root/.config/mini-swe-agent && touch /root/.config/mini-swe-agent/.env
+
 # Copy jingu-swebench.yaml into the installed mini-swe-agent config directory.
 # mini-swe-agent 2.1.0 ships swebench.yaml; we add our fork alongside it.
 # This overrides ENVIRONMENT_NOT_AGENT_WORK violations from swebench.yaml defaults.

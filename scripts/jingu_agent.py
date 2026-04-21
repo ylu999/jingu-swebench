@@ -499,9 +499,7 @@ def jingu_process_instance(
     remove_from_preds_file(output_dir / "preds.json", instance_id)
     (instance_dir / f"{instance_id}.traj.json").unlink(missing_ok=True)
 
-    _model_cfg = config.get("model", {})
-    print(f"    [debug-model] model_name={_model_cfg.get('model_name')!r} model_class={_model_cfg.get('model_class')!r}", flush=True)
-    model = get_model(config=_model_cfg)
+    model = get_model(config=config.get("model", {}))
     task = instance["problem_statement"]
 
     progress_manager.on_instance_start(instance_id)
@@ -1581,11 +1579,8 @@ class JinguAgent:
         # patched system_template, and Recommended Workflow steps 2/4/5 removed).
         # Config lives in mini-swe-agent/src/minisweagent/config/benchmarks/jingu-swebench.yaml.
         t_cfg = Timer("config load", parent=t_agent)
-        config_yaml = get_config_from_spec("jingu-swebench.yaml")
-        print(f"    [debug-yaml] model={config_yaml.get('model',{}).keys()} model_name={config_yaml.get('model',{}).get('model_name')!r}", flush=True)
-        print(f"    [debug-base] model={BASE_CONFIG.get('model',{}).keys()} model_name={BASE_CONFIG.get('model',{}).get('model_name')!r}", flush=True)
-        config = recursive_merge(config_yaml, BASE_CONFIG)
-        print(f"    [debug-merged] model.model_name={config.get('model',{}).get('model_name')!r} model.model_class={config.get('model',{}).get('model_class')!r}", flush=True)
+        config = get_config_from_spec("jingu-swebench.yaml")
+        config = recursive_merge(config, BASE_CONFIG)
 
         # Build instance_template_extra: tests that must pass + optional retry hint.
         # on_attempt_start() returns the extra_parts list (prompt assembly).
