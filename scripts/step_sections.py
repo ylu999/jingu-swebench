@@ -620,6 +620,97 @@ def admit_phase_record(
                     flush=True,
                 )
 
+    # ── Gate 5: DESIGN Quality Gate (structural redesign enforcement) ────
+    # Reject DESIGN submissions that lack concrete solution structure.
+    # Forces the agent to produce a real design before entering EXECUTE.
+    if eval_phase == "DESIGN" and _pr is not None:
+        _dq_failures: list[str] = []
+
+        # Check 1: files_to_modify must be non-empty and contain file paths
+        _ftm = getattr(_pr, "files_to_modify", []) or []
+        if isinstance(_ftm, str):
+            _ftm = [_ftm] if _ftm.strip() else []
+        _ftm_valid = [
+            f for f in _ftm
+            if isinstance(f, str) and ("/" in f or ".py" in f or ".js" in f or ".ts" in f)
+        ]
+        if len(_ftm_valid) < 1:
+            _dq_failures.append(
+                "FILES_TO_MODIFY is empty or lacks file paths. "
+                "You MUST specify at least one file path to modify (e.g. django/db/models/query.py)."
+            )
+
+        # Check 2: scope_boundary must be non-trivial
+        _sb = getattr(_pr, "scope_boundary", "") or ""
+        if isinstance(_sb, list):
+            _sb = " ".join(str(x) for x in _sb)
+        if len(str(_sb).strip()) < 10:
+            _dq_failures.append(
+                "SCOPE_BOUNDARY is missing or too brief. "
+                "Describe what your fix will change and what it must NOT change. "
+                "This prevents scope creep and unintended regressions."
+            )
+
+        # Check 3: solution approach must be present (in any of several possible fields)
+        _approach = (
+            getattr(_pr, "solution_approach", "")
+            or getattr(_pr, "design_comparison", "")
+            or getattr(_pr, "approach", "")
+            or ""
+        )
+        if isinstance(_approach, list):
+            _approach = " ".join(str(x) for x in _approach)
+        # Also check the raw submitted record for approach-like content
+        if _tool_submitted is not None and len(str(_approach).strip()) < 10:
+            for _ak in ("solution_approach", "approach", "design_comparison", "strategy"):
+                _av = _tool_submitted.get(_ak, "")
+                if isinstance(_av, str) and len(_av.strip()) >= 10:
+                    _approach = _av
+                    break
+
+        if len(str(_approach).strip()) < 10:
+            _dq_failures.append(
+                "No SOLUTION APPROACH found. "
+                "Describe HOW you will fix the issue — what logic changes, "
+                "what conditions to add/remove, what the fix strategy is."
+            )
+
+        if _dq_failures:
+            if not hasattr(state, "_design_quality_rejections"):
+                state._design_quality_rejections = 0
+            state._design_quality_rejections += 1
+
+            if state._design_quality_rejections <= 2:
+                _dq_msg = "\n".join(f"  - {f}" for f in _dq_failures)
+                print(
+                    f"    [immediate-admission] DESIGN QUALITY REJECT"
+                    f" ({state._design_quality_rejections}/2)"
+                    f" failures={len(_dq_failures)}: {_dq_failures}",
+                    flush=True,
+                )
+                _result.admitted = False
+                _result.retry_messages.append({
+                    "role": "user",
+                    "content": (
+                        f"[DESIGN QUALITY GATE — REJECTED]\n\n"
+                        f"Your design submission was rejected for quality issues:\n"
+                        f"{_dq_msg}\n\n"
+                        f"IMPORTANT: Do NOT jump straight to writing code. "
+                        f"First, clearly specify:\n"
+                        f"  1. Which files you will modify\n"
+                        f"  2. What your scope boundary is (what changes, what must NOT change)\n"
+                        f"  3. Your solution approach (what logic changes and why)\n\n"
+                        f"Resubmit your DESIGN record with the issues fixed."
+                    ),
+                })
+                return _result
+            else:
+                print(
+                    f"    [immediate-admission] DESIGN QUALITY: bypassed"
+                    f" (max rejections reached, allowing through)",
+                    flush=True,
+                )
+
     # ── Protocol validation: control fields must be present ──────────────
     # Protocol Compiler enforcement: all protocol_required fields must be in
     # the submitted record. Missing control field = rejection (not bypass).
