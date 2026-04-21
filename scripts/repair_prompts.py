@@ -126,40 +126,124 @@ _REPAIR_INSTRUCTIONS: dict[str, str] = {
         "The problem is mechanical, not logical. "
         "Ensure your patch applies cleanly and the code compiles."
     ),
-    "near_miss": (
-        "Your fix is ALMOST correct — most target tests now pass.\n"
-        "Only a small number of tests still fail.\n\n"
-        "=== MANDATORY NEAR-MISS REPAIR PROTOCOL ===\n\n"
-        "Hard constraints:\n"
-        "- Do NOT change solution direction.\n"
-        "- Do NOT switch to unrelated files.\n"
-        "- Do NOT rewrite large sections of code.\n"
-        "- Do NOT weaken validation, guards, constraints, or matching rules.\n"
-        "- Do NOT remove checks just to make tests pass.\n"
-        "- Preserve ALL already-passing tests.\n\n"
-        "Required steps:\n"
-        "1. DIAGNOSE: Why do the remaining tests still fail?\n"
-        "   Look at the specific assertion error and identify the exact gap.\n"
-        "2. LOCATE: Identify the minimal code location responsible.\n"
-        "   Which condition, branch, or edge case is not handled?\n"
-        "3. FIX: Make the smallest possible patch to close that residual gap.\n"
-        "   Prefer adding a condition over rewriting logic.\n"
-        "4. PRESERVE: State which invariants from already-passing tests are kept.\n\n"
-        "=== OUTPUT STRUCTURE ===\n"
-        "RESIDUAL_GAP: (what specific semantic gap remains)\n"
-        "TARGET_EDIT_REGION: (file:start_line-end_line for EACH edit point, "
-        "with justification — you MUST declare where you will edit BEFORE writing code)\n"
-        "PRESERVED_INVARIANTS: (behaviors that must remain unchanged)\n"
-        "PATCH: (the minimal diff — must stay within declared edit regions)\n\n"
-        "=== ENFORCEMENT ===\n"
-        "- A scope gate will REJECT patches that introduce new files.\n"
-        "- A scope gate will REJECT patches larger than 30 lines changed.\n"
-        "- Constraint weakening (removing guards/assertions) will be flagged.\n"
-        "These are HARD system gates, not suggestions.\n\n"
-        "Remember: This is NOT a redesign. This is NOT a new direction.\n"
-        "This is a focused repair of the remaining failing slice ONLY."
-    ),
+    "near_miss": "",  # v0.3: replaced by _build_residual_gap_protocol (keyed on repair_mode)
 }
+
+
+# ── v0.3: Residual Gap Repair Protocol ────────────────────────────────────────
+#
+# This is a MODE SWITCH, not a longer hint.
+# When repair_mode == "residual_gap_repair", the agent enters a constrained
+# protocol that forbids broad search and requires structured gap analysis
+# before any code change.
+
+def _build_residual_gap_protocol(
+    evidence: dict,
+    patch_context: dict | None = None,
+    nm_state: dict | None = None,
+) -> str:
+    """Build the 3-step residual gap repair protocol prompt.
+
+    Args:
+        evidence: from _extract_evidence() — f2p counts, failing test output.
+        patch_context: files_written, patch_summary from previous attempt.
+        nm_state: NearMissState.to_dict() — stall/backslide info. Optional for Step 2a.
+
+    Returns:
+        Non-empty protocol string with 3 mandatory sections.
+    """
+    parts: list[str] = []
+
+    # ── Mode declaration ──
+    parts.append(
+        "=== MODE: RESIDUAL GAP REPAIR ===\n"
+        "Your current fix direction is CORRECT. Most target tests pass.\n"
+        "You are NOT restarting. You are NOT redesigning.\n"
+        "You are closing the RESIDUAL GAP — the small remaining slice that fails."
+    )
+
+    # ── Hard constraints (4 semantics) ──
+    parts.append(
+        "HARD CONSTRAINTS (violations will be REJECTED by scope gate):\n"
+        "- Current direction is CORRECT — do NOT restart broad search\n"
+        "- Preserve ALL already-passing behavior — ZERO regression tolerated\n"
+        "- Smallest possible change — prefer adding a condition over rewriting logic\n"
+        "- Default scope is LOCKED to files from previous attempt\n"
+        "- To expand scope, you MUST first explain why current scope is insufficient\n"
+        "- Do NOT weaken validation, guards, constraints, or matching rules\n"
+        "- Do NOT remove checks to make tests pass"
+    )
+
+    # ── Stall/backslide warning (from nm_state) ──
+    if nm_state:
+        if nm_state.get("same_patch_suspected"):
+            stall_n = nm_state.get("stall_consecutive", 0)
+            parts.append(
+                f"⚠ STALL DETECTED: f2p_passed unchanged for {stall_n + 1} consecutive attempts.\n"
+                "Your previous surgical approach is NOT making progress.\n"
+                "You MUST identify a DIFFERENT mechanism for the residual gap.\n"
+                "Do NOT repeat the same patch with minor variations."
+            )
+        if nm_state.get("backslide_detected"):
+            best = nm_state.get("best_f2p_passed", 0)
+            best_a = nm_state.get("best_attempt", 0)
+            parts.append(
+                f"⚠ BACKSLIDE DETECTED: f2p_passed decreased from {best} (attempt {best_a}) "
+                f"to {evidence['f2p_passed']}.\n"
+                "Your last change made things WORSE. Revert to the approach from "
+                f"attempt {best_a} and try a DIFFERENT residual fix."
+            )
+
+    # ── Previous attempt context ──
+    if patch_context:
+        prev_files = patch_context.get("files_written") or []
+        if prev_files:
+            parts.append(
+                f"SCOPE (locked to previous attempt files): {', '.join(prev_files)}\n"
+                "Any edit outside these files requires explicit justification in Step 2."
+            )
+
+    # ── Evidence summary ──
+    gap_line = (
+        f"CURRENT STATE: {evidence['f2p_passed']}/{evidence['f2p_passed'] + evidence['f2p_failed']} "
+        f"target tests pass. {evidence['f2p_failed']} test(s) still failing."
+    )
+    if evidence["p2p_failed"]:
+        gap_line += f" WARNING: {evidence['p2p_failed']} existing test(s) also broken."
+    parts.append(gap_line)
+
+    # ── 3-step output protocol ──
+    parts.append(
+        "=== MANDATORY 3-STEP OUTPUT PROTOCOL ===\n"
+        "You MUST complete each step IN ORDER. Do NOT skip to code.\n\n"
+        "── Step 1: RESIDUAL FAILURE ANALYSIS ──\n"
+        "Write:\n"
+        "  REMAINING_FAILURES: (list each failing test by name if known)\n"
+        "  SHARED_GAP: (what do the remaining failures have in common?)\n"
+        "  WHY_ALMOST_CORRECT: (why does your current patch solve most tests?)\n"
+        "  MISSING_ELEMENT: (the specific edge case, invariant, or code path not covered)\n\n"
+        "── Step 2: MINIMAL REPAIR PLAN ──\n"
+        "Write:\n"
+        "  TARGET_FILES: (file:region for each edit — MUST be within scope)\n"
+        "  WHY_SUFFICIENT: (why these edits close the gap without over-reaching)\n"
+        "  PRESERVATION: (which already-passing behaviors are preserved and why)\n"
+        "  SCOPE_EXPANSION: (NONE, or: why current scope is insufficient + what to add)\n\n"
+        "── Step 3: PATCH ──\n"
+        "Only after Steps 1-2 are complete, write the minimal code change.\n"
+        "The patch MUST stay within the files/regions declared in Step 2.\n"
+        "Maximum 30 lines changed. Prefer condition additions over rewrites."
+    )
+
+    # ── Enforcement reminder ──
+    parts.append(
+        "ENFORCEMENT (hard system gates, not suggestions):\n"
+        "- Scope gate REJECTS patches introducing new files\n"
+        "- Scope gate REJECTS patches > 30 lines changed\n"
+        "- Constraint weakening (removing guards/assertions) is flagged\n"
+        "- Skipping Step 1 or Step 2 means your patch lacks justification"
+    )
+
+    return "\n\n".join(parts)
 
 
 def build_repair_prompt(
@@ -167,22 +251,40 @@ def build_repair_prompt(
     cv_result: dict,
     routing: dict,
     patch_context: dict | None = None,
+    repair_mode: str | None = None,
+    nm_state: dict | None = None,
 ) -> str:
     """Build a phase-specific repair prompt from classified failure.
 
     Args:
-        failure_type: One of wrong_direction/incomplete_fix/verify_gap/execution_error
+        failure_type: One of wrong_direction/incomplete_fix/verify_gap/execution_error/near_miss
         cv_result: The controlled_verify result dict (cv_flat from jingu_body)
         routing: The routing rule from get_routing() — contains next_phase,
                  repair_goal, required_principals
         patch_context: Optional dict with previous attempt patch info:
                        files_written (list[str]), patch_summary (dict)
+        repair_mode: v0.3 — "residual_gap_repair" triggers 3-step protocol.
+                     None falls back to failure_type-based routing.
+        nm_state: v0.3 — NearMissState.to_dict() for stall/backslide context.
 
     Returns:
         A non-empty repair prompt string (NBR-compliant).
         Always contains: phase declaration, principals, repair goal, evidence.
     """
     evidence = _extract_evidence(cv_result)
+
+    # v0.3: residual_gap_repair → 3-step constrained protocol (mode switch)
+    if repair_mode == "residual_gap_repair":
+        next_phase = routing.get("next_phase", "EXECUTE")
+        protocol = _build_residual_gap_protocol(evidence, patch_context, nm_state)
+        # Prepend phase declaration for routing consistency
+        header = f"[REPAIR PHASE: {next_phase.upper()}]"
+        result = header + "\n\n" + protocol
+        if evidence["failing_tests"]:
+            result += "\n\nFailing test output:\n" + evidence["failing_tests"]
+        assert result.strip(), "build_repair_prompt produced empty output"
+        return result
+
     next_phase = routing.get("next_phase", "unknown")
     repair_goal = routing.get("repair_goal", "")
     principals = routing.get("required_principals", [])
@@ -244,8 +346,8 @@ def build_repair_prompt(
             )
             parts.append("\n".join(constraint_lines))
 
-    # For near_miss: put residual gap context BEFORE evidence (high priority)
-    if failure_type == "near_miss":
+    # Legacy near_miss fallback (only reached if repair_mode not set — pre-v0.3 path)
+    if failure_type == "near_miss" and repair_mode != "residual_gap_repair":
         nm_lines = [
             f"RESIDUAL GAP: {evidence['f2p_passed']} of "
             f"{evidence['f2p_passed'] + evidence['f2p_failed']} target tests pass. "
