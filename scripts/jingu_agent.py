@@ -1319,6 +1319,15 @@ class JinguAgent:
                 f"demonstration scripts, or comment updates. "
                 f"Every step matters — go straight to submission as soon as the required tests pass."
             )
+        # ScopeLockGate v0.1: inject scope constraints into A2+ prompt
+        if previous_failure and self._scope_lock_envelope is not None:
+            from scope_lock import build_scope_lock_prompt_block
+            _sl_block = build_scope_lock_prompt_block(self._scope_lock_envelope)
+            extra_parts.append(_sl_block)
+            print(f"    [scope-lock] prompt block injected: "
+                  f"allowed_files={sorted(self._scope_lock_envelope.allowed_files)} "
+                  f"size_limit={self._scope_lock_envelope.size_limit}", flush=True)
+
         if previous_failure:
             extra_parts.append(f"Previous attempt failed: {previous_failure}")
 
@@ -1818,6 +1827,26 @@ class JinguAgent:
                         print(f"    [failure-classify] type={_ft} next_phase={_routing['next_phase']} "
                               f"f2p_pass={cv_flat.get('f2p_passed', 0)} "
                               f"f2p_fail={cv_flat.get('f2p_failed', 0)}", flush=True)
+                        # ScopeLockGate v0.1: build envelope for near_miss/residual_gap
+                        try:
+                            from scope_lock import build_scope_lock_envelope
+                            from run_with_jingu_gate import patch_fingerprint as _sl_pfp
+                            _sl_patch = self._state.patch if hasattr(self._state, 'patch') else None
+                            # Use jingu_body's patch fingerprint if available, else compute from submitted patch
+                            _sl_fp = jingu_body.get("patch_fp") if jingu_body else None
+                            if not _sl_fp and submitted:
+                                _sl_fp = _sl_pfp(submitted)
+                            if _sl_fp:
+                                _sl_env = build_scope_lock_envelope(_sl_fp, cv_flat, _ft)
+                                if _sl_env is not None:
+                                    self._scope_lock_envelope = _sl_env
+                                    print(f"    [scope-lock] envelope built: "
+                                          f"files={_sl_env.touched_files} "
+                                          f"total={_sl_env.patch_total} "
+                                          f"limit={_sl_env.size_limit} "
+                                          f"type={_ft}", flush=True)
+                        except Exception as _sl_exc:
+                            print(f"    [scope-lock] envelope build failed (non-fatal): {_sl_exc}", flush=True)
                         # EFR telemetry: structured feedback emission
                         _evidence_quality = "rich" if cv_flat.get("output_tail") or cv_flat.get("stdout") else "counts_only"
                         _current_phase = str(self._cp_state_holder[0].phase).upper() if self._cp_state_holder else "?"
@@ -2195,6 +2224,7 @@ class JinguAgent:
         _last_failure_type: str = ""  # telemetry: which failure_type drove the routing
         self._f2p_history: list[tuple[int, int]] = []  # v0.3: (f2p_passed, f2p_total) per attempt for stall/backslide
         self._last_cv_stdout: str = ""  # v0.3: raw CV stdout for residual payload extraction
+        self._scope_lock_envelope = None  # ScopeLockGate v0.1: built after A1 CV for near_miss/residual_gap
         cp_state_holder: list = [initial_reasoning_state("OBSERVE")]
         self._cp_state_holder = cp_state_holder
 
@@ -2544,34 +2574,68 @@ class JinguAgent:
                     if jingu_body:
                         jingu_body["direction_gate_rejected"] = True
 
-            # ── Near-miss scope gate: hard constraints on A3 repair patches ──
+            # ── ScopeLockGate v0.1: replaces judge_near_miss_patch with 3-rule system ──
             _nm_rejected = False
+            _sl_rejection_hint = ""  # scope lock rejection feedback for agent
+            _nm_legacy_reason = ""   # legacy near-miss rejection reason
             if (attempt > 1
+                    and _last_failure_type in ("near_miss", "residual_gap")
+                    and patch
+                    and not _dp_rejected
+                    and not _dcg_rejected
+                    and self._scope_lock_envelope is not None):
+                from scope_lock import evaluate_scope_lock
+                from run_with_jingu_gate import patch_fingerprint as _sl_pfp
+                _sl_a2_fp = _sl_pfp(patch)
+                _sl_verdict = evaluate_scope_lock(self._scope_lock_envelope, _sl_a2_fp)
+                print(f"    [scope-lock] attempt={attempt} "
+                      f"admitted={_sl_verdict.admitted} "
+                      f"violations={_sl_verdict.violation_codes} "
+                      f"a1_total={_sl_verdict.observed['a1_total']} "
+                      f"a2_total={_sl_verdict.observed['a2_total']} "
+                      f"size_limit={_sl_verdict.observed['size_limit']} "
+                      f"overlap={_sl_verdict.observed['overlap_ratio']} "
+                      f"new_files={_sl_verdict.observed['new_files']}",
+                      flush=True)
+                if jingu_body:
+                    jingu_body["scope_lock_gate"] = {
+                        "admitted": _sl_verdict.admitted,
+                        "violation_codes": _sl_verdict.violation_codes,
+                        "observed": _sl_verdict.observed,
+                    }
+                    # activation proof
+                    jingu_body["scope_lock_enabled"] = True
+                    jingu_body["scope_lock_allowed_files"] = sorted(self._scope_lock_envelope.allowed_files)
+                    jingu_body["scope_lock_size_limit"] = self._scope_lock_envelope.size_limit
+                if not _sl_verdict.admitted:
+                    _nm_rejected = True
+                    _sl_rejection_hint = _sl_verdict.repair_hint
+                    candidates = [c for c in candidates if c.get("attempt") != attempt]
+                    print(f"    [scope-lock] HARD REJECT: {_sl_verdict.violation_codes}, "
+                          f"dropped from candidates", flush=True)
+            elif (attempt > 1
                     and _last_failure_type == "near_miss"
                     and patch
                     and not _dp_rejected
-                    and not _dcg_rejected):
-                _nm_verdict = judge_near_miss_patch(
+                    and not _dcg_rejected
+                    and self._scope_lock_envelope is None):
+                # Fallback: use legacy near-miss gate when no envelope available
+                _nm_verdict_legacy = judge_near_miss_patch(
                     _nprg_prev_files, _nprg_curr_files, patch, max_lines=30,
                 )
-                _nm_m = _nm_verdict["metrics"]
-                print(f"    [near-miss-gate] attempt={attempt} "
-                      f"pass={_nm_verdict['pass']} "
-                      f"reason={_nm_verdict['reject_reason']} "
-                      f"lines={_nm_m['total_lines_changed']} "
-                      f"new_file={_nm_m['introduced_new_file']} "
-                      f"constraint_weakened={_nm_m['constraint_weakened']}",
+                _nm_m = _nm_verdict_legacy["metrics"]
+                print(f"    [near-miss-gate-legacy] attempt={attempt} "
+                      f"pass={_nm_verdict_legacy['pass']} "
+                      f"reason={_nm_verdict_legacy['reject_reason']} "
+                      f"lines={_nm_m['total_lines_changed']}",
                       flush=True)
                 if jingu_body:
-                    jingu_body["near_miss_gate"] = _nm_verdict
-                if not _nm_verdict["pass"]:
+                    jingu_body["near_miss_gate"] = _nm_verdict_legacy
+                if not _nm_verdict_legacy["pass"]:
                     _nm_rejected = True
+                    _nm_legacy_reason = _nm_verdict_legacy["reject_reason"] or "unknown"
                     candidates = [c for c in candidates if c.get("attempt") != attempt]
-                    print(f"    [near-miss-gate] HARD REJECT: {_nm_verdict['reject_reason']}, "
-                          f"dropped from candidates", flush=True)
-                elif _nm_m["constraint_weakened"]:
-                    print(f"    [near-miss-gate] WARN: possible constraint weakening detected "
-                          f"(guard pattern removed in diff)", flush=True)
+                    print(f"    [near-miss-gate-legacy] HARD REJECT: {_nm_legacy_reason}", flush=True)
 
             self._prev_files_written = _nprg_curr_files
             _prev_raw_patch = patch or _prev_raw_patch  # preserve previous if current empty
@@ -2614,32 +2678,43 @@ class JinguAgent:
                 )
                 continue  # skip to next attempt
 
-            # Near-miss scope gate: if rejected, skip gate and set focused feedback
+            # ScopeLockGate / Near-miss: if rejected, skip gate and set focused feedback
             if _nm_rejected:
-                _nm_reason = _nm_verdict["reject_reason"]
-                _nm_lines = _nm_verdict["metrics"]["total_lines_changed"]
-                print(f"    [near-miss-gate] skipping gate — patch rejected by scope gate", flush=True)
-                attempts_log.append({
-                    "attempt": attempt,
-                    "admission_reason": f"near_miss_rejected:{_nm_reason}",
-                    "patch_fp": patch_fingerprint(patch) if patch else None,
-                    "gate_reason_codes": [_nm_reason.upper()],
-                    "exit_status": agent_exit,
-                })
-                if _nm_reason == "near_miss_new_file":
-                    last_failure = (
-                        "SCOPE VIOLATION: Your near-miss repair introduced a NEW file. "
-                        "You MUST only modify files from the previous attempt. "
-                        "This is a focused repair — do not expand scope."
-                    )
-                elif _nm_reason == "near_miss_patch_too_large":
-                    last_failure = (
-                        f"SCOPE VIOLATION: Your near-miss repair changed {_nm_lines} lines "
-                        f"(limit: 30). A near-miss repair must be SURGICAL — "
-                        f"find the exact condition or branch that fails and fix ONLY that."
-                    )
+                if _sl_rejection_hint:
+                    # ScopeLockGate v0.1 rejection — use structured hint from verdict
+                    print(f"    [scope-lock] skipping gate — patch rejected by scope lock", flush=True)
+                    attempts_log.append({
+                        "attempt": attempt,
+                        "admission_reason": "scope_lock_rejected",
+                        "patch_fp": patch_fingerprint(patch) if patch else None,
+                        "gate_reason_codes": ["SCOPE_LOCK_REJECTED"],
+                        "exit_status": agent_exit,
+                    })
+                    last_failure = _sl_rejection_hint
                 else:
-                    last_failure = f"SCOPE VIOLATION: {_nm_reason}"
+                    # Legacy near-miss gate rejection
+                    print(f"    [near-miss-gate] skipping gate — patch rejected by scope gate", flush=True)
+                    attempts_log.append({
+                        "attempt": attempt,
+                        "admission_reason": f"near_miss_rejected:{_nm_legacy_reason}",
+                        "patch_fp": patch_fingerprint(patch) if patch else None,
+                        "gate_reason_codes": [_nm_legacy_reason.upper()],
+                        "exit_status": agent_exit,
+                    })
+                    if _nm_legacy_reason == "near_miss_new_file":
+                        last_failure = (
+                            "SCOPE VIOLATION: Your near-miss repair introduced a NEW file. "
+                            "You MUST only modify files from the previous attempt. "
+                            "This is a focused repair — do not expand scope."
+                        )
+                    elif _nm_legacy_reason == "near_miss_patch_too_large":
+                        last_failure = (
+                            "SCOPE VIOLATION: Your near-miss repair was too large. "
+                            "A near-miss repair must be SURGICAL — "
+                            "find the exact condition or branch that fails and fix ONLY that."
+                        )
+                    else:
+                        last_failure = f"SCOPE VIOLATION: {_nm_legacy_reason}"
                 continue  # skip to next attempt
 
             if not patch:
