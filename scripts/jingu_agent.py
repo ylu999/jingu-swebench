@@ -1811,7 +1811,7 @@ class JinguAgent:
                         # v0.3: record f2p for stall/backslide detection
                         _v03_f2p_p = cv_flat.get("f2p_passed") or 0
                         _v03_f2p_t = _v03_f2p_p + (cv_flat.get("f2p_failed") or 0)
-                        _f2p_history.append((_v03_f2p_p, _v03_f2p_t))
+                        self._f2p_history.append((_v03_f2p_p, _v03_f2p_t))
                         print(f"    [failure-classify] type={_ft} next_phase={_routing['next_phase']} "
                               f"f2p_pass={cv_flat.get('f2p_passed', 0)} "
                               f"f2p_fail={cv_flat.get('f2p_failed', 0)}", flush=True)
@@ -1832,7 +1832,7 @@ class JinguAgent:
                         # v0.3: record f2p even on success (for history completeness)
                         _v03_f2p_p = cv_flat.get("f2p_passed") or 0
                         _v03_f2p_t = _v03_f2p_p + (cv_flat.get("f2p_failed") or 0)
-                        _f2p_history.append((_v03_f2p_p, _v03_f2p_t))
+                        self._f2p_history.append((_v03_f2p_p, _v03_f2p_t))
                     # Failure layer: semantic rootcause classification (full FailureRecord)
                     _qj_hist = _monitor.quick_judge_history if hasattr(_monitor, 'quick_judge_history') else None
                     _fr = classify_failure_layer(cv_flat, _qj_hist, _ft, instance_id=instance_id)
@@ -2190,7 +2190,7 @@ class JinguAgent:
         _next_attempt_start_phase: str = "OBSERVE"  # p-fix: repair routing target for next attempt
         _next_attempt_start_phase_for_ack: str | None = None  # EFR: prescribed phase for ack check
         _last_failure_type: str = ""  # telemetry: which failure_type drove the routing
-        _f2p_history: list[tuple[int, int]] = []  # v0.3: (f2p_passed, f2p_total) per attempt for stall/backslide
+        self._f2p_history: list[tuple[int, int]] = []  # v0.3: (f2p_passed, f2p_total) per attempt for stall/backslide
         cp_state_holder: list = [initial_reasoning_state("OBSERVE")]
         self._cp_state_holder = cp_state_holder
 
@@ -3249,7 +3249,7 @@ class JinguAgent:
                                         )
                                         from repair_prompts import build_residual_gap_payload
                                         _v03_nm = classify_near_miss_state(
-                                            _jb_cv, attempt, _f2p_history,
+                                            _jb_cv, attempt, self._f2p_history,
                                         )
                                         if _v03_nm:
                                             _v03_repair_mode = _v03_nm.repair_mode
@@ -3374,7 +3374,7 @@ class JinguAgent:
                                         )
                                         from repair_prompts import build_residual_gap_payload
                                         _v03_nm2 = classify_near_miss_state(
-                                            _jb_cv, attempt, _f2p_history,
+                                            _jb_cv, attempt, self._f2p_history,
                                         )
                                         if _v03_nm2:
                                             _v03_repair_mode2 = _v03_nm2.repair_mode
