@@ -1833,9 +1833,9 @@ class JinguAgent:
                             from run_with_jingu_gate import patch_fingerprint as _sl_pfp, patch_content_hash as _sl_pch
                             # Use jingu_body's patch fingerprint if available, else compute from submitted patch
                             _sl_fp = jingu_body.get("patch_fp") if jingu_body else None
-                            if not _sl_fp and submitted:
-                                _sl_fp = _sl_pfp(submitted)
-                            _sl_hash = _sl_pch(submitted) if submitted else ""
+                            if not _sl_fp and patch_for_body:
+                                _sl_fp = _sl_pfp(patch_for_body)
+                            _sl_hash = _sl_pch(patch_for_body) if patch_for_body else ""
                             if _sl_fp:
                                 _sl_env = build_scope_lock_envelope(
                                     _sl_fp, cv_flat, _ft,
