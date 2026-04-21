@@ -367,6 +367,7 @@ class StepMonitorState:
                 "p2p_failed": result.get("p2p_failed"),
                 "eval_resolved": result.get("eval_resolved"),
                 "p2p_failing_names": result.get("p2p_failing_names", []),
+                "f2p_failing_names": result.get("f2p_failing_names", []),
                 "output_tail": result.get("output_tail", "")[:500],
             }
             self.verify_history.append(entry)
