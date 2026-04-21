@@ -687,6 +687,7 @@ _usage_tracker = ModelUsageTracker()
 # Official mini-swe-agent Verified run config (collection 737e5dd2, run b6e8010b)
 # Uses Anthropic direct API with interleaved thinking (reasoning_effort=high)
 MODEL = __import__("os").environ.get("JINGU_MODEL", "bedrock/global.anthropic.claude-sonnet-4-5-20250929-v1:0")
+print(f"[debug-MODEL] MODEL={MODEL!r} JINGU_MODEL_env={__import__('os').environ.get('JINGU_MODEL')!r}", flush=True)
 
 BASE_CONFIG = {
     "model": {
