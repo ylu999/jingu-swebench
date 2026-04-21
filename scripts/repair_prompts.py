@@ -126,6 +126,33 @@ _REPAIR_INSTRUCTIONS: dict[str, str] = {
         "The problem is mechanical, not logical. "
         "Ensure your patch applies cleanly and the code compiles."
     ),
+    "near_miss": (
+        "Your fix is ALMOST correct — most target tests now pass.\n"
+        "Only a small number of tests still fail.\n\n"
+        "=== MANDATORY NEAR-MISS REPAIR PROTOCOL ===\n\n"
+        "Hard constraints:\n"
+        "- Do NOT change solution direction.\n"
+        "- Do NOT switch to unrelated files.\n"
+        "- Do NOT rewrite large sections of code.\n"
+        "- Do NOT weaken validation, guards, constraints, or matching rules.\n"
+        "- Do NOT remove checks just to make tests pass.\n"
+        "- Preserve ALL already-passing tests.\n\n"
+        "Required steps:\n"
+        "1. DIAGNOSE: Why do the remaining tests still fail?\n"
+        "   Look at the specific assertion error and identify the exact gap.\n"
+        "2. LOCATE: Identify the minimal code location responsible.\n"
+        "   Which condition, branch, or edge case is not handled?\n"
+        "3. FIX: Make the smallest possible patch to close that residual gap.\n"
+        "   Prefer adding a condition over rewriting logic.\n"
+        "4. PRESERVE: State which invariants from already-passing tests are kept.\n\n"
+        "=== OUTPUT STRUCTURE ===\n"
+        "RESIDUAL_GAP: (what specific semantic gap remains)\n"
+        "MINIMAL_FIX_POINT: (file + function/branch to change)\n"
+        "PRESERVED_INVARIANTS: (behaviors that must remain unchanged)\n"
+        "PATCH: (the minimal diff)\n\n"
+        "Remember: This is NOT a redesign. This is NOT a new direction.\n"
+        "This is a focused repair of the remaining failing slice ONLY."
+    ),
 }
 
 
@@ -210,6 +237,23 @@ def build_repair_prompt(
                 "  4. Only then write code — to DIFFERENT files"
             )
             parts.append("\n".join(constraint_lines))
+
+    # For near_miss: put residual gap context BEFORE evidence (high priority)
+    if failure_type == "near_miss":
+        nm_lines = [
+            f"RESIDUAL GAP: {evidence['f2p_passed']} of "
+            f"{evidence['f2p_passed'] + evidence['f2p_failed']} target tests pass. "
+            f"Only {evidence['f2p_failed']} test(s) still failing.",
+        ]
+        if patch_context:
+            prev_files = patch_context.get("files_written") or []
+            if prev_files:
+                nm_lines.append(f"Files already modified (keep working in these): {', '.join(prev_files)}")
+        nm_lines.append(
+            "Constraint: max 30 lines changed. Do NOT introduce new files. "
+            "Do NOT weaken any existing validation or guard."
+        )
+        parts.append("\n".join(nm_lines))
 
     # Evidence section (at end — may be truncated, that's OK)
     evidence_lines = []

@@ -20,14 +20,49 @@ class TestClassifyFailure(unittest.TestCase):
         cv = {"verification_kind": "controlled_error", "f2p_passed": 2, "f2p_failed": 1}
         self.assertEqual(classify_failure(cv), "execution_error")
 
-    # --- Rule 2: incomplete_fix ---
+    # --- Rule 2: near_miss (high pass rate, few failures, no regression) ---
 
-    def test_partial_f2p_returns_incomplete_fix(self):
+    def test_near_miss_high_pass_rate(self):
+        """436/438 = 99.5% pass rate, 2 remaining, no regression -> near_miss."""
+        cv = {
+            "verification_kind": "controlled_fail_to_pass",
+            "f2p_passed": 436, "f2p_failed": 2, "p2p_failed": 0,
+        }
+        self.assertEqual(classify_failure(cv), "near_miss")
+
+    def test_near_miss_5_of_6(self):
+        """5/6 = 83% pass rate, 1 remaining, no regression -> near_miss."""
+        cv = {
+            "verification_kind": "controlled_fail_to_pass",
+            "f2p_passed": 5, "f2p_failed": 1, "p2p_failed": 0,
+        }
+        self.assertEqual(classify_failure(cv), "near_miss")
+
+    def test_near_miss_boundary_80_percent(self):
+        """4/5 = 80% exactly -> near_miss."""
+        cv = {
+            "verification_kind": "controlled_fail_to_pass",
+            "f2p_passed": 4, "f2p_failed": 1, "p2p_failed": 0,
+        }
+        self.assertEqual(classify_failure(cv), "near_miss")
+
+    def test_near_miss_with_regression_becomes_incomplete(self):
+        """High pass rate but p2p regression -> incomplete_fix, not near_miss."""
+        cv = {
+            "verification_kind": "controlled_fail_to_pass",
+            "f2p_passed": 5, "f2p_failed": 1, "p2p_failed": 1,
+        }
+        self.assertEqual(classify_failure(cv), "incomplete_fix")
+
+    def test_below_80_percent_is_incomplete_fix(self):
+        """3/5 = 60% -> incomplete_fix, not near_miss."""
         cv = {
             "verification_kind": "controlled_fail_to_pass",
             "f2p_passed": 3, "f2p_failed": 2,
         }
         self.assertEqual(classify_failure(cv), "incomplete_fix")
+
+    # --- Rule 3: incomplete_fix ---
 
     def test_partial_f2p_one_each(self):
         cv = {
@@ -151,8 +186,13 @@ class TestGetRouting(unittest.TestCase):
         self.assertEqual(r["next_phase"], "EXECUTE")
         self.assertIn("action_grounding", r["required_principals"])
 
+    def test_near_miss_routing(self):
+        r = get_routing("near_miss")
+        self.assertEqual(r["next_phase"], "EXECUTE")
+        self.assertIn("ALMOST correct", r["repair_goal"])
+
     def test_all_failure_types_have_routing(self):
-        for ft in ("wrong_direction", "incomplete_fix", "verify_gap", "execution_error"):
+        for ft in ("wrong_direction", "incomplete_fix", "verify_gap", "execution_error", "near_miss"):
             r = get_routing(ft)
             self.assertIn("next_phase", r)
             self.assertIn("repair_goal", r)
@@ -166,10 +206,10 @@ class TestGetRouting(unittest.TestCase):
 class TestRoutingRulesCompleteness(unittest.TestCase):
     """Verify FAILURE_ROUTING_RULES covers all expected types."""
 
-    def test_four_types_covered(self):
+    def test_five_types_covered(self):
         self.assertEqual(
             set(FAILURE_ROUTING_RULES.keys()),
-            {"wrong_direction", "incomplete_fix", "verify_gap", "execution_error"},
+            {"wrong_direction", "incomplete_fix", "verify_gap", "execution_error", "near_miss"},
         )
 
     def test_each_rule_has_required_fields(self):

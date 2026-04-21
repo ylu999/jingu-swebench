@@ -13,7 +13,7 @@ from typing import Literal, Optional
 
 # ── FailureType (routing-level, unchanged) ────────────────────────────────────
 
-FailureType = Literal["wrong_direction", "incomplete_fix", "verify_gap", "execution_error"]
+FailureType = Literal["wrong_direction", "incomplete_fix", "verify_gap", "execution_error", "near_miss"]
 
 def _principals_for_phase(phase: str) -> list[str]:
     """Derive required_principals from contract_registry (SST: no hardcoded copy)."""
@@ -42,6 +42,15 @@ FAILURE_ROUTING_RULES: dict = {
     "execution_error": {
         "next_phase": "EXECUTE",
         "repair_goal": "Fix execution issues without changing solution direction.",
+        "required_principals": _principals_for_phase("EXECUTE"),
+    },
+    "near_miss": {
+        "next_phase": "EXECUTE",
+        "repair_goal": (
+            "Your fix is ALMOST correct — most target tests pass. "
+            "Only a few tests remain failing. DO NOT change direction. "
+            "Make the SMALLEST possible patch to fix the remaining failures."
+        ),
         "required_principals": _principals_for_phase("EXECUTE"),
     },
 }
@@ -77,6 +86,15 @@ def classify_failure(cv_result: dict) -> Optional[FailureType]:
 
     f2p_passed = cv_result.get("f2p_passed") or 0
     f2p_failed = cv_result.get("f2p_failed") or 0
+    f2p_total = f2p_passed + f2p_failed
+    p2p_failed = cv_result.get("p2p_failed") or 0
+
+    # near_miss: high pass rate (>=80%), few remaining failures (<=5), no regression
+    if (f2p_total > 0 and f2p_passed > 0 and f2p_failed > 0
+            and f2p_passed / f2p_total >= 0.80
+            and f2p_failed <= 5
+            and p2p_failed == 0):
+        return "near_miss"
 
     if f2p_passed > 0 and f2p_failed > 0:
         return "incomplete_fix"
