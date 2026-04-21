@@ -15,6 +15,135 @@ from typing import Literal, Optional
 
 FailureType = Literal["wrong_direction", "incomplete_fix", "verify_gap", "execution_error", "near_miss"]
 
+# ── v0.3: Near-Miss Repair State ──────────────────────────────────────────────
+
+RepairMode = Literal[
+    "broad_repair",           # wrong_direction / incomplete_fix — full re-analysis
+    "incremental_extension",  # incomplete_fix with partial progress
+    "residual_gap_repair",    # near_miss — constrained surgical fix
+    "redesign_required",      # verify_gap — all f2p pass but p2p regression
+]
+
+
+@dataclass
+class NearMissState:
+    """v0.3: Extended near-miss classification with stall/backslide detection.
+
+    Consumed by repair_prompts.py for structured 3-step repair protocol
+    and by jingu_agent.py for dynamic routing (stall → DESIGN).
+    """
+    failure_type: FailureType
+    repair_mode: RepairMode
+    likely_correct_direction: bool  # True if f2p_passed > 0 (some progress)
+    residual_gap_size: int         # f2p_failed count
+    f2p_passed: int
+    f2p_total: int
+    p2p_failed: int
+
+    # Stall detection (same f2p across attempts)
+    same_patch_suspected: bool = False
+    stall_consecutive: int = 0     # how many consecutive attempts with same f2p
+
+    # Backslide detection (f2p decreased vs best)
+    backslide_detected: bool = False
+    best_f2p_passed: int = 0       # best f2p_passed seen across all attempts
+    best_attempt: int = 0          # which attempt achieved best f2p
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+    @property
+    def needs_redesign(self) -> bool:
+        """True if stall or backslide warrants routing to DESIGN instead of EXECUTE."""
+        return self.same_patch_suspected or self.backslide_detected
+
+
+def classify_near_miss_state(
+    cv_result: dict,
+    attempt: int,
+    f2p_history: list[tuple[int, int]] | None = None,
+) -> NearMissState | None:
+    """Build NearMissState from CV result + attempt history.
+
+    Args:
+        cv_result: controlled_verify result dict.
+        attempt: current attempt number (1-based).
+        f2p_history: list of (f2p_passed, f2p_total) tuples from previous attempts.
+            Index 0 = attempt 1, etc. None if no history.
+
+    Returns:
+        NearMissState if failure_type is near_miss, None otherwise.
+    """
+    ft = classify_failure(cv_result)
+    if ft != "near_miss":
+        return None
+
+    f2p_passed = cv_result.get("f2p_passed") or 0
+    f2p_failed = cv_result.get("f2p_failed") or 0
+    f2p_total = f2p_passed + f2p_failed
+    p2p_failed = cv_result.get("p2p_failed") or 0
+
+    # Stall detection: same f2p_passed as previous attempt
+    same_patch_suspected = False
+    stall_consecutive = 0
+    if f2p_history:
+        # Count consecutive same-f2p from most recent backward
+        for prev_passed, _prev_total in reversed(f2p_history):
+            if prev_passed == f2p_passed:
+                stall_consecutive += 1
+            else:
+                break
+        same_patch_suspected = stall_consecutive >= 1  # 1+ prior attempt with same f2p
+
+    # Backslide detection: f2p_passed < best seen
+    backslide_detected = False
+    best_f2p_passed = f2p_passed
+    best_attempt = attempt
+    if f2p_history:
+        for idx, (prev_passed, _prev_total) in enumerate(f2p_history):
+            if prev_passed > best_f2p_passed:
+                best_f2p_passed = prev_passed
+                best_attempt = idx + 1  # 1-based attempt number
+        backslide_detected = f2p_passed < best_f2p_passed
+
+    return NearMissState(
+        failure_type="near_miss",
+        repair_mode="residual_gap_repair",
+        likely_correct_direction=True,
+        residual_gap_size=f2p_failed,
+        f2p_passed=f2p_passed,
+        f2p_total=f2p_total,
+        p2p_failed=p2p_failed,
+        same_patch_suspected=same_patch_suspected,
+        stall_consecutive=stall_consecutive,
+        backslide_detected=backslide_detected,
+        best_f2p_passed=best_f2p_passed,
+        best_attempt=best_attempt,
+    )
+
+
+def get_near_miss_routing(nm_state: NearMissState) -> dict:
+    """Dynamic routing for near_miss based on stall/backslide state.
+
+    Normal near_miss → EXECUTE (surgical fix).
+    Stall (same f2p 2+ attempts) → DESIGN (micro-redesign).
+    Backslide (f2p decreased) → DESIGN (micro-redesign).
+    """
+    if nm_state.needs_redesign:
+        return {
+            "next_phase": "DESIGN",
+            "repair_goal": (
+                "Your near-miss repair is STALLED or BACKSLIDING. "
+                "The previous surgical approach is not working. "
+                "You must MICRO-REDESIGN: identify WHY the residual tests resist "
+                "your current approach, then design a different mechanism for "
+                "the remaining gap ONLY."
+            ),
+            "required_principals": _principals_for_phase("DESIGN"),
+        }
+    return FAILURE_ROUTING_RULES["near_miss"]
+
+
 def _principals_for_phase(phase: str) -> list[str]:
     """Derive required_principals from contract_registry (SST: no hardcoded copy)."""
     try:
@@ -111,6 +240,18 @@ def classify_failure(cv_result: dict) -> Optional[FailureType]:
         return None
 
     return "wrong_direction"
+
+
+def get_repair_mode(failure_type: FailureType) -> RepairMode:
+    """Map FailureType to RepairMode (v0.3)."""
+    _FT_TO_RM: dict[str, RepairMode] = {
+        "wrong_direction": "broad_repair",
+        "incomplete_fix": "incremental_extension",
+        "verify_gap": "redesign_required",
+        "execution_error": "broad_repair",
+        "near_miss": "residual_gap_repair",
+    }
+    return _FT_TO_RM.get(failure_type, "broad_repair")
 
 
 def get_routing(failure_type: FailureType) -> dict:
