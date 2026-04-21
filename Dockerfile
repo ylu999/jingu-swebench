@@ -93,5 +93,7 @@ ENV JINGU_TRUST_GATE_DIST=/app/jingu-trust-gate/dist/src
 ENV JINGU_SWEBENCH_SCRIPTS=/app/scripts
 ENV PYTHONPATH=/app/scripts:/app/python
 ENV JINGU_BUNDLE_PATH=/app/bundle.json
+# Override dotenv pollution from mini-swe-agent .env (dotenv override=False won't touch existing env)
+ENV JINGU_MODEL=bedrock/global.anthropic.claude-sonnet-4-5-20250929-v1:0
 
 ENTRYPOINT ["/app/docker-entrypoint.sh"]
