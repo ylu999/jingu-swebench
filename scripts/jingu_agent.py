@@ -1830,21 +1830,27 @@ class JinguAgent:
                         # ScopeLockGate v0.1: build envelope for near_miss/residual_gap
                         try:
                             from scope_lock import build_scope_lock_envelope
-                            from run_with_jingu_gate import patch_fingerprint as _sl_pfp
-                            _sl_patch = self._state.patch if hasattr(self._state, 'patch') else None
+                            from run_with_jingu_gate import patch_fingerprint as _sl_pfp, patch_content_hash as _sl_pch
                             # Use jingu_body's patch fingerprint if available, else compute from submitted patch
                             _sl_fp = jingu_body.get("patch_fp") if jingu_body else None
                             if not _sl_fp and submitted:
                                 _sl_fp = _sl_pfp(submitted)
+                            _sl_hash = _sl_pch(submitted) if submitted else ""
                             if _sl_fp:
-                                _sl_env = build_scope_lock_envelope(_sl_fp, cv_flat, _ft)
+                                _sl_env = build_scope_lock_envelope(
+                                    _sl_fp, cv_flat, _ft,
+                                    attempt=attempt,
+                                    patch_hash=_sl_hash,
+                                )
                                 if _sl_env is not None:
                                     self._scope_lock_envelope = _sl_env
                                     print(f"    [scope-lock] envelope built: "
+                                          f"origin_attempt={attempt} "
                                           f"files={_sl_env.touched_files} "
                                           f"total={_sl_env.patch_total} "
                                           f"limit={_sl_env.size_limit} "
-                                          f"type={_ft}", flush=True)
+                                          f"type={_ft} "
+                                          f"patch_hash={_sl_hash[:8]}", flush=True)
                         except Exception as _sl_exc:
                             print(f"    [scope-lock] envelope build failed (non-fatal): {_sl_exc}", flush=True)
                         # EFR telemetry: structured feedback emission
@@ -1861,6 +1867,11 @@ class JinguAgent:
                         jingu_body["failure_routing"] = None
                         jingu_body["repair_directive"] = None
                         jingu_body["retry_mode"] = "generic"
+                        # ScopeLockGate lifecycle: clear envelope when no scope-lockable failure
+                        if self._scope_lock_envelope is not None:
+                            print(f"    [scope-lock] envelope CLEARED: failure_type=None "
+                                  f"(was origin_attempt={self._scope_lock_envelope.origin_attempt})", flush=True)
+                            self._scope_lock_envelope = None
                         # v0.3: record f2p even on success (for history completeness)
                         _v03_f2p_p = cv_flat.get("f2p_passed") or 0
                         _v03_f2p_t = _v03_f2p_p + (cv_flat.get("f2p_failed") or 0)
@@ -2578,17 +2589,23 @@ class JinguAgent:
             _nm_rejected = False
             _sl_rejection_hint = ""  # scope lock rejection feedback for agent
             _nm_legacy_reason = ""   # legacy near-miss rejection reason
-            if (attempt > 1
-                    and _last_failure_type in ("near_miss", "residual_gap")
-                    and patch
-                    and not _dp_rejected
-                    and not _dcg_rejected
-                    and self._scope_lock_envelope is not None):
+            # Explicit gate condition: envelope exists + active + current attempt > origin
+            _sl_env = self._scope_lock_envelope
+            _sl_should_enforce = (
+                _sl_env is not None
+                and _sl_env.active
+                and attempt > _sl_env.origin_attempt
+                and patch
+                and not _dp_rejected
+                and not _dcg_rejected
+            )
+            if _sl_should_enforce:
                 from scope_lock import evaluate_scope_lock
                 from run_with_jingu_gate import patch_fingerprint as _sl_pfp
                 _sl_a2_fp = _sl_pfp(patch)
-                _sl_verdict = evaluate_scope_lock(self._scope_lock_envelope, _sl_a2_fp)
+                _sl_verdict = evaluate_scope_lock(_sl_env, _sl_a2_fp)
                 print(f"    [scope-lock] attempt={attempt} "
+                      f"origin_attempt={_sl_env.origin_attempt} "
                       f"admitted={_sl_verdict.admitted} "
                       f"violations={_sl_verdict.violation_codes} "
                       f"a1_total={_sl_verdict.observed['a1_total']} "
@@ -2605,20 +2622,22 @@ class JinguAgent:
                     }
                     # activation proof
                     jingu_body["scope_lock_enabled"] = True
-                    jingu_body["scope_lock_allowed_files"] = sorted(self._scope_lock_envelope.allowed_files)
-                    jingu_body["scope_lock_size_limit"] = self._scope_lock_envelope.size_limit
+                    jingu_body["scope_lock_origin_attempt"] = _sl_env.origin_attempt
+                    jingu_body["scope_lock_origin_hash"] = _sl_env.origin_patch_hash[:8]
+                    jingu_body["scope_lock_allowed_files"] = sorted(_sl_env.allowed_files)
+                    jingu_body["scope_lock_size_limit"] = _sl_env.size_limit
                 if not _sl_verdict.admitted:
                     _nm_rejected = True
                     _sl_rejection_hint = _sl_verdict.repair_hint
                     candidates = [c for c in candidates if c.get("attempt") != attempt]
                     print(f"    [scope-lock] HARD REJECT: {_sl_verdict.violation_codes}, "
                           f"dropped from candidates", flush=True)
-            elif (attempt > 1
+            elif (not _sl_should_enforce
+                    and attempt > 1
                     and _last_failure_type == "near_miss"
                     and patch
                     and not _dp_rejected
-                    and not _dcg_rejected
-                    and self._scope_lock_envelope is None):
+                    and not _dcg_rejected):
                 # Fallback: use legacy near-miss gate when no envelope available
                 _nm_verdict_legacy = judge_near_miss_patch(
                     _nprg_prev_files, _nprg_curr_files, patch, max_lines=30,

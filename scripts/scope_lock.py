@@ -14,7 +14,17 @@ from typing import Optional
 
 @dataclass
 class ScopeLockEnvelope:
-    """Captures A1 patch state for scope constraint enforcement on A2."""
+    """Captures A1 patch state for scope constraint enforcement on A2+.
+
+    Origin metadata enables lifecycle management and traceability:
+      - origin_attempt: which attempt created this envelope
+      - origin_patch_hash: content hash of the origin patch (for audit)
+      - active: whether this envelope should be enforced
+
+    Anchor strategy (v0.1): FIXED to origin attempt.
+      A2 reject does NOT update the envelope. A3 still uses A1's constraints.
+      This is the most conservative strategy — prevents drift toward larger scope.
+    """
     touched_files: list[str]
     patch_additions: int
     patch_deletions: int
@@ -22,6 +32,10 @@ class ScopeLockEnvelope:
     failing_test_names: list[str]
     passing_test_names: list[str]
     failure_type: str  # "near_miss" | "residual_gap" | ...
+    # Origin metadata
+    origin_attempt: int = 1
+    origin_patch_hash: str = ""
+    active: bool = True
 
     @property
     def patch_total(self) -> int:
@@ -53,6 +67,8 @@ def build_scope_lock_envelope(
     patch_fp: dict,
     cv_result: dict,
     failure_type: str,
+    attempt: int = 1,
+    patch_hash: str = "",
 ) -> Optional[ScopeLockEnvelope]:
     """Build envelope from A1 patch fingerprint and controlled_verify result.
 
@@ -60,6 +76,8 @@ def build_scope_lock_envelope(
         patch_fp: output of patch_fingerprint() — {files, hunks, lines_added, lines_removed}
         cv_result: jingu_body["controlled_verify"] — {f2p_failing_names, p2p_failing_names, ...}
         failure_type: classified failure type from A1
+        attempt: which attempt is creating this envelope (for traceability)
+        patch_hash: content hash of the origin patch (for audit trail)
 
     Returns:
         ScopeLockEnvelope if failure_type is scope-lockable, else None.
@@ -75,6 +93,9 @@ def build_scope_lock_envelope(
         failing_test_names=list(cv_result.get("f2p_failing_names", [])),
         passing_test_names=list(cv_result.get("p2p_failing_names", [])),
         failure_type=failure_type,
+        origin_attempt=attempt,
+        origin_patch_hash=patch_hash,
+        active=True,
     )
 
 
@@ -148,6 +169,8 @@ def evaluate_scope_lock(
         "new_files": sorted(new_files),
         "overlap_ratio": round(overlap_ratio, 3),
         "failure_type": envelope.failure_type,
+        "origin_attempt": envelope.origin_attempt,
+        "origin_patch_hash": envelope.origin_patch_hash,
     }
 
     admitted = len(violations) == 0
