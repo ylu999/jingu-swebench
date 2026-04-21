@@ -1808,6 +1808,10 @@ class JinguAgent:
                             "repair_goal": _routing["repair_goal"],
                         }
                         jingu_body["retry_mode"] = "phase_specific"
+                        # v0.3: record f2p for stall/backslide detection
+                        _v03_f2p_p = cv_flat.get("f2p_passed") or 0
+                        _v03_f2p_t = _v03_f2p_p + (cv_flat.get("f2p_failed") or 0)
+                        _f2p_history.append((_v03_f2p_p, _v03_f2p_t))
                         print(f"    [failure-classify] type={_ft} next_phase={_routing['next_phase']} "
                               f"f2p_pass={cv_flat.get('f2p_passed', 0)} "
                               f"f2p_fail={cv_flat.get('f2p_failed', 0)}", flush=True)
@@ -1825,6 +1829,10 @@ class JinguAgent:
                         jingu_body["failure_routing"] = None
                         jingu_body["repair_directive"] = None
                         jingu_body["retry_mode"] = "generic"
+                        # v0.3: record f2p even on success (for history completeness)
+                        _v03_f2p_p = cv_flat.get("f2p_passed") or 0
+                        _v03_f2p_t = _v03_f2p_p + (cv_flat.get("f2p_failed") or 0)
+                        _f2p_history.append((_v03_f2p_p, _v03_f2p_t))
                     # Failure layer: semantic rootcause classification (full FailureRecord)
                     _qj_hist = _monitor.quick_judge_history if hasattr(_monitor, 'quick_judge_history') else None
                     _fr = classify_failure_layer(cv_flat, _qj_hist, _ft, instance_id=instance_id)
@@ -2182,6 +2190,7 @@ class JinguAgent:
         _next_attempt_start_phase: str = "OBSERVE"  # p-fix: repair routing target for next attempt
         _next_attempt_start_phase_for_ack: str | None = None  # EFR: prescribed phase for ack check
         _last_failure_type: str = ""  # telemetry: which failure_type drove the routing
+        _f2p_history: list[tuple[int, int]] = []  # v0.3: (f2p_passed, f2p_total) per attempt for stall/backslide
         cp_state_holder: list = [initial_reasoning_state("OBSERVE")]
         self._cp_state_holder = cp_state_holder
 
@@ -3228,10 +3237,40 @@ class JinguAgent:
                                         "files_written": (jingu_body or {}).get("files_written"),
                                         "patch_summary": (jingu_body or {}).get("patch_summary"),
                                     }
-                                _repair = build_repair_prompt(_jb_ft, _jb_cv, _jb_routing, patch_context=_patch_ctx)
+                                # v0.3: near_miss → residual_gap_repair protocol
+                                _v03_repair_mode = None
+                                _v03_nm_state = None
+                                _v03_routing = _jb_routing  # default: use classifier routing
+                                if _jb_ft == "near_miss":
+                                    try:
+                                        from failure_classifier import (
+                                            classify_near_miss_state, get_near_miss_routing,
+                                        )
+                                        _v03_nm = classify_near_miss_state(
+                                            _jb_cv, attempt, _f2p_history,
+                                        )
+                                        if _v03_nm:
+                                            _v03_repair_mode = _v03_nm.repair_mode
+                                            _v03_nm_state = _v03_nm.to_dict()
+                                            _v03_routing = get_near_miss_routing(_v03_nm)
+                                            print(f"    [v03-near-miss] repair_mode={_v03_repair_mode} "
+                                                  f"stall={_v03_nm.same_patch_suspected} "
+                                                  f"backslide={_v03_nm.backslide_detected} "
+                                                  f"gap={_v03_nm.residual_gap_size} "
+                                                  f"route={_v03_routing['next_phase']}",
+                                                  flush=True)
+                                    except Exception as _v03_exc:
+                                        print(f"    [v03-near-miss] fallback (error: {_v03_exc})",
+                                              flush=True)
+                                _repair = build_repair_prompt(
+                                    _jb_ft, _jb_cv, _v03_routing,
+                                    patch_context=_patch_ctx,
+                                    repair_mode=_v03_repair_mode,
+                                    nm_state=_v03_nm_state,
+                                )
                                 last_failure = _repair + "\n\n" + last_failure
                                 # p-fix: propagate repair routing target to next attempt cp_state
-                                _next_attempt_start_phase = _jb_routing['next_phase'].upper()
+                                _next_attempt_start_phase = _v03_routing['next_phase'].upper()
                                 _last_failure_type = _jb_ft or ""
                                 # EFR telemetry: structured repair consumed (retry_plan branch)
                                 print(f"    [efr-consume] attempt={attempt} failure_type={_jb_ft} "
@@ -3315,14 +3354,45 @@ class JinguAgent:
                                         "files_written": (jingu_body or {}).get("files_written"),
                                         "patch_summary": (jingu_body or {}).get("patch_summary"),
                                     }
-                                _repair = build_repair_prompt(_jb_ft, _jb_cv, _jb_routing, patch_context=_patch_ctx)
+                                # v0.3: near_miss → residual_gap_repair protocol (no_retry_plan branch)
+                                _v03_repair_mode2 = None
+                                _v03_nm_state2 = None
+                                _v03_routing2 = _jb_routing
+                                if _jb_ft == "near_miss":
+                                    try:
+                                        from failure_classifier import (
+                                            classify_near_miss_state, get_near_miss_routing,
+                                        )
+                                        _v03_nm2 = classify_near_miss_state(
+                                            _jb_cv, attempt, _f2p_history,
+                                        )
+                                        if _v03_nm2:
+                                            _v03_repair_mode2 = _v03_nm2.repair_mode
+                                            _v03_nm_state2 = _v03_nm2.to_dict()
+                                            _v03_routing2 = get_near_miss_routing(_v03_nm2)
+                                            print(f"    [v03-near-miss] repair_mode={_v03_repair_mode2} "
+                                                  f"stall={_v03_nm2.same_patch_suspected} "
+                                                  f"backslide={_v03_nm2.backslide_detected} "
+                                                  f"gap={_v03_nm2.residual_gap_size} "
+                                                  f"route={_v03_routing2['next_phase']} "
+                                                  f"branch=no_retry_plan",
+                                                  flush=True)
+                                    except Exception as _v03_exc2:
+                                        print(f"    [v03-near-miss] fallback (error: {_v03_exc2})",
+                                              flush=True)
+                                _repair = build_repair_prompt(
+                                    _jb_ft, _jb_cv, _v03_routing2,
+                                    patch_context=_patch_ctx,
+                                    repair_mode=_v03_repair_mode2,
+                                    nm_state=_v03_nm_state2,
+                                )
                                 last_failure = _repair + "\n\n" + last_failure
                                 # p-fix: propagate repair routing target to next attempt cp_state
-                                _next_attempt_start_phase = _jb_routing['next_phase'].upper()
+                                _next_attempt_start_phase = _v03_routing2['next_phase'].upper()
                                 _last_failure_type = _jb_ft or ""
                                 # EFR telemetry: structured repair consumed (no retry_plan branch)
                                 print(f"    [efr-consume] attempt={attempt} failure_type={_jb_ft} "
-                                      f"repair_target={_jb_routing['next_phase']} "
+                                      f"repair_target={_v03_routing2['next_phase']} "
                                       f"repair_len={len(_repair)} "
                                       f"has_evidence={'Evidence from previous attempt' in _repair} "
                                       f"has_phase_decl={'[REPAIR PHASE:' in _repair} "
