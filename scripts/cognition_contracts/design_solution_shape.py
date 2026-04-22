@@ -135,6 +135,11 @@ GATE_RULES: list[GateRule] = [
         field="rejected_alternative",
         repair_hint="Provide rejected_alternative: name at least one other approach you considered and explain why you chose not to use it.",
     ),
+    GateRule(
+        name="change_mechanism_present",
+        field="change_mechanism",
+        repair_hint="Provide change_mechanism: explain what behavior changes (current → new) and why the failing tests should pass after this change.",
+    ),
 ]
 
 GATE_RULE_MAP: dict[str, GateRule] = {r.name: r for r in GATE_RULES}

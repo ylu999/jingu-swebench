@@ -179,6 +179,23 @@ def _check_alternative_considered(pr: PhaseRecord) -> float:
     return 0.0
 
 
+# ── Rule 7: Change Mechanism (hard) ────────────────────────────────────
+
+
+def _check_change_mechanism(pr: PhaseRecord) -> float:
+    """
+    Check that change_mechanism is substantive (>= 10 chars).
+
+    Score:
+      0.0 = missing or too short
+      1.0 = substantive mechanism present
+    """
+    mech = getattr(pr, 'change_mechanism', '') or ''
+    if isinstance(mech, str) and len(mech.strip()) >= 10:
+        return 1.0
+    return 0.0
+
+
 # ── Main evaluation function ─────────────────────────────────────────────
 
 
@@ -247,6 +264,14 @@ def evaluate_design(
         _rule = _CONTRACT_RULE_MAP.get("alternative_considered")
         _hint = _rule.repair_hint if _rule else "Provide rejected_alternative with at least one considered approach."
         failed_rules.append("alternative_considered")
+        reasons.append(_hint)
+
+    # Rule 7: Change mechanism
+    scores["change_mechanism_present"] = _check_change_mechanism(pr)
+    if scores["change_mechanism_present"] < _CONTRACT_THRESHOLD:
+        _rule = _CONTRACT_RULE_MAP.get("change_mechanism_present")
+        _hint = _rule.repair_hint if _rule else "Provide change_mechanism: explain what behavior changes and why failing tests should pass."
+        failed_rules.append("change_mechanism_present")
         reasons.append(_hint)
 
     # ── Soft checks (score-only, no rejection) ──
