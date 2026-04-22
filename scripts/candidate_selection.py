@@ -36,6 +36,8 @@ You will be given:
 
 Your job: produce an ALTERNATIVE fix that targets DIFFERENT source files.
 Do NOT modify the same files as the previous attempt.
+NEVER target test files (tests/, test_*, *_test.py), configuration files, or setup files.
+Only modify regular source code files.
 
 Output a unified diff (git diff format) only. No explanation."""
 
@@ -62,6 +64,7 @@ Working directory: /testbed
 2. Identify DIFFERENT source files that could fix this issue
 3. Generate a complete unified diff targeting those different files
 4. Do NOT modify: {prev_files}
+5. NEVER target test files (tests/, test_*, *_test.py) — SWE-bench prohibits test modifications
 
 Output ONLY the diff (git diff format). No markdown fences, no explanation."""
 
@@ -178,6 +181,16 @@ def generate_alternative_candidate(
     alt_files = _extract_files_from_patch(alt_patch)
     if not alt_files:
         print("    [candidate-sel] SKIP: no files in alternative patch", flush=True)
+        return None
+
+    # Reject alternatives that only target test files
+    source_files = [f for f in alt_files
+                    if not (f.startswith("tests/") or "/tests/" in f
+                            or re.match(r".*/test_[^/]*\.py$", f)
+                            or f.endswith("_test.py"))]
+    if not source_files:
+        print(f"    [candidate-sel] SKIP: alternative only targets test files "
+              f"({sorted(alt_files)})", flush=True)
         return None
 
     overlap = set(alt_files) & set(prev_files)
