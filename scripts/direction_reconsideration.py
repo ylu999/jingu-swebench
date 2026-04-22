@@ -44,6 +44,7 @@ def should_trigger(
     cv_result: dict,
     failure_type: str,
     failure_type_v2: str,
+    outcome: str = "",
 ) -> bool:
     """Check if direction reconsideration should trigger."""
     if not DIRECTION_RECON_ENABLED:
@@ -68,12 +69,17 @@ def should_trigger(
     # Check failure type matches trigger conditions
     ft = failure_type.lower().strip() if failure_type else ""
     ft_v2 = failure_type_v2.lower().strip() if failure_type_v2 else ""
+    oc = outcome.lower().strip() if outcome else ""
 
     if ft in _TRIGGER_FAILURE_TYPES:
         return True
 
     # Also trigger on wrong_direction from v2 classifier
     if ft_v2 in _TRIGGER_FAILURE_TYPES:
+        return True
+
+    # outcome= field from retry_plan (governance reroute classification)
+    if oc in _TRIGGER_FAILURE_TYPES:
         return True
 
     # Fallback: if failure_type is "wrong_patch" and f2p=0, treat as wrong_direction

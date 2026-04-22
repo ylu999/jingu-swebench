@@ -3192,7 +3192,12 @@ class JinguAgent:
                                      if rc.startswith("failure_type_v2=")),
                                     "",
                                 )
-                                _recon_triggered = _recon_should_trigger(_recon_cv, _recon_ft, _recon_ft_v2)
+                                _recon_outcome = next(
+                                    (rc.split("=", 1)[1] for rc in retry_plan.root_causes
+                                     if rc.startswith("outcome=")),
+                                    "",
+                                )
+                                _recon_triggered = _recon_should_trigger(_recon_cv, _recon_ft, _recon_ft_v2, _recon_outcome)
                                 if _recon_triggered:
                                     _recon_prev_files = (jingu_body or {}).get("files_written", [])
                                     _recon_result = _gen_recon(
