@@ -3172,6 +3172,61 @@ class JinguAgent:
                                     f" severity={_pred_err_data.get('severity', '?')}",
                                     flush=True,
                                 )
+                            # ── Direction Reconsideration v0.1 ──────────────
+                            _recon_telemetry = {}
+                            try:
+                                from direction_reconsideration import (
+                                    should_trigger as _recon_should_trigger,
+                                    generate_reconsideration as _gen_recon,
+                                    build_recon_prompt_block as _build_recon_block,
+                                    build_recon_telemetry as _build_recon_telem,
+                                )
+                                _recon_cv = (jingu_body or {}).get("controlled_verify") or {}
+                                _recon_ft = next(
+                                    (rc.split("=", 1)[1] for rc in retry_plan.root_causes
+                                     if rc.startswith("failure_type=") and not rc.startswith("failure_type_v2=")),
+                                    "",
+                                )
+                                _recon_ft_v2 = next(
+                                    (rc.split("=", 1)[1] for rc in retry_plan.root_causes
+                                     if rc.startswith("failure_type_v2=")),
+                                    "",
+                                )
+                                _recon_triggered = _recon_should_trigger(_recon_cv, _recon_ft, _recon_ft_v2)
+                                if _recon_triggered:
+                                    _recon_prev_files = (jingu_body or {}).get("files_written", [])
+                                    _recon_result = _gen_recon(
+                                        instance=self._instance,
+                                        prev_files=_recon_prev_files,
+                                        patch_text=patch,
+                                        cv_result=_recon_cv,
+                                    )
+                                    if _recon_result:
+                                        _recon_block = _build_recon_block(_recon_result)
+                                        retry_plan = RetryPlan(
+                                            root_causes=retry_plan.root_causes + ["direction_reconsideration=applied"],
+                                            must_do=retry_plan.must_do,
+                                            must_not_do=retry_plan.must_not_do + [
+                                                "Do NOT repeat the same files/approach as the previous attempt"
+                                            ],
+                                            validation_requirement=retry_plan.validation_requirement,
+                                            next_attempt_prompt=(
+                                                _recon_block + "\n\n" + retry_plan.next_attempt_prompt
+                                            ),
+                                            control_action=retry_plan.control_action,
+                                            principal_violations=retry_plan.principal_violations,
+                                        )
+                                        print(f"    [dir-recon] INJECTED into retry_plan "
+                                              f"alt_files={_recon_result['alternative_files']} "
+                                              f"direction_changed={_recon_result['direction_changed']}",
+                                              flush=True)
+                                    _recon_telemetry = _build_recon_telem(_recon_result, _recon_triggered)
+                                else:
+                                    _recon_telemetry = _build_recon_telem(None, False)
+                            except ImportError:
+                                pass
+                            except Exception as _recon_exc:
+                                print(f"    [dir-recon] error (non-fatal): {_recon_exc}", flush=True)
                             print(f"    [retry-ctrl] action={retry_plan.control_action}  "
                                   f"root_causes={retry_plan.root_causes}")
                             print(f"    [retry-ctrl] must_not_do={retry_plan.must_not_do}")
@@ -3198,6 +3253,7 @@ class JinguAgent:
                                 "tests_delta": _tests_delta,
                                 "progress_code": _progress_code,
                                 "files_written_paths": (jingu_body or {}).get("files_written", []),
+                                "direction_reconsideration": _recon_telemetry or {},
                             })
                             # B3-CP: update reasoning state
                             _cv_passed = (_strategy_failure_class_v2 == "verified_pass")
