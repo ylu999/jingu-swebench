@@ -177,6 +177,11 @@ def generate_alternative_candidate(
         print("    [candidate-sel] SKIP: empty alternative patch", flush=True)
         return None
 
+    # Log patch summary for debugging
+    patch_lines = alt_patch.strip().split("\n")
+    print(f"    [candidate-sel] alternative patch: {len(patch_lines)} lines, "
+          f"first={patch_lines[0][:80] if patch_lines else '(empty)'}", flush=True)
+
     # Verify alternative targets different files
     alt_files = _extract_files_from_patch(alt_patch)
     if not alt_files:
@@ -219,9 +224,19 @@ def generate_alternative_candidate(
     alt_f2p_passed = alt_cv.get("f2p_passed", 0) or 0
     alt_f2p_failed = alt_cv.get("f2p_failed", 0) or 0
     alt_resolved = alt_cv.get("eval_resolved", False)
+    alt_cv_kind = alt_cv.get("verification_kind", "unknown")
+    alt_cv_error = alt_cv.get("error", "")
+    alt_cv_exit = alt_cv.get("exit_code", -1)
 
     print(f"    [candidate-sel] alternative CV: f2p={alt_f2p_passed}/{alt_f2p_passed + alt_f2p_failed} "
-          f"resolved={alt_resolved} elapsed={elapsed_ms:.0f}ms", flush=True)
+          f"resolved={alt_resolved} kind={alt_cv_kind} exit={alt_cv_exit} elapsed={elapsed_ms:.0f}ms", flush=True)
+    if alt_cv_error:
+        print(f"    [candidate-sel] CV error: {alt_cv_error[:200]}", flush=True)
+    if alt_f2p_passed + alt_f2p_failed == 0:
+        print(f"    [candidate-sel] WARNING: 0 f2p tests ran — patch may have failed to apply", flush=True)
+        tail = alt_cv.get("output_tail", "")
+        if tail:
+            print(f"    [candidate-sel] CV output_tail: {tail[:300]}", flush=True)
 
     return {
         "patch": alt_patch,
