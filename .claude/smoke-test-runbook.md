@@ -451,6 +451,8 @@ COPY scripts/run_with_jingu_gate.py \
      # p225: core agent + step processing
      scripts/jingu_agent.py \
      scripts/step_sections.py \
+     # p240: multi-candidate direction selection
+     scripts/candidate_selection.py \
      # p228-p235: visibility + replay
      scripts/step_event_emitter.py \
      scripts/decision_logger.py \
