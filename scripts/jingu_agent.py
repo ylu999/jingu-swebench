@@ -499,10 +499,7 @@ def jingu_process_instance(
     remove_from_preds_file(output_dir / "preds.json", instance_id)
     (instance_dir / f"{instance_id}.traj.json").unlink(missing_ok=True)
 
-    _model_cfg = config.get("model", {})
-    print(f"    [diag] get_model config: model_name={_model_cfg.get('model_name', 'MISSING')!r} "
-          f"model_class={_model_cfg.get('model_class', 'MISSING')!r}", flush=True)
-    model = get_model(config=_model_cfg)
+    model = get_model(config=config.get("model", {}))
     task = instance["problem_statement"]
 
     progress_manager.on_instance_start(instance_id)

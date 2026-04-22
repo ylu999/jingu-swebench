@@ -36,14 +36,10 @@ p = pathlib.Path('/usr/local/lib/python3.12/site-packages/minisweagent/models/__
 t = p.read_text(); \
 old = '\"litellm\": \"minisweagent.models.litellm_model.LitellmModel\"'; \
 new = '\"jingu\": \"minisweagent.models.jingu_model.JinguModel\",\n    \"litellm\": \"minisweagent.models.litellm_model.LitellmModel\"'; \
-t2 = t.replace(old, new); \
-assert old not in t2 or new in t2, 'Patch verification failed'; \
-p.write_text(t2); \
-print('JinguModel registered in _MODEL_CLASS_MAPPING'); \
-# Verify patch applied \
-t3 = p.read_text(); \
-assert '\"jingu\"' in t3, f'PATCH FAILED: jingu not found in __init__.py'; \
-print('VERIFIED: jingu found in _MODEL_CLASS_MAPPING')"
+p.write_text(t.replace(old, new)); \
+# Verify patch \
+assert '\"jingu\"' in p.read_text(), 'PATCH FAILED'; \
+print('JinguModel registered + verified in _MODEL_CLASS_MAPPING')"
 
 # Neutralize mini-swe-agent global .env to prevent dotenv from polluting JINGU_MODEL.
 # The .env may accumulate stale vars across Docker layer cache; truncate it.
