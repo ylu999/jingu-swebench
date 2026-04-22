@@ -1,7 +1,7 @@
 {
   "version": "1.0.0",
   "compiler_version": "0.1.0",
-  "generated_at": "2026-04-18T05:45:50.027691+00:00",
+  "generated_at": "2026-04-22T01:01:08.853472+00:00",
   "generator_commit": "1ffc8dc",
   "capabilities": [
     "prompt_only",
@@ -22,7 +22,7 @@
     "observation.fact_gathering": {
       "phase": "OBSERVE",
       "subtype": "observation.fact_gathering",
-      "compiled_at": "2026-04-18T05:45:50.024480+00:00",
+      "compiled_at": "2026-04-22T01:01:08.850807+00:00",
       "phase_spec": {
         "name": "OBSERVE",
         "goal": "Gather evidence from the environment: read files, traces, logs, tests.",
@@ -170,7 +170,7 @@
     "analysis.root_cause": {
       "phase": "ANALYZE",
       "subtype": "analysis.root_cause",
-      "compiled_at": "2026-04-18T05:45:50.025606+00:00",
+      "compiled_at": "2026-04-22T01:01:08.851713+00:00",
       "phase_spec": {
         "name": "ANALYZE",
         "goal": "Root-cause analysis: connect evidence to a causal hypothesis.",
@@ -502,7 +502,7 @@
     "decision.fix_direction": {
       "phase": "DECIDE",
       "subtype": "decision.fix_direction",
-      "compiled_at": "2026-04-18T05:45:50.026196+00:00",
+      "compiled_at": "2026-04-22T01:01:08.852188+00:00",
       "phase_spec": {
         "name": "DECIDE",
         "goal": "Choose the fix direction based on analysis.",
@@ -671,7 +671,7 @@
     "design.solution_shape": {
       "phase": "DESIGN",
       "subtype": "design.solution_shape",
-      "compiled_at": "2026-04-18T05:45:50.026570+00:00",
+      "compiled_at": "2026-04-22T01:01:08.852658+00:00",
       "phase_spec": {
         "name": "DESIGN",
         "goal": "Design the solution shape before writing code.",
@@ -691,7 +691,10 @@
         "task_shape": "solution_shape",
         "success_criteria": [
           "files_to_modify provided",
-          "scope_boundary provided"
+          "scope_boundary provided",
+          "test_to_code_link provided",
+          "change_mechanism provided",
+          "rejected_alternative provided"
         ],
         "required_evidence_kinds": [],
         "schema_ref": "design.solution_shape"
@@ -718,7 +721,10 @@
         "subtype": "design.solution_shape",
         "required_fields": [
           "files_to_modify",
-          "scope_boundary"
+          "scope_boundary",
+          "test_to_code_link",
+          "change_mechanism",
+          "rejected_alternative"
         ],
         "required_principals": [
           "ontology_alignment"
@@ -797,6 +803,21 @@
               ]
             },
             "description": "Comparative design options"
+          },
+          "test_to_code_link": {
+            "type": "string",
+            "minLength": 10,
+            "description": "Mapping from failing test(s) to the code location that needs to change"
+          },
+          "change_mechanism": {
+            "type": "string",
+            "minLength": 10,
+            "description": "How the fix works: what behavior changes and why it resolves the failing test"
+          },
+          "rejected_alternative": {
+            "type": "string",
+            "minLength": 10,
+            "description": "At least one alternative approach considered and why it was rejected"
           }
         },
         "required": [
@@ -804,10 +825,13 @@
           "subtype",
           "principals",
           "files_to_modify",
-          "scope_boundary"
+          "scope_boundary",
+          "test_to_code_link",
+          "change_mechanism",
+          "rejected_alternative"
         ]
       },
-      "prompt": "## Phase: DESIGN\nGoal: Design the solution shape before writing code.\nSubtype: design.solution_shape (solution_shape)\n\n## Required Fields\n- files_to_modify\n- scope_boundary\n\n## Forbidden Moves\n- do not write code yet (that is EXECUTE)\n- do not skip the decision\n\n## Required Principals\nYou MUST declare: ontology_alignment\n\n## Guidance\nDefine the solution shape before writing code.\n\nRules:\n1. Identify which files will be modified and bound the scope.\n2. List invariants that the fix must preserve.\n3. If you choose an allowlist approach, justify its completeness.\n4. Do NOT write production code yet.",
+      "prompt": "## Phase: DESIGN\nGoal: Design the solution shape before writing code.\nSubtype: design.solution_shape (solution_shape)\n\n## Required Fields\n- files_to_modify\n- scope_boundary\n- test_to_code_link\n- change_mechanism\n- rejected_alternative\n\n## Forbidden Moves\n- do not write code yet (that is EXECUTE)\n- do not skip the decision\n\n## Required Principals\nYou MUST declare: ontology_alignment\n\n## Guidance\nDefine the solution shape before writing code.\n\nRules:\n1. Identify which files will be modified and bound the scope (max 3 files).\n2. Link failing test(s) to the specific code that needs to change (test_to_code_link).\n3. Explain HOW the fix works — what behavior changes and why (change_mechanism).\n4. Name at least one alternative approach you considered and why you rejected it (rejected_alternative).\n5. List invariants that the fix must preserve.\n6. Do NOT write production code yet.",
       "repair_templates": {
         "scope_bounded": {
           "hint": "Identify specific files to modify -- scope must be bounded",
@@ -822,6 +846,21 @@
         "constraint_encoding": {
           "hint": "If using allowlist, justify completeness",
           "field": "scope_boundary",
+          "threshold": 0.5
+        },
+        "target_files_bounded": {
+          "hint": "Limit files_to_modify to at most 3 specific files. If you need more, re-analyze the problem scope.",
+          "field": "files_to_modify",
+          "threshold": 0.5
+        },
+        "test_code_linked": {
+          "hint": "Provide test_to_code_link: which failing test maps to which code location, and why changing that code fixes the test.",
+          "field": "test_to_code_link",
+          "threshold": 0.5
+        },
+        "alternative_considered": {
+          "hint": "Provide rejected_alternative: name at least one other approach you considered and explain why you chose not to use it.",
+          "field": "rejected_alternative",
           "threshold": 0.5
         }
       },
@@ -845,7 +884,7 @@
     "execution.code_patch": {
       "phase": "EXECUTE",
       "subtype": "execution.code_patch",
-      "compiled_at": "2026-04-18T05:45:50.027123+00:00",
+      "compiled_at": "2026-04-22T01:01:08.853077+00:00",
       "phase_spec": {
         "name": "EXECUTE",
         "goal": "Write the minimal code patch that fixes the issue.",
@@ -982,7 +1021,7 @@
     "judge.verification": {
       "phase": "JUDGE",
       "subtype": "judge.verification",
-      "compiled_at": "2026-04-18T05:45:50.027682+00:00",
+      "compiled_at": "2026-04-22T01:01:08.853461+00:00",
       "phase_spec": {
         "name": "JUDGE",
         "goal": "Verify the fix: run tests, check correctness, assess completeness.",
