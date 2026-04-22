@@ -2936,6 +2936,22 @@ def _step_inject_phase(agent_self, *, cp_state_holder: "list | None", state: "St
     except Exception as _p2_inj_exc:
         print(f"    [P2-scope-inject] error (non-fatal): {_p2_inj_exc}", flush=True)
 
+    # Fix Hypothesis Ranking: inject once when entering EXECUTE phase
+    try:
+        from fix_hypothesis_ranking import should_inject as _fhr_should, get_prompt_block as _fhr_block
+        _cp_fhr = cp_state_holder[0] if cp_state_holder is not None else state.cp_state
+        _phase_fhr = str(_cp_fhr.phase).upper()
+        if state.required_next_phase is not None:
+            _phase_fhr = state.required_next_phase.upper()
+        _fhr_key = "fix_hypothesis_injected"
+        _fhr_already = _fhr_key in state._injected_signals
+        if _fhr_should(_phase_fhr, state._llm_step, _fhr_already):
+            state._injected_signals.add(_fhr_key)
+            agent_self.messages.append({"role": "user", "content": _fhr_block()})
+            print(f"    [fix-hypothesis] injected=true phase={_phase_fhr}", flush=True)
+    except Exception as _fhr_exc:
+        print(f"    [fix-hypothesis] error (non-fatal): {_fhr_exc}", flush=True)
+
     # Plan-B: set current phase + schema on model for submit_phase_record tool
     try:
         _model = getattr(agent_self, "model", None)

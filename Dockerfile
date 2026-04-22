@@ -99,5 +99,6 @@ ENV JINGU_BUNDLE_PATH=/app/bundle.json
 ENV JINGU_MODEL=bedrock/global.anthropic.claude-sonnet-4-5-20250929-v1:0
 ENV JINGU_CANDIDATE_SELECTION=0
 ENV JINGU_DIRECTION_RECON=1
+ENV JINGU_FIX_HYPOTHESIS=1
 
 ENTRYPOINT ["/app/docker-entrypoint.sh"]
