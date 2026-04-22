@@ -2902,15 +2902,54 @@ class JinguAgent:
 
                     # CV-aware candidate: store verify signals for outcome-aware selection
                     _cv = (jingu_body or {}).get("controlled_verify") or {}
+
+                    # Multi-candidate direction selection: if CV didn't resolve,
+                    # generate alternative patch with different target_files and test it.
+                    _sel_patch = patch
+                    _sel_cv = _cv
+                    _sel_source = "original"
+                    if not _cv.get("eval_resolved") and _cv.get("f2p_failed", 0):
+                        try:
+                            from candidate_selection import (
+                                CANDIDATE_SELECTION_ENABLED,
+                                generate_alternative_candidate,
+                                select_better_candidate,
+                            )
+                            if CANDIDATE_SELECTION_ENABLED:
+                                _sel_cid = (self._state.container_id
+                                            if self._state else None)
+                                if _sel_cid:
+                                    _alt = generate_alternative_candidate(
+                                        instance=self._instance,
+                                        container_id=_sel_cid,
+                                        current_patch=patch,
+                                        cv_result=_cv,
+                                    )
+                                    if _alt is not None:
+                                        _sel_patch, _sel_cv, _sel_reason = (
+                                            select_better_candidate(patch, _cv, _alt)
+                                        )
+                                        if _sel_patch != patch:
+                                            _sel_source = "alternative"
+                                            print(f"    [candidate-sel] SWAPPED to alternative: "
+                                                  f"{_sel_reason}", flush=True)
+                                        else:
+                                            print(f"    [candidate-sel] KEPT original: "
+                                                  f"{_sel_reason}", flush=True)
+                        except Exception as _sel_exc:
+                            print(f"    [candidate-sel] error (non-fatal): "
+                                  f"{str(_sel_exc)[:200]}", flush=True)
+
                     candidates.append({
                         "attempt": attempt,
-                        "patch": patch,
+                        "patch": _sel_patch,
                         "score": score,
                         "gate_code": gate_result.gate_code,
                         "gate_reason_codes": gate_result.reason_codes,
-                        "cv_eval_resolved": _cv.get("eval_resolved"),
-                        "cv_p2p_failed": _cv.get("p2p_failed", 0) or 0,
-                        "cv_f2p_passed": _cv.get("f2p_passed", 0) or 0,
+                        "cv_eval_resolved": _sel_cv.get("eval_resolved"),
+                        "cv_p2p_failed": _sel_cv.get("p2p_failed", 0) or 0,
+                        "cv_f2p_passed": _sel_cv.get("f2p_passed", 0) or 0,
+                        "candidate_source": _sel_source,
                     })
                     # Patch bloat detection
                     if attempt >= 2 and len(attempts_log) >= 2:
