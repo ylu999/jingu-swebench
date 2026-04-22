@@ -126,30 +126,90 @@ def _check_constraint_encoding(pr: PhaseRecord) -> float:
     return 0.0
 
 
-# ── Main evaluation function (soft quality signal — no rejection) ─────────
+# ── Rule 4: Target Files Bounded (hard) ──────────────────────────────────
+
+
+def _check_target_files_bounded(pr: PhaseRecord) -> float:
+    """
+    Check that files_to_modify has 1-3 specific files.
+
+    Score:
+      0.0 = no files or more than 3
+      1.0 = 1-3 files
+    """
+    files = getattr(pr, 'files_to_modify', None) or []
+    if not isinstance(files, list):
+        return 0.0
+    if 1 <= len(files) <= 3:
+        return 1.0
+    return 0.0
+
+
+# ── Rule 5: Test-to-Code Link (hard) ────────────────────────────────────
+
+
+def _check_test_code_linked(pr: PhaseRecord) -> float:
+    """
+    Check that test_to_code_link is substantive (>= 10 chars).
+
+    Score:
+      0.0 = missing or too short
+      1.0 = substantive link present
+    """
+    link = getattr(pr, 'test_to_code_link', '') or ''
+    if isinstance(link, str) and len(link.strip()) >= 10:
+        return 1.0
+    return 0.0
+
+
+# ── Rule 6: Rejected Alternative (hard) ──────────────────────────────────
+
+
+def _check_alternative_considered(pr: PhaseRecord) -> float:
+    """
+    Check that rejected_alternative is substantive (>= 10 chars).
+
+    Score:
+      0.0 = missing or too short
+      1.0 = substantive alternative present
+    """
+    alt = getattr(pr, 'rejected_alternative', '') or ''
+    if isinstance(alt, str) and len(alt.strip()) >= 10:
+        return 1.0
+    return 0.0
+
+
+# ── Main evaluation function ─────────────────────────────────────────────
 
 
 def evaluate_design(
-    pr: PhaseRecord,
+    phase_record: PhaseRecord,
     analysis_records: list[PhaseRecord] | None = None,
     *,
     compiled_bundle: "CompiledBundle | None" = None,
 ) -> DesignVerdict:
     """
-    Evaluate design quality as soft telemetry signal.
+    Evaluate design quality with hard gate checks (v0.2).
 
-    Scores are computed for observability but never cause rejection.
-    Gate mode is soft_quality_signal — all rules emit scores only.
+    Three hard checks that can reject:
+    - target_files_bounded: files_to_modify must have 1-3 files
+    - test_code_linked: test_to_code_link must be substantive
+    - alternative_considered: rejected_alternative must be substantive
+
+    Three soft checks (score-only, no rejection):
+    - invariant_preservation, design_comparison, constraint_encoding
 
     Args:
-        pr: PhaseRecord containing the design/plan.
+        phase_record: PhaseRecord containing the design/plan.
         analysis_records: Previous analysis PhaseRecords (for invariant cross-check).
     """
+    pr = phase_record
+
     scores: dict = {}
+    failed_rules: list = []
+    reasons: list = []
 
     # C-04: Resolve contract from CompiledBundle when available.
-    # design_gate is soft-only (no rejection), but we record the contract
-    # source for observability and future SDG integration.
     _contract_source = "cognition_contracts"
     if compiled_bundle is not None:
         try:
@@ -163,7 +223,33 @@ def evaluate_design(
             _contract = None
     else:
         _contract = None
-    scores["contract_source"] = _contract_source
+    # ── Hard checks (can cause rejection) ──
+
+    # Rule 4: Target files bounded (1-3 files)
+    scores["target_files_bounded"] = _check_target_files_bounded(pr)
+    if scores["target_files_bounded"] < _CONTRACT_THRESHOLD:
+        _rule = _CONTRACT_RULE_MAP.get("target_files_bounded")
+        _hint = _rule.repair_hint if _rule else "Limit files_to_modify to 1-3 specific files."
+        failed_rules.append("target_files_bounded")
+        reasons.append(_hint)
+
+    # Rule 5: Test-to-code link
+    scores["test_code_linked"] = _check_test_code_linked(pr)
+    if scores["test_code_linked"] < _CONTRACT_THRESHOLD:
+        _rule = _CONTRACT_RULE_MAP.get("test_code_linked")
+        _hint = _rule.repair_hint if _rule else "Provide test_to_code_link mapping failing test to code."
+        failed_rules.append("test_code_linked")
+        reasons.append(_hint)
+
+    # Rule 6: Rejected alternative
+    scores["alternative_considered"] = _check_alternative_considered(pr)
+    if scores["alternative_considered"] < _CONTRACT_THRESHOLD:
+        _rule = _CONTRACT_RULE_MAP.get("alternative_considered")
+        _hint = _rule.repair_hint if _rule else "Provide rejected_alternative with at least one considered approach."
+        failed_rules.append("alternative_considered")
+        reasons.append(_hint)
+
+    # ── Soft checks (score-only, no rejection) ──
 
     # Rule 1: Invariant preservation (score only)
     scores["invariant_preservation"] = _check_invariant_preservation(pr, analysis_records)
@@ -174,13 +260,13 @@ def evaluate_design(
     # Rule 3: Constraint encoding (score only)
     scores["constraint_encoding"] = _check_constraint_encoding(pr)
 
-    # Mark as soft quality signal — no hard rejection
-    scores["gate_mode"] = "soft_quality_signal"
+    # Determine pass/fail
+    passed = len(failed_rules) == 0
 
     return DesignVerdict(
-        passed=True,
-        failed_rules=[],
-        reasons=[],
+        passed=passed,
+        failed_rules=failed_rules,
+        reasons=reasons,
         scores=scores,
         rejection=None,
     )

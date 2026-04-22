@@ -54,6 +54,9 @@ class PhaseRecord:
     scope_boundary: str = ""
     invariants: list[str] = field(default_factory=list)
     design_comparison: dict = field(default_factory=dict)  # {options, chosen, reason}
+    test_to_code_link: str = ""         # DESIGN v0.2: failing test -> code location mapping
+    change_mechanism: str = ""          # DESIGN v0.2: how the fix works
+    rejected_alternative: str = ""      # DESIGN v0.2: alternative approach considered and rejected
     # EXECUTE
     patch_description: str = ""
     files_modified: list[str] = field(default_factory=list)
@@ -117,6 +120,12 @@ class PhaseRecord:
             d["invariants"] = self.invariants
         if self.design_comparison:
             d["design_comparison"] = self.design_comparison
+        if self.test_to_code_link:
+            d["test_to_code_link"] = self.test_to_code_link
+        if self.change_mechanism:
+            d["change_mechanism"] = self.change_mechanism
+        if self.rejected_alternative:
+            d["rejected_alternative"] = self.rejected_alternative
         # EXECUTE
         if self.patch_description:
             d["patch_description"] = self.patch_description

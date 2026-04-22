@@ -369,6 +369,12 @@ def build_phase_record_from_structured(
     invariants = raw_invariants if isinstance(raw_invariants, list) else []
     raw_design_comparison = parsed.get("design_comparison", {})
     design_comparison = raw_design_comparison if isinstance(raw_design_comparison, dict) else {}
+    raw_test_to_code_link = parsed.get("test_to_code_link", "")
+    test_to_code_link = raw_test_to_code_link.strip() if isinstance(raw_test_to_code_link, str) else ""
+    raw_change_mechanism = parsed.get("change_mechanism", "")
+    change_mechanism = raw_change_mechanism.strip() if isinstance(raw_change_mechanism, str) else ""
+    raw_rejected_alternative = parsed.get("rejected_alternative", "")
+    rejected_alternative = raw_rejected_alternative.strip() if isinstance(raw_rejected_alternative, str) else ""
 
     # EXECUTE
     raw_patch_description = parsed.get("patch_description", "")
@@ -414,6 +420,9 @@ def build_phase_record_from_structured(
         scope_boundary=scope_boundary,
         invariants=invariants,
         design_comparison=design_comparison,
+        test_to_code_link=test_to_code_link,
+        change_mechanism=change_mechanism,
+        rejected_alternative=rejected_alternative,
         patch_description=patch_description,
         files_modified=files_modified,
         test_results=test_results,
