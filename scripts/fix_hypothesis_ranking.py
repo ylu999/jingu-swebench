@@ -1,15 +1,15 @@
 """
-fix_hypothesis_ranking.py — Cross-Abstraction Fix Hypothesis Ranking v0.2
+fix_hypothesis_ranking.py — Structural-First Fix Hypothesis v0.3
 
 Before writing a patch in EXECUTE phase, force the agent to produce two
-fix hypotheses at DIFFERENT ABSTRACTION LEVELS within the same target file:
-  - Hypothesis 1: local/symptom-level fix (tweak condition, regex, branch)
-  - Hypothesis 2: structural/representation-level fix (change extraction
-    strategy, decomposition, data flow, or control flow)
+fix hypotheses at DIFFERENT ABSTRACTION LEVELS, then IMPLEMENT THE
+STRUCTURAL ONE FIRST (not select by reasoning).
 
-v0.1 showed agent complies with format but both hypotheses stay at the same
-abstraction level (e.g., two regex tweaks). v0.2 explicitly constrains
-hypothesis 2 to be structural.
+Evolution:
+  v0.1: agent produces 2 hypotheses, both at same abstraction level (generation fail)
+  v0.2: agent generates gold-like structural fix BUT selects local due to
+        minimal_change bias and PR description anchoring (selection fail)
+  v0.3: remove selection step — mandate structural-first implementation
 
 Integration: injected as a user message when agent first enters EXECUTE phase.
 Feature gate: JINGU_FIX_HYPOTHESIS=1
@@ -22,11 +22,11 @@ FIX_HYPOTHESIS_ENABLED = os.environ.get("JINGU_FIX_HYPOTHESIS", "0") == "1"
 # ── Prompt block ─────────────────────────────────────────────────────────────
 
 _FIX_HYPOTHESIS_PROMPT = """\
-[FIX HYPOTHESIS RANKING — MANDATORY before writing any patch]
+[STRUCTURAL-FIRST FIX — MANDATORY before writing any patch]
 
 You have identified the target file(s). Before writing the patch, you MUST
-produce TWO fix hypotheses at DIFFERENT ABSTRACTION LEVELS, then compare
-and select one.
+produce TWO fix hypotheses at DIFFERENT ABSTRACTION LEVELS, then implement
+the STRUCTURAL one first.
 
 HYPOTHESIS 1 — LOCAL / SYMPTOM-LEVEL FIX:
   A minimal, targeted change: tweak a condition, adjust a regex, flip a
@@ -45,17 +45,20 @@ HYPOTHESIS 2 — STRUCTURAL / REPRESENTATION-LEVEL FIX:
   - Restructure the function to handle a category of inputs differently
   - Change what data is passed between functions
 
-The second hypothesis MUST operate at a different abstraction level from
-the first. If both hypotheses only tweak the same regex/condition/branch,
-you have NOT satisfied this requirement — step back and think about how
-the code's structure or representation could be changed instead.
+IMPORTANT — STRUCTURAL FIRST, NOT MINIMAL FIRST:
+  Do NOT select based on minimality alone. Local/symptom-level fixes
+  (regex tweaks, condition adjustments) often pass the failing tests but
+  cause regressions elsewhere because they patch the symptom, not the
+  root cause.
+
+  You MUST implement the STRUCTURAL hypothesis (Hypothesis 2) first.
+  Only fall back to the local hypothesis if the structural fix cannot
+  be made to work.
 
 For each hypothesis, specify:
   - EXACT function/method/code region to modify
   - WHAT behavior changes (current → new)
   - WHY the failing test(s) should pass after this change
-
-Then compare and select:
 
 FIX_HYPOTHESIS_1 (local/symptom):
   region: <function/method name and line range>
@@ -67,15 +70,7 @@ FIX_HYPOTHESIS_2 (structural/representation):
   mechanism: <what structural change you make and why>
   test_prediction: <why failing test passes>
 
-COMPARISON:
-  - Which addresses the root cause more completely?
-  - Which has fewer side effects / regressions?
-  - Which is more consistent with the codebase's patterns?
-
-SELECTED: <1 or 2>
-REASON: <why this one is better>
-
-Then proceed to implement the selected hypothesis.
+Now implement Hypothesis 2 (the structural fix).
 """
 
 
