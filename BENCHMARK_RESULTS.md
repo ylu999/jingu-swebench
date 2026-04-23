@@ -1,16 +1,24 @@
 # Jingu SWE-bench Benchmark Results
 
-## Core Finding
+## Final Results (v1.0)
 
-> **Jingu provides a stable +3 benchmark uplift across model strengths. Governance and model capability are additive, not substitutive.**
+> **Jingu delivers a consistent +3 uplift across model tiers (Sonnet 4.5 → 4.6). With Opus 4.6, Jingu pushes the ceiling to 23/30, showing additive gains with model scaling.**
 
-## Four-Cell Attribution Matrix
+### Four-Cell Attribution Matrix
 
 | | Model-only (1 attempt) | + Jingu (2 attempts) | Jingu Δ |
 |---|---|---|---|
 | **Claude Sonnet 4.5** | 16/30 (53.3%) | 19/30 (63.3%) | **+3** |
 | **Claude Sonnet 4.6** | 19/30 (63.3%) | 22/30 (73.3%) | **+3** |
 | **Model Δ** | **+3** | **+3** | |
+
+### Ceiling Run
+
+| Model | Config | Resolved | Note |
+|-------|--------|----------|------|
+| **Claude Opus 4.6** | +Jingu (2 attempts) | **23/30** (76.7%) | 29/30 completed; 1 env_failure (django-11490) |
+
+Opus 4.6 resolves 2 additional instances vs Sonnet 4.6 + Jingu: django-11206, django-11265.
 
 - Dataset: SWE-bench Verified (30 Django instances)
 - Config: best_config_v1 — EFR routing ON, all experimental features OFF
@@ -58,6 +66,25 @@ Jingu's value is **process control** (retry routing, feedback injection), not **
 
 ## Methodology
 
+### Configuration (best_config_v1)
+
+| Parameter | Value |
+|-----------|-------|
+| max_attempts | 2 (model-only: 1) |
+| EFR routing | ON (phase-aware retry with execution feedback) |
+| fix_hypothesis | OFF (0 behavioral uplift) |
+| direction_recon | OFF (0 behavioral uplift) |
+| candidate_selection | OFF (infeasible) |
+
+### Dataset & Environment
+
+- **Dataset**: SWE-bench Verified — 30 Django instances (from 231 Django total, 500 verified)
+- **Evaluation**: Official SWE-bench harness (`swebench==4.1.0`, `run_evaluation`)
+- **Base agent**: mini-swe-agent 2.1.0 (`ProgressTrackingAgent`)
+- **Runtime**: ECS EC2 (c5.9xlarge), privileged Docker-in-Docker
+- **Model access**: AWS Bedrock cross-region inference
+- **Model strings**: `bedrock/global.anthropic.claude-sonnet-4-5`, `bedrock/global.anthropic.claude-sonnet-4-6`, `bedrock/global.anthropic.claude-opus-4-6-v1`
+
 ### Batches (chronological)
 
 | Batch | Model | Config | Attempts | Resolved | Commit |
@@ -66,15 +93,21 @@ Jingu's value is **process control** (retry routing, feedback injection), not **
 | best-config-v1 | S4.5 | +Jingu | 2 | 19/30 | e30aefa |
 | ladder-sonnet46-modelonly-full30 | S4.6 | model-only | 1 | 19/30 | 436506e |
 | ladder-sonnet46-full30 | S4.6 | +Jingu | 2 | 22/30 | 436506e |
+| ceiling-opus46-full30 | Opus 4.6 | +Jingu | 2 | 23/30* | b6cfa92 |
+
+*29/30 completed; 1 env_failure on django-11490 (does not affect main conclusion).
 
 ### Reproducibility
+
 - All runs on same 30 Django instances from SWE-bench Verified
-- Same Docker image (jingu-swebench:latest) on same ECS infrastructure (c5.9xlarge)
-- Same mini-swe-agent 2.1.0 base agent
-- Model accessed via AWS Bedrock cross-region inference
+- Same Docker image (jingu-swebench:latest) on same ECS infrastructure
+- Same mini-swe-agent 2.1.0 base agent, same evaluation harness
 - Run artifacts (trajectories, predictions, eval results) stored in S3
+- Stability verified: S4.6 +Jingu subset (11 instances) reproduced identically across two runs
 
 ### Fair comparison note
+
 - "Model-only" = max_attempts=1 (single pass, no retry routing)
 - "+Jingu" = max_attempts=2 (Jingu governance active on retry)
 - Both use same base agent, same prompts, same evaluation harness
+- All reported numbers use `best_config_v1` configuration

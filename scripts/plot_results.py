@@ -12,11 +12,11 @@ OUT_DIR.mkdir(exist_ok=True)
 
 def plot_four_cell_bar():
     """Bar chart showing the 4-cell attribution matrix."""
-    labels = ['S4.5\nmodel-only', 'S4.5\n+Jingu', 'S4.6\nmodel-only', 'S4.6\n+Jingu']
-    values = [16, 19, 19, 22]
-    colors = ['#a8d5e2', '#4a90d9', '#a8d5e2', '#4a90d9']
+    labels = ['S4.5\nmodel-only', 'S4.5\n+Jingu', 'S4.6\nmodel-only', 'S4.6\n+Jingu', 'Opus 4.6\n+Jingu']
+    values = [16, 19, 19, 22, 23]
+    colors = ['#a8d5e2', '#4a90d9', '#a8d5e2', '#4a90d9', '#2c5f8a']
 
-    fig, ax = plt.subplots(figsize=(8, 5))
+    fig, ax = plt.subplots(figsize=(10, 5))
     bars = ax.bar(labels, values, color=colors, edgecolor='#333', linewidth=0.8, width=0.6)
 
     # Add value labels on bars
@@ -24,21 +24,22 @@ def plot_four_cell_bar():
         ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.3,
                 f'{val}/30', ha='center', va='bottom', fontsize=14, fontweight='bold')
 
-    # Add +3 arrows
+    # Add +3 arrows between model-only and +Jingu pairs
     for i in range(0, 4, 2):
         ax.annotate('+3', xy=(i + 0.5, values[i] + 1.5),
                     fontsize=12, fontweight='bold', color='#d9534f',
                     ha='center')
 
     ax.set_ylabel('Resolved Instances (/30)', fontsize=12)
-    ax.set_title('Jingu Uplift Is Stable Across Model Strength', fontsize=14, fontweight='bold')
+    ax.set_title('Jingu Uplift Across Model Tiers', fontsize=14, fontweight='bold')
     ax.set_ylim(0, 28)
     ax.axhline(y=30, color='#ccc', linestyle='--', linewidth=0.5)
 
     # Legend
     from matplotlib.patches import Patch
     legend_elements = [Patch(facecolor='#a8d5e2', edgecolor='#333', label='Model-only (1 attempt)'),
-                       Patch(facecolor='#4a90d9', edgecolor='#333', label='+Jingu (2 attempts)')]
+                       Patch(facecolor='#4a90d9', edgecolor='#333', label='+Jingu (2 attempts)'),
+                       Patch(facecolor='#2c5f8a', edgecolor='#333', label='Ceiling (Opus 4.6 +Jingu)')]
     ax.legend(handles=legend_elements, loc='upper left', fontsize=10)
 
     plt.tight_layout()

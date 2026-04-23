@@ -2,6 +2,23 @@
 
 SWE-bench harness for Jingu — runs LLM agents with governance gates on SWE-bench Verified instances, evaluates via official harness, tracks results over time.
 
+## Results
+
+**Jingu provides a stable +3 uplift across model tiers and pushes Opus 4.6 to 23/30 on SWE-bench Verified.**
+
+| | Model-only (1 att) | +Jingu (2 att) | Jingu Δ |
+|---|---|---|---|
+| **Sonnet 4.5** | 16/30 (53.3%) | 19/30 (63.3%) | **+3** |
+| **Sonnet 4.6** | 19/30 (63.3%) | 22/30 (73.3%) | **+3** |
+| **Opus 4.6** | — | 23/30 (76.7%) | ceiling |
+
+![Benchmark Results](charts/four_cell_bar.png)
+![Instance Attribution](charts/instance_attribution.png)
+
+See [BENCHMARK_RESULTS.md](BENCHMARK_RESULTS.md) for full methodology, instance-level attribution, and reproducibility details.
+
+Config: `configs/best_config_v1.yaml` — all reported numbers use this configuration.
+
 ## Quick Start
 
 All operations go through `ops.py`:

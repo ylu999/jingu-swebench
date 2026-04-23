@@ -1,0 +1,29 @@
+# best_config_v1 — Frozen benchmark configuration
+# All reported numbers in BENCHMARK_RESULTS.md use this config.
+
+# Jingu governance
+max_attempts: 2                    # model-only comparison uses 1
+efr_routing: true                  # phase-aware retry with execution feedback
+
+# Disabled features (experimentally validated as zero uplift)
+fix_hypothesis: false              # JINGU_FIX_HYPOTHESIS=0
+direction_recon: false             # JINGU_DIRECTION_RECON=0
+candidate_selection: false         # JINGU_CANDIDATE_SELECTION=0
+
+# Model strings (Bedrock cross-region inference)
+models:
+  sonnet_4_5: bedrock/global.anthropic.claude-sonnet-4-5
+  sonnet_4_6: bedrock/global.anthropic.claude-sonnet-4-6
+  opus_4_6: bedrock/global.anthropic.claude-opus-4-6-v1
+
+# Base agent
+agent: mini-swe-agent==2.1.0
+benchmark_config: jingu-swebench.yaml
+
+# Dataset
+dataset: SWE-bench Verified
+instances: 30 Django instances
+evaluation: swebench==4.1.0 official harness
+
+# Infrastructure
+runtime: ECS EC2 (c5.9xlarge), privileged Docker-in-Docker
