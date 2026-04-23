@@ -4177,6 +4177,7 @@ class JinguAgent:
                     "5. Avoid broad exploratory search — commit to specific mechanism files\n"
                 )
                 last_failure = _wd_hint + "\n\n" + (last_failure or "")
+                _ea["wrong_direction_retry_hint"] = _wd_hint
                 print(
                     f"    [exec-admission-route] OVERRIDE: "
                     f"violation_type=wrong_direction overlap=0.0 "
@@ -4187,6 +4188,23 @@ class JinguAgent:
                 )
             elif _ea.get("violation_type") in ("test_expansion", "boundary_expansion", "none"):
                 _ea["execution_violation_routed_to_design"] = False
+
+            # ── Final traj re-save: persist routing telemetry ──
+            # execution_violation_routed_to_design and other routing fields
+            # are set AFTER the initial traj save, so we re-save here.
+            if jingu_body and _ea:
+                # Ensure execution_admission reflects routing decisions
+                jingu_body["execution_admission"] = _ea
+                _attempt_dir = self._output_dir / f"attempt_{attempt}"
+                _traj_final = _attempt_dir / instance_id / f"{instance_id}.traj.json"
+                if _traj_final.exists():
+                    try:
+                        _traj_data = json.loads(_traj_final.read_text())
+                        _traj_data["jingu_body"] = jingu_body
+                        _traj_final.write_text(json.dumps(_traj_data))
+                        print(f"    [traj-final-save] persisted routing telemetry", flush=True)
+                    except Exception as _e:
+                        print(f"    [traj-final-save] failed: {_e}", flush=True)
 
             # Save prescribed phase for next attempt's ack check (must be after all routing)
             if attempt < self._max_attempts:
