@@ -2472,10 +2472,23 @@ class JinguAgent:
                         if _written_files else 1.0
                     ),
                 }
+                # Classify violation type
+                _violation_type = "none"
+                if _out_of_scope:
+                    _oos_overlap = _exec_admission["overlap"]
+                    _test_files = {f for f in _out_of_scope if "/tests" in f or f.startswith("tests/")}
+                    if _oos_overlap == 0.0:
+                        _violation_type = "wrong_direction"
+                    elif _test_files == _out_of_scope:
+                        _violation_type = "test_expansion"
+                    else:
+                        _violation_type = "boundary_expansion"
+                _exec_admission["violation_type"] = _violation_type
                 jingu_body["execution_admission"] = _exec_admission
                 if _out_of_scope:
                     print(
                         f"    [exec-admission] SCOPE VIOLATION: "
+                        f"type={_violation_type} "
                         f"design_files={sorted(_design_files)} "
                         f"written_files={sorted(_written_files)} "
                         f"out_of_scope={sorted(_out_of_scope)} "
@@ -4113,6 +4126,21 @@ class JinguAgent:
                     pass
                 except Exception as _proto_route_exc:
                     print(f"    [protocol-route] error (non-fatal): {_proto_route_exc}", flush=True)
+
+            # Execution admission routing: overlap=0.0 → route back to DESIGN
+            # This is the only violation type that warrants routing intervention.
+            # test_expansion and boundary_expansion are allowed (soft signal only).
+            _ea = (jingu_body or {}).get("execution_admission", {})
+            if _ea.get("violation_type") == "wrong_direction" and attempt < self._max_attempts:
+                _old_route = _next_attempt_start_phase
+                _next_attempt_start_phase = "DESIGN"
+                print(
+                    f"    [exec-admission-route] OVERRIDE: "
+                    f"violation_type=wrong_direction overlap=0.0 "
+                    f"old_route={_old_route} → new_route=DESIGN "
+                    f"reason=agent wrote only files outside design commitment",
+                    flush=True,
+                )
 
             # Save prescribed phase for next attempt's ack check (must be after all routing)
             if attempt < self._max_attempts:
