@@ -2415,6 +2415,27 @@ class JinguAgent:
         cp_state_holder: list = [initial_reasoning_state("OBSERVE")]
         self._cp_state_holder = cp_state_holder
 
+        # ── DHG Phase 1.5: pre-generate dual hypotheses before attempt loop ──
+        # When DHG_ENABLED=1, generate both hypotheses once upfront.
+        # Attempt 1 uses hypothesis A, attempt 2 uses hypothesis B.
+        # This gives empirical CV comparison between candidates.
+        _dhg_hypotheses = None  # DualHypothesisResult, stored across attempts
+        _dhg_attempt_results = {}  # {1: {label, f2p_passed, ...}, 2: {...}}
+        from design_admission import is_dhg_enabled as _is_dhg_enabled_check
+        if _is_dhg_enabled_check():
+            _dhg_hypotheses = self.generate_dual_hypotheses(1, "")
+            if _dhg_hypotheses.parse_ok:
+                print(
+                    f"    [dhg] pre-generated hypotheses: "
+                    f"A_files={_dhg_hypotheses.hypothesis_a.target_files} "
+                    f"B_files={_dhg_hypotheses.hypothesis_b.target_files} "
+                    f"diversity={_dhg_hypotheses.diversity_score:.2f}",
+                    flush=True,
+                )
+            else:
+                print(f"    [dhg] pre-generation failed, falling back to single design", flush=True)
+                _dhg_hypotheses = None
+
         for attempt in range(1, self._max_attempts + 1):
             print(f"  [attempt {attempt}/{self._max_attempts}] {instance_id}")
 
@@ -2422,15 +2443,29 @@ class JinguAgent:
             # (p-fix: without this, cp_state.phase retains attempt N's final phase
             #  while the prompt says "REPAIR PHASE: X" — 100% mismatch on attempt 2+)
             if attempt > 1:
-                # Normalize alias → canonical phase name (defense-in-depth)
-                # _next_attempt_start_phase is already canonical (from FAILURE_ROUTING_RULES)
-                cp_state_holder[0] = initial_reasoning_state(_next_attempt_start_phase)
-                print(f"    [cp-reset] attempt={attempt} start_phase={_next_attempt_start_phase}"
-                      f" failure_routing_source={_last_failure_type or 'none'}", flush=True)
-                _next_attempt_start_phase = "OBSERVE"  # reset for next iteration
+                # DHG Phase 1.5: when DHG is active, attempt 2 is a FRESH start
+                # with hypothesis B, not a retry of attempt 1's failure.
+                if _dhg_hypotheses is not None:
+                    cp_state_holder[0] = initial_reasoning_state("OBSERVE")
+                    last_failure = ""  # fresh start, no failure context from attempt 1
+                    _last_failure_type = ""
+                    self._file_ban_active = False
+                    self._direction_search_required = False
+                    self._prev_files_written = set()
+                    print(f"    [cp-reset] attempt={attempt} start_phase=OBSERVE"
+                          f" failure_routing_source=dhg_hypothesis_b (fresh start)", flush=True)
+                    _next_attempt_start_phase = "OBSERVE"
+                else:
+                    # Normal retry routing
+                    # Normalize alias → canonical phase name (defense-in-depth)
+                    # _next_attempt_start_phase is already canonical (from FAILURE_ROUTING_RULES)
+                    cp_state_holder[0] = initial_reasoning_state(_next_attempt_start_phase)
+                    print(f"    [cp-reset] attempt={attempt} start_phase={_next_attempt_start_phase}"
+                          f" failure_routing_source={_last_failure_type or 'none'}", flush=True)
+                    _next_attempt_start_phase = "OBSERVE"  # reset for next iteration
 
                 # File-ban enforcement: activate when wrong_direction + have previous files
-                if _last_failure_type.startswith("wrong_direction") and self._prev_files_written:
+                if not (_dhg_hypotheses is not None) and _last_failure_type.startswith("wrong_direction") and self._prev_files_written:
                     self._file_ban_active = True
                     self._file_ban_files = set(self._prev_files_written)
                     self._file_ban_violations = 0
@@ -2452,7 +2487,8 @@ class JinguAgent:
                 cp_state_holder[0] = _dc_boundary.replace(cp_state_holder[0], principal_violation="")
 
             # NBR enforcement: No Blind Retry
-            if attempt > 1 and not last_failure.strip() and self._mode != "baseline":
+            # Skip NBR check when DHG is active — attempt 2 is a fresh hypothesis, not a retry
+            if attempt > 1 and not last_failure.strip() and self._mode != "baseline" and _dhg_hypotheses is None:
                 raise RuntimeError(
                     f"[NBR violation] attempt {attempt} has empty last_failure. "
                     "Execution feedback is required before retry. "
@@ -2498,79 +2534,74 @@ class JinguAgent:
                     flush=True,
                 )
 
-            # ── Divergent Hypothesis Generation (DHG) — Phase 1 ─────────
-            # Feature flag: DHG_ENABLED=1
-            # Generates 2 structurally different hypotheses. Picks the winner
-            # by heuristic (fewer files = more focused). Winner's design lock
-            # replaces the standard design admission lock context.
-            # The loser hypothesis is injected as alternative context so the
-            # agent is aware of the other path and can switch if stuck.
+            # ── Divergent Hypothesis Generation (DHG) — Phase 1.5 ────────
+            # Uses pre-generated hypotheses: attempt 1 → hyp A, attempt 2 → hyp B.
+            # This gives empirical CV comparison between candidates.
             _dhg_telemetry = {}
-            from design_admission import is_dhg_enabled as _is_dhg_enabled
-            if _is_dhg_enabled():
-                _dhg_result = self.generate_dual_hypotheses(attempt, last_failure)
-                if _dhg_result.parse_ok and _dhg_result.hypothesis_a and _dhg_result.hypothesis_b:
-                    _ha = _dhg_result.hypothesis_a
-                    _hb = _dhg_result.hypothesis_b
+            if _dhg_hypotheses is not None:
+                _ha = _dhg_hypotheses.hypothesis_a
+                _hb = _dhg_hypotheses.hypothesis_b
 
-                    # Heuristic selection: prefer fewer target files (more focused),
-                    # tie-break by shorter solution_approach (more concrete)
-                    _score_a = len(_ha.target_files) + len(_ha.solution_approach) / 10000
-                    _score_b = len(_hb.target_files) + len(_hb.solution_approach) / 10000
-                    if _score_a <= _score_b:
-                        _winner, _loser, _winner_label = _ha, _hb, "A"
-                    else:
-                        _winner, _loser, _winner_label = _hb, _ha, "B"
-
-                    # Override design lock context with winner
-                    from design_admission import build_design_lock_context as _dhg_build_lock
-                    _design_lock_context = _dhg_build_lock(_winner)
-
-                    # Inject alternative hypothesis as awareness context
-                    _alt_context = (
-                        "\n\n=== ALTERNATIVE HYPOTHESIS (for awareness) ===\n"
-                        f"Root cause: {_loser.scope_boundary}\n"
-                        f"Target files: {_loser.target_files}\n"
-                        f"Approach: {_loser.solution_approach}\n"
-                        "If your primary approach fails, consider this alternative.\n"
-                        "=== END ALTERNATIVE ==="
-                    )
-                    _design_lock_context += _alt_context
-
-                    # Also override the _da_result record so execution_admission
-                    # checks against the DHG winner's target files
-                    _da_result.record = _winner
-
-                    _dhg_telemetry = {
-                        "enabled": True,
-                        "diversity_score": _dhg_result.diversity_score,
-                        "winner": _winner_label,
-                        "hypothesis_a": {
-                            "files": _ha.target_files,
-                            "root_cause": _ha.scope_boundary[:200],
-                            "approach": _ha.solution_approach[:200],
-                            "mechanism": _ha.validation_plan[:200],
-                        },
-                        "hypothesis_b": {
-                            "files": _hb.target_files,
-                            "root_cause": _hb.scope_boundary[:200],
-                            "approach": _hb.solution_approach[:200],
-                            "mechanism": _hb.validation_plan[:200],
-                        },
-                        "selection_reason": (
-                            f"focus_score: A={_score_a:.2f} B={_score_b:.2f} "
-                            f"→ {_winner_label} (lower=more focused)"
-                        ),
-                    }
-
-                    print(
-                        f"    [dhg] SELECTED={_winner_label} "
-                        f"files={_winner.target_files} "
-                        f"diversity={_dhg_result.diversity_score:.2f}",
-                        flush=True,
-                    )
+                # Assign hypothesis by attempt number
+                if attempt == 1:
+                    _active_hyp, _other_hyp, _active_label = _ha, _hb, "A"
                 else:
-                    print(f"    [dhg] fallback to single design (parse_ok={_dhg_result.parse_ok})", flush=True)
+                    _active_hyp, _other_hyp, _active_label = _hb, _ha, "B"
+
+                # Override design lock context with active hypothesis
+                from design_admission import build_design_lock_context as _dhg_build_lock
+                _design_lock_context = _dhg_build_lock(_active_hyp)
+
+                # Inject alternative hypothesis as awareness context
+                _alt_context = (
+                    "\n\n=== ALTERNATIVE HYPOTHESIS (for awareness) ===\n"
+                    f"Root cause: {_other_hyp.scope_boundary}\n"
+                    f"Target files: {_other_hyp.target_files}\n"
+                    f"Approach: {_other_hyp.solution_approach}\n"
+                    "If your primary approach fails, consider this alternative.\n"
+                    "=== END ALTERNATIVE ==="
+                )
+                _design_lock_context += _alt_context
+
+                # Override _da_result record for execution_admission check
+                _da_result.record = _active_hyp
+
+                # Heuristic scores for telemetry
+                _score_a = len(_ha.target_files) + len(_ha.solution_approach) / 10000
+                _score_b = len(_hb.target_files) + len(_hb.solution_approach) / 10000
+                _heuristic_winner = "A" if _score_a <= _score_b else "B"
+
+                _dhg_telemetry = {
+                    "enabled": True,
+                    "diversity_score": _dhg_hypotheses.diversity_score,
+                    "active_hypothesis": _active_label,
+                    "heuristic_winner": _heuristic_winner,
+                    "hypothesis_a": {
+                        "files": _ha.target_files,
+                        "root_cause": _ha.scope_boundary[:200],
+                        "approach": _ha.solution_approach[:200],
+                        "mechanism": _ha.validation_plan[:200],
+                    },
+                    "hypothesis_b": {
+                        "files": _hb.target_files,
+                        "root_cause": _hb.scope_boundary[:200],
+                        "approach": _hb.solution_approach[:200],
+                        "mechanism": _hb.validation_plan[:200],
+                    },
+                    "selection_reason": (
+                        f"attempt={attempt} → hypothesis_{_active_label} "
+                        f"(heuristic_winner={_heuristic_winner}, "
+                        f"focus_score: A={_score_a:.2f} B={_score_b:.2f})"
+                    ),
+                }
+
+                print(
+                    f"    [dhg] attempt={attempt} ACTIVE=hypothesis_{_active_label} "
+                    f"files={_active_hyp.target_files} "
+                    f"diversity={_dhg_hypotheses.diversity_score:.2f} "
+                    f"heuristic_winner={_heuristic_winner}",
+                    flush=True,
+                )
 
             outcome = self.run_attempt(
                 attempt,
@@ -2586,6 +2617,28 @@ class JinguAgent:
             # Inject DHG telemetry into jingu_body
             if jingu_body and _dhg_telemetry:
                 jingu_body["dhg"] = _dhg_telemetry
+
+            # DHG Phase 1.5: record attempt result for empirical comparison
+            if _dhg_hypotheses is not None and _dhg_telemetry:
+                _dhg_cv = (jingu_body or {}).get("test_results", {})
+                _dhg_f2p_p = _dhg_cv.get("f2p_passed", 0) or 0
+                _dhg_f2p_f = _dhg_cv.get("f2p_failed", 0) or 0
+                _dhg_f2p_t = _dhg_f2p_p + _dhg_f2p_f
+                _dhg_attempt_results[attempt] = {
+                    "label": _dhg_telemetry.get("active_hypothesis", "?"),
+                    "f2p_passed": _dhg_f2p_p,
+                    "f2p_total": _dhg_f2p_t,
+                    "f2p_ratio": _dhg_f2p_p / _dhg_f2p_t if _dhg_f2p_t > 0 else 0.0,
+                    "patch_generated": bool(patch and patch.strip()),
+                    "files_written": sorted((jingu_body or {}).get("files_written", [])),
+                }
+                print(
+                    f"    [dhg-record] attempt={attempt} "
+                    f"hypothesis={_dhg_attempt_results[attempt]['label']} "
+                    f"f2p={_dhg_f2p_p}/{_dhg_f2p_t} "
+                    f"patch={'yes' if _dhg_attempt_results[attempt]['patch_generated'] else 'no'}",
+                    flush=True,
+                )
 
             # Persist design admission result into jingu_body for telemetry
             if jingu_body:
@@ -4429,6 +4482,25 @@ class JinguAgent:
                     )
                 except Exception as _log_err:
                     print(f"    [strategy-log] WARNING: failed to write entry: {_log_err}")
+
+        # DHG Phase 1.5: empirical comparison summary
+        if _dhg_hypotheses is not None and len(_dhg_attempt_results) >= 2:
+            _r1 = _dhg_attempt_results.get(1, {})
+            _r2 = _dhg_attempt_results.get(2, {})
+            _emp_winner = "A" if _r1.get("f2p_ratio", 0) >= _r2.get("f2p_ratio", 0) else "B"
+            _heur_winner = _dhg_attempt_results.get(1, {}).get("label", "A")  # attempt 1 always gets A
+            # The heuristic winner from the telemetry
+            if 1 in _dhg_attempt_results:
+                # Reconstruct heuristic winner from the telemetry
+                _heur_winner = "A" if len(_dhg_hypotheses.hypothesis_a.target_files) <= len(_dhg_hypotheses.hypothesis_b.target_files) else "B"
+            _agree = _emp_winner == _heur_winner
+            print(
+                f"    [dhg-compare] heuristic_winner={_heur_winner} "
+                f"empirical_winner={_emp_winner} agree={_agree} "
+                f"A: f2p={_r1.get('f2p_passed',0)}/{_r1.get('f2p_total',0)} patch={'yes' if _r1.get('patch_generated') else 'no'} "
+                f"B: f2p={_r2.get('f2p_passed',0)}/{_r2.get('f2p_total',0)} patch={'yes' if _r2.get('patch_generated') else 'no'}",
+                flush=True,
+            )
 
         if not candidates:
             # Grab failure_layer + failure_record from last attempt's jingu_body
