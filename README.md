@@ -19,6 +19,29 @@ See [BENCHMARK_RESULTS.md](BENCHMARK_RESULTS.md) for full methodology, instance-
 
 Config: `configs/best_config_v1.yaml` — all reported numbers use this configuration.
 
+### Demo: Jingu Retry in Action
+
+A real SWE-bench instance where Attempt 1 fails, Jingu detects the failure and routes retry, and Attempt 2 succeeds:
+
+```bash
+python scripts/demo_jingu_retry.py
+```
+
+```
+[STEP 1] Attempt 1 — INCOMPLETE FIX
+  Agent patches URLResolver.reverse() → f2p = 1/3 passed
+  Verdict: NOT RESOLVED
+
+[STEP 2] Jingu Failure Analysis + Routing
+  Failure type: incomplete_fix
+  Routing: → DESIGN phase
+  Execution feedback injected: failing test names + output
+
+[STEP 3] Attempt 2 — RESOLVED
+  Agent patches RegexPattern.match() → f2p = 3/3 passed
+  Verdict: RESOLVED
+```
+
 ### Reproduce in 3 Commands
 
 ```bash
