@@ -3332,7 +3332,17 @@ class JinguAgent:
                         last_failure = f"SCOPE VIOLATION: {_nm_legacy_reason}"
                 continue  # skip to next attempt
 
-            if not patch:
+            # Treat spurious patches (patch exists but jingu_body says 0 hunks + 0 files)
+            # as no-patch for stall detection purposes.
+            _jb_for_stall = jingu_body or {}
+            _spurious_patch = (
+                patch
+                and _jb_for_stall.get("patch_hunks", -1) == 0
+                and len(_jb_for_stall.get("files_written", [])) == 0
+            )
+            if _spurious_patch:
+                print(f"    [gate] SPURIOUS — patch exists but patch_hunks=0 files_written=0 (exit={agent_exit})", flush=True)
+            if not patch or _spurious_patch:
                 print(f"    [gate] EMPTY — no submission (exit={agent_exit})")
                 attempts_log.append({
                     "attempt": attempt,
