@@ -2473,17 +2473,37 @@ class JinguAgent:
                     ),
                 }
                 # Classify violation type
+                def _is_test_file(path: str) -> bool:
+                    """Heuristic: is this file a test file?"""
+                    import os
+                    base = os.path.basename(path)
+                    # Pattern matches for common test file conventions
+                    if "/tests/" in path or "/test/" in path or path.startswith("tests/") or path.startswith("test/"):
+                        return True
+                    if "/__tests__/" in path or "/testing/" in path:
+                        return True
+                    if base.startswith("test_") or base.endswith("_test.py") or base.endswith("_tests.py"):
+                        return True
+                    if base.endswith(".test.py") or base.endswith(".spec.py"):
+                        return True
+                    if base == "tests.py":
+                        return True
+                    return False
+
                 _violation_type = "none"
+                _all_oos_are_tests = False
                 if _out_of_scope:
                     _oos_overlap = _exec_admission["overlap"]
-                    _test_files = {f for f in _out_of_scope if "/tests" in f or f.startswith("tests/")}
+                    _test_files = {f for f in _out_of_scope if _is_test_file(f)}
+                    _all_oos_are_tests = len(_test_files) == len(_out_of_scope) and len(_out_of_scope) > 0
                     if _oos_overlap == 0.0:
                         _violation_type = "wrong_direction"
-                    elif _test_files == _out_of_scope:
+                    elif _all_oos_are_tests:
                         _violation_type = "test_expansion"
                     else:
                         _violation_type = "boundary_expansion"
                 _exec_admission["violation_type"] = _violation_type
+                _exec_admission["all_oos_are_tests"] = _all_oos_are_tests
                 jingu_body["execution_admission"] = _exec_admission
                 if _out_of_scope:
                     print(
@@ -4134,13 +4154,39 @@ class JinguAgent:
             if _ea.get("violation_type") == "wrong_direction" and attempt < self._max_attempts:
                 _old_route = _next_attempt_start_phase
                 _next_attempt_start_phase = "DESIGN"
+                _ea["execution_violation_routed_to_design"] = True
+                # Build actionable retry hint for wrong_direction reroute
+                _wd_design_files = _ea.get("design_target_files", [])
+                _wd_written_files = _ea.get("actual_files_written", [])
+                _wd_oos_files = _ea.get("out_of_scope_files", [])
+                _wd_overlap = _ea.get("overlap", 0.0)
+                _wd_hint = (
+                    "[WRONG DIRECTION — EXECUTION ADMISSION FAILURE]\n\n"
+                    "Your previous execution was classified as WRONG_DIRECTION.\n"
+                    f"- Planned target files: {_wd_design_files}\n"
+                    f"- Actually modified files: {_wd_written_files}\n"
+                    f"- Out-of-scope files: {_wd_oos_files}\n"
+                    f"- Overlap with plan: {_wd_overlap:.0%}\n\n"
+                    "This means the executed files had ZERO overlap with the planned files.\n"
+                    "This is NOT boundary drift — you worked on completely wrong files.\n\n"
+                    "You MUST now:\n"
+                    "1. Re-evaluate your root cause analysis — the previous diagnosis led to wrong files\n"
+                    "2. Explain WHY the previous target files were insufficient or wrong\n"
+                    "3. Produce a NEW bounded target file plan (different files)\n"
+                    "4. Do NOT simply restate the prior plan\n"
+                    "5. Avoid broad exploratory search — commit to specific mechanism files\n"
+                )
+                last_failure = _wd_hint + "\n\n" + (last_failure or "")
                 print(
                     f"    [exec-admission-route] OVERRIDE: "
                     f"violation_type=wrong_direction overlap=0.0 "
                     f"old_route={_old_route} → new_route=DESIGN "
-                    f"reason=agent wrote only files outside design commitment",
+                    f"reason=agent wrote only files outside design commitment "
+                    f"retry_hint_injected=True",
                     flush=True,
                 )
+            elif _ea.get("violation_type") in ("test_expansion", "boundary_expansion", "none"):
+                _ea["execution_violation_routed_to_design"] = False
 
             # Save prescribed phase for next attempt's ack check (must be after all routing)
             if attempt < self._max_attempts:
