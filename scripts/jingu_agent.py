@@ -1176,6 +1176,7 @@ class JinguAgent:
 
         if not is_design_admission_enabled():
             # Feature disabled — auto-admit with empty record
+            print(f"    [design-admission] DISABLED (DESIGN_ADMISSION_ENABLED={__import__('os').environ.get('DESIGN_ADMISSION_ENABLED', '0')})", flush=True)
             return DesignAdmissionResult(admitted=True, record=DesignRecord(), gate_path="disabled")
 
         instance = self._instance
@@ -1187,82 +1188,60 @@ class JinguAgent:
         )
         _da_max_tokens = 2048
         _da_temperature = 0.3
-        _da_max_retries = 2  # allow 1 retry on validation failure
 
         prompt = build_design_prompt(instance, previous_failure)
 
         print(
             f"    [design-admission] attempt={attempt} generating design record "
-            f"(model={_da_model})",
+            f"(model={_da_model}, single-shot)",
             flush=True,
         )
 
-        last_result = DesignAdmissionResult()
-        for da_try in range(1, _da_max_retries + 1):
-            t0 = _time_da.monotonic()
-            try:
-                import litellm
-                response = litellm.completion(
-                    model=_da_model,
-                    messages=[
-                        {"role": "user", "content": prompt},
-                    ],
-                    max_tokens=_da_max_tokens,
-                    temperature=_da_temperature,
-                    drop_params=True,
-                )
-                raw = response.choices[0].message.content or ""
-            except Exception as e:
-                print(
-                    f"    [design-admission] LLM call failed: {e}",
-                    flush=True,
-                )
-                return DesignAdmissionResult(
-                    admitted=True,  # fail-open: don't block on infra errors
-                    record=DesignRecord(),
-                    failure_reasons=[f"llm_error:{e}"],
-                    gate_path="fail_open_on_llm_error",
-                )
-
-            elapsed = round((_time_da.monotonic() - t0) * 1000, 1)
-            record = parse_design_response(raw)
-            result = validate_design(record)
-
-            _gp = ("admit_first_try" if da_try == 1 else "admit_after_retry") if result.admitted else (
-                "reject_first_try" if da_try == 1 else "reject_after_retry"
+        # Single-shot: no internal retry. If the LLM can't produce a valid
+        # design on the first try, the attempt is short-circuited.
+        # This ensures the gate has real admission power (not softened by retry).
+        t0 = _time_da.monotonic()
+        try:
+            import litellm
+            response = litellm.completion(
+                model=_da_model,
+                messages=[
+                    {"role": "user", "content": prompt},
+                ],
+                max_tokens=_da_max_tokens,
+                temperature=_da_temperature,
+                drop_params=True,
             )
+            raw = response.choices[0].message.content or ""
+        except Exception as e:
             print(
-                f"    [design-admission] try={da_try}/{_da_max_retries} "
-                f"admitted={result.admitted} "
-                f"gate_path={_gp} "
-                f"failures={len(result.failure_reasons)} "
-                f"target_files={record.target_files} "
-                f"elapsed_ms={elapsed}",
+                f"    [design-admission] LLM call failed: {e}",
                 flush=True,
             )
+            return DesignAdmissionResult(
+                admitted=True,  # fail-open: don't block on infra errors
+                record=DesignRecord(),
+                failure_reasons=[f"llm_error:{e}"],
+                gate_path="fail_open_on_llm_error",
+            )
 
-            if result.admitted:
-                result.gate_path = "admit_first_try" if da_try == 1 else "admit_after_retry"
-                return result
+        elapsed = round((_time_da.monotonic() - t0) * 1000, 1)
+        record = parse_design_response(raw)
+        result = validate_design(record)
 
-            last_result = result
-
-            # On validation failure, retry with repair hint appended
-            if da_try < _da_max_retries:
-                prompt += f"\n\n## Validation Feedback\n\n{result.repair_hint}\n"
-                print(
-                    f"    [design-admission] retrying with repair hint",
-                    flush=True,
-                )
-
-        # All retries exhausted — return the last failed result
-        last_result.gate_path = "reject_after_retry" if _da_max_retries > 1 else "reject_first_try"
+        _gp = "admit_first_try" if result.admitted else "reject_first_try"
+        result.gate_path = _gp
         print(
-            f"    [design-admission] REJECTED after {_da_max_retries} tries: "
-            f"{last_result.failure_reasons}",
+            f"    [design-admission] admitted={result.admitted} "
+            f"gate_path={_gp} "
+            f"failures={result.failure_reasons} "
+            f"target_files={record.target_files} "
+            f"principals={record.principals} "
+            f"scope_boundary={(record.scope_boundary[:80] if record.scope_boundary else '')!r} "
+            f"elapsed_ms={elapsed}",
             flush=True,
         )
-        return last_result
+        return result
 
     # -- attempt-level hooks ------------------------------------------------
 

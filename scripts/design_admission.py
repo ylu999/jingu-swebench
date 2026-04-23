@@ -77,11 +77,11 @@ def validate_design(record: DesignRecord) -> DesignAdmissionResult:
     if not record.validation_plan or len(record.validation_plan.strip()) < 10:
         failures.append("MISSING_FIELD:validation_plan — must describe how to verify the fix (>=10 chars)")
 
-    # Rule 2: Bounded files (1-5)
-    if record.target_files and len(record.target_files) > 5:
+    # Rule 2: Bounded files (1-3)
+    if record.target_files and len(record.target_files) > 3:
         failures.append(
             f"SCOPE_TOO_BROAD:target_files={len(record.target_files)} — "
-            f"max 5 files allowed; narrow your approach"
+            f"max 3 files allowed; narrow your approach"
         )
 
     # Rule 3: Required principals
