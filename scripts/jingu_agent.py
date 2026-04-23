@@ -3390,9 +3390,9 @@ class JinguAgent:
                             flush=True,
                         )
                         last_failure = "No patch was generated"
-                    elif _files_written_count == 0 and attempt > 1:
-                        # Early stall detector: 2+ attempts with 0 files written
-                        # Derive candidate files and force replan
+                    elif _files_written_count == 0 and attempt >= 1:
+                        # Stall detector: any attempt with 0 files written
+                        # Derive candidate files and force replan to DESIGN
                         _stall_candidates = derive_candidate_files(
                             self._instance,
                             cv_result=_jb.get("controlled_verify"),
@@ -4118,6 +4118,23 @@ class JinguAgent:
                                     nm_state=_v03_nm_state,
                                     residual_payload=_v03_payload,
                                 )
+                                # Derive candidate files for wrong_direction repair
+                                if _jb_ft == "wrong_direction":
+                                    _wd_repair_candidates = derive_candidate_files(
+                                        self._instance,
+                                        cv_result=_jb_cv,
+                                        verify_history=(jingu_body or {}).get("verify_history"),
+                                    )
+                                    if _wd_repair_candidates:
+                                        _wd_repair_cand_section = (
+                                            "\nCANDIDATE FILES (derived from test failures and problem statement):\n"
+                                            + "\n".join(f"  - {f}" for f in _wd_repair_candidates)
+                                            + "\nThese files appeared in stack traces or are referenced by failing tests.\n"
+                                            "Start your investigation here.\n"
+                                        )
+                                        _repair = _repair + "\n" + _wd_repair_cand_section
+                                        print(f"    [derived-candidates] injected in wrong_direction repair: "
+                                              f"candidates={_wd_repair_candidates}", flush=True)
                                 # Near-miss finisher: when f2p_ratio > 0.9, prepend targeted prompt
                                 _nm_f2p_p = _jb_cv.get("f2p_passed", 0) or 0
                                 _nm_f2p_f = _jb_cv.get("f2p_failed", 0) or 0
@@ -4148,16 +4165,46 @@ class JinguAgent:
                                 print(f"    [repair-route] attempt={attempt} failure_type={_jb_ft} "
                                       f"next_phase={_jb_routing['next_phase']}", flush=True)
                             elif not _jb_ft:
-                                # P1 fallback: route from failure_mode when CV absent
-                                _jb_fm = (jingu_body or {}).get("failure_mode")
-                                if _jb_fm:
-                                    _fm_routing = route_from_failure_mode(_jb_fm)
-                                    _fm_hint = f"[FAILURE MODE: {_jb_fm}] {_fm_routing['repair_goal']}"
-                                    last_failure = _fm_hint + "\n\n" + last_failure
-                                    _next_attempt_start_phase = _fm_routing['next_phase'].upper()
-                                    _last_failure_type = f"fm:{_jb_fm}"
-                                    print(f"    [repair-route-fm] attempt={attempt} failure_mode={_jb_fm} "
-                                          f"next_phase={_fm_routing['next_phase']}", flush=True)
+                                # Near-miss fallback: synthesize from verify_history when CV absent
+                                _vh = (jingu_body or {}).get("verify_history") or []
+                                _vh_near_miss = False
+                                _vh_f2p_p = 0
+                                _vh_f2p_f = 0
+                                _vh_failing = []
+                                for _vh_entry in reversed(_vh):
+                                    _vhp = _vh_entry.get("f2p_passed", 0) or 0
+                                    _vhf = _vh_entry.get("f2p_failed", 0) or 0
+                                    _vht = _vhp + _vhf
+                                    if _vht > 0 and _vhp / _vht > 0.9 and _vhf > 0:
+                                        _vh_near_miss = True
+                                        _vh_f2p_p = _vhp
+                                        _vh_f2p_f = _vhf
+                                        _vh_failing = _vh_entry.get("f2p_failing_names", []) or []
+                                        break
+                                if _vh_near_miss:
+                                    _vh_finisher = build_near_miss_finisher_prompt(
+                                        f2p_passed=_vh_f2p_p,
+                                        f2p_failed=_vh_f2p_f,
+                                        f2p_failing_names=_vh_failing,
+                                        files_written=(jingu_body or {}).get("files_written", []),
+                                    )
+                                    last_failure = _vh_finisher + "\n\n" + last_failure
+                                    _next_attempt_start_phase = "EXECUTE"
+                                    _last_failure_type = "near_miss"
+                                    print(f"    [near-miss-fallback] synthesized from verify_history: "
+                                          f"f2p={_vh_f2p_p}/{_vh_f2p_p + _vh_f2p_f} "
+                                          f"failing={_vh_failing}", flush=True)
+                                else:
+                                    # P1 fallback: route from failure_mode when CV absent
+                                    _jb_fm = (jingu_body or {}).get("failure_mode")
+                                    if _jb_fm:
+                                        _fm_routing = route_from_failure_mode(_jb_fm)
+                                        _fm_hint = f"[FAILURE MODE: {_jb_fm}] {_fm_routing['repair_goal']}"
+                                        last_failure = _fm_hint + "\n\n" + last_failure
+                                        _next_attempt_start_phase = _fm_routing['next_phase'].upper()
+                                        _last_failure_type = f"fm:{_jb_fm}"
+                                        print(f"    [repair-route-fm] attempt={attempt} failure_mode={_jb_fm} "
+                                              f"next_phase={_fm_routing['next_phase']}", flush=True)
                             # WDRG v0.2: prediction error can also indicate wrong_direction
                             # when CV is absent (signal_missing). Ensures file-ban + direction
                             # search contract activates even without CV classification.
@@ -4273,16 +4320,46 @@ class JinguAgent:
                                 print(f"    [repair-route] attempt={attempt} failure_type={_jb_ft} "
                                       f"next_phase={_jb_routing['next_phase']}", flush=True)
                             elif not _jb_ft:
-                                # P1 fallback: route from failure_mode when CV absent
-                                _jb_fm = (jingu_body or {}).get("failure_mode")
-                                if _jb_fm:
-                                    _fm_routing = route_from_failure_mode(_jb_fm)
-                                    _fm_hint = f"[FAILURE MODE: {_jb_fm}] {_fm_routing['repair_goal']}"
-                                    last_failure = _fm_hint + "\n\n" + last_failure
-                                    _next_attempt_start_phase = _fm_routing['next_phase'].upper()
-                                    _last_failure_type = f"fm:{_jb_fm}"
-                                    print(f"    [repair-route-fm] attempt={attempt} failure_mode={_jb_fm} "
-                                          f"next_phase={_fm_routing['next_phase']}", flush=True)
+                                # Near-miss fallback: synthesize from verify_history when CV absent
+                                _vh = (jingu_body or {}).get("verify_history") or []
+                                _vh_near_miss = False
+                                _vh_f2p_p = 0
+                                _vh_f2p_f = 0
+                                _vh_failing = []
+                                for _vh_entry in reversed(_vh):
+                                    _vhp = _vh_entry.get("f2p_passed", 0) or 0
+                                    _vhf = _vh_entry.get("f2p_failed", 0) or 0
+                                    _vht = _vhp + _vhf
+                                    if _vht > 0 and _vhp / _vht > 0.9 and _vhf > 0:
+                                        _vh_near_miss = True
+                                        _vh_f2p_p = _vhp
+                                        _vh_f2p_f = _vhf
+                                        _vh_failing = _vh_entry.get("f2p_failing_names", []) or []
+                                        break
+                                if _vh_near_miss:
+                                    _vh_finisher = build_near_miss_finisher_prompt(
+                                        f2p_passed=_vh_f2p_p,
+                                        f2p_failed=_vh_f2p_f,
+                                        f2p_failing_names=_vh_failing,
+                                        files_written=(jingu_body or {}).get("files_written", []),
+                                    )
+                                    last_failure = _vh_finisher + "\n\n" + last_failure
+                                    _next_attempt_start_phase = "EXECUTE"
+                                    _last_failure_type = "near_miss"
+                                    print(f"    [near-miss-fallback] synthesized from verify_history: "
+                                          f"f2p={_vh_f2p_p}/{_vh_f2p_p + _vh_f2p_f} "
+                                          f"failing={_vh_failing}", flush=True)
+                                else:
+                                    # P1 fallback: route from failure_mode when CV absent
+                                    _jb_fm = (jingu_body or {}).get("failure_mode")
+                                    if _jb_fm:
+                                        _fm_routing = route_from_failure_mode(_jb_fm)
+                                        _fm_hint = f"[FAILURE MODE: {_jb_fm}] {_fm_routing['repair_goal']}"
+                                        last_failure = _fm_hint + "\n\n" + last_failure
+                                        _next_attempt_start_phase = _fm_routing['next_phase'].upper()
+                                        _last_failure_type = f"fm:{_jb_fm}"
+                                        print(f"    [repair-route-fm] attempt={attempt} failure_mode={_jb_fm} "
+                                              f"next_phase={_fm_routing['next_phase']}", flush=True)
                             # WDRG v0.2: prediction error can also indicate wrong_direction
                             # when CV is absent (signal_missing). Ensures file-ban + direction
                             # search contract activates even without CV classification.
