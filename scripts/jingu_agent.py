@@ -3342,12 +3342,44 @@ class JinguAgent:
                     "exit_status": agent_exit,
                 })
                 if agent_exit and "LimitsExceeded" in agent_exit:
-                    last_failure = (
-                        "You ran out of steps before submitting. "
-                        "SKIP all exploration and testing this time. "
-                        "Go DIRECTLY to the fix: read the failing test, identify the exact line to change, "
-                        "make the minimal edit, then call submit IMMEDIATELY."
-                    )
+                    _le_jb = jingu_body or {}
+                    _le_files_count = len(_le_jb.get("files_written", []))
+                    if _le_files_count == 0:
+                        # Stall detector: LimitsExceeded + 0 files = exploration stall
+                        _le_candidates = derive_candidate_files(
+                            self._instance,
+                            cv_result=_le_jb.get("controlled_verify"),
+                            verify_history=_le_jb.get("verify_history"),
+                        )
+                        _le_hint = (
+                            "[STALL DETECTED — STEP LIMIT REACHED, NO FILES WRITTEN]\n\n"
+                            "You exhausted all steps without writing any files.\n"
+                            "Your exploration is not converging. You MUST change strategy.\n\n"
+                        )
+                        if _le_candidates:
+                            _le_hint += (
+                                "CANDIDATE FILES (derived from test failures and problem statement):\n"
+                                + "\n".join(f"  - {f}" for f in _le_candidates)
+                                + "\n\nStart your investigation at these files.\n"
+                            )
+                        _le_hint += (
+                            "MANDATORY:\n"
+                            "1. Do NOT repeat your previous exploration path\n"
+                            "2. Go DIRECTLY to a specific file and make a concrete change\n"
+                            "3. If unsure, pick the MOST LIKELY file and try a minimal fix\n"
+                            "4. Submit SOMETHING — a failed attempt with a patch is better than no patch"
+                        )
+                        last_failure = _le_hint
+                        _next_attempt_start_phase = "DESIGN"
+                        print(f"    [stall-detector] LIMITS_EXCEEDED+NO_PATCH attempt={attempt} "
+                              f"candidates={_le_candidates}", flush=True)
+                    else:
+                        last_failure = (
+                            "You ran out of steps before submitting. "
+                            "SKIP all exploration and testing this time. "
+                            "Go DIRECTLY to the fix: read the failing test, identify the exact line to change, "
+                            "make the minimal edit, then call submit IMMEDIATELY."
+                        )
                 else:
                     _jb = jingu_body or {}
                     _files_written_count = len(_jb.get("files_written", []))
