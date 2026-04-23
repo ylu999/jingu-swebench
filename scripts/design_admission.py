@@ -44,6 +44,10 @@ class DesignAdmissionResult:
     record: Optional[DesignRecord] = None
     failure_reasons: list[str] = field(default_factory=list)
     repair_hint: str = ""
+    # Telemetry: design_gate_path tracks the exact admission path
+    # Values: admit_first_try, reject_first_try, admit_after_retry,
+    #         reject_after_retry, fail_open_on_llm_error, disabled
+    gate_path: str = "disabled"
 
 
 # ── Validation rules ─────────────────────────────────────────────────────

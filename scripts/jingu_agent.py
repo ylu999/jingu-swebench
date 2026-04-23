@@ -1176,7 +1176,7 @@ class JinguAgent:
 
         if not is_design_admission_enabled():
             # Feature disabled — auto-admit with empty record
-            return DesignAdmissionResult(admitted=True, record=DesignRecord())
+            return DesignAdmissionResult(admitted=True, record=DesignRecord(), gate_path="disabled")
 
         instance = self._instance
         instance_id = instance["instance_id"]
@@ -1221,15 +1221,20 @@ class JinguAgent:
                     admitted=True,  # fail-open: don't block on infra errors
                     record=DesignRecord(),
                     failure_reasons=[f"llm_error:{e}"],
+                    gate_path="fail_open_on_llm_error",
                 )
 
             elapsed = round((_time_da.monotonic() - t0) * 1000, 1)
             record = parse_design_response(raw)
             result = validate_design(record)
 
+            _gp = ("admit_first_try" if da_try == 1 else "admit_after_retry") if result.admitted else (
+                "reject_first_try" if da_try == 1 else "reject_after_retry"
+            )
             print(
                 f"    [design-admission] try={da_try}/{_da_max_retries} "
                 f"admitted={result.admitted} "
+                f"gate_path={_gp} "
                 f"failures={len(result.failure_reasons)} "
                 f"target_files={record.target_files} "
                 f"elapsed_ms={elapsed}",
@@ -1237,6 +1242,7 @@ class JinguAgent:
             )
 
             if result.admitted:
+                result.gate_path = "admit_first_try" if da_try == 1 else "admit_after_retry"
                 return result
 
             last_result = result
@@ -1250,6 +1256,7 @@ class JinguAgent:
                 )
 
         # All retries exhausted — return the last failed result
+        last_result.gate_path = "reject_after_retry" if _da_max_retries > 1 else "reject_first_try"
         print(
             f"    [design-admission] REJECTED after {_da_max_retries} tries: "
             f"{last_result.failure_reasons}",
@@ -2418,6 +2425,8 @@ class JinguAgent:
                     "gate_reason_codes": ["DESIGN_INVALID"],
                     "exit_status": None,
                     "design_failures": _da_result.failure_reasons,
+                    "design_gate_path": _da_result.gate_path,
+                    "execution_started_after_design_admit": False,
                 })
                 last_failure = _da_result.repair_hint or (
                     "Your DESIGN record was rejected. You must submit a valid design "
@@ -2447,13 +2456,19 @@ class JinguAgent:
             _attempt_monitor = outcome.result.monitor
 
             # Persist design admission result into jingu_body for telemetry
-            if jingu_body and _da_result.record and _da_result.record.target_files:
+            if jingu_body:
                 jingu_body["design_admission"] = {
                     "admitted": _da_result.admitted,
-                    "target_files": _da_result.record.target_files,
-                    "solution_approach": _da_result.record.solution_approach[:200],
+                    "gate_path": _da_result.gate_path,
+                    "target_files": (_da_result.record.target_files if _da_result.record else []),
+                    "solution_approach": (
+                        _da_result.record.solution_approach[:200]
+                        if _da_result.record else ""
+                    ),
                     "failure_reasons": _da_result.failure_reasons,
                 }
+                # Key telemetry: did execution actually start after design admit?
+                jingu_body["execution_started_after_design_admit"] = True
 
             # EFR telemetry: acknowledgment — did attempt N enter the prescribed repair phase?
             if attempt > 1 and _last_failure_type and _next_attempt_start_phase_for_ack:
