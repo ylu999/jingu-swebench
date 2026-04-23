@@ -2449,6 +2449,47 @@ class JinguAgent:
                 # Key telemetry: did execution actually start after design admit?
                 jingu_body["execution_started_after_design_admit"] = True
 
+            # ── Execution Admission: verify patch files ⊆ design target_files ──
+            # This is the real in-loop constraint: design commits to files,
+            # execution is checked against that commitment.
+            if (
+                _da_result
+                and _da_result.admitted
+                and _da_result.record
+                and _da_result.record.target_files
+                and jingu_body
+            ):
+                _design_files = set(_da_result.record.target_files)
+                _written_files = set(jingu_body.get("files_written", []))
+                _out_of_scope = _written_files - _design_files
+                _exec_admission = {
+                    "design_target_files": sorted(_design_files),
+                    "actual_files_written": sorted(_written_files),
+                    "out_of_scope_files": sorted(_out_of_scope),
+                    "scope_violation": len(_out_of_scope) > 0,
+                    "overlap": (
+                        len(_written_files & _design_files) / len(_written_files)
+                        if _written_files else 1.0
+                    ),
+                }
+                jingu_body["execution_admission"] = _exec_admission
+                if _out_of_scope:
+                    print(
+                        f"    [exec-admission] SCOPE VIOLATION: "
+                        f"design_files={sorted(_design_files)} "
+                        f"written_files={sorted(_written_files)} "
+                        f"out_of_scope={sorted(_out_of_scope)} "
+                        f"overlap={_exec_admission['overlap']:.2f}",
+                        flush=True,
+                    )
+                else:
+                    print(
+                        f"    [exec-admission] OK: "
+                        f"written_files={sorted(_written_files)} "
+                        f"all within design target_files",
+                        flush=True,
+                    )
+
             # EFR telemetry: acknowledgment — did attempt N enter the prescribed repair phase?
             if attempt > 1 and _last_failure_type and _next_attempt_start_phase_for_ack:
                 _phase_records = (jingu_body or {}).get("phase_records", [])
@@ -3000,6 +3041,19 @@ class JinguAgent:
                         last_failure = "No patch was generated"
                 t_gate.stop()
                 continue
+
+            # Re-save traj with updated jingu_body (design_admission + execution_admission)
+            # The traj was saved inside run_attempt() before these fields were added.
+            if jingu_body:
+                _attempt_dir = self._output_dir / f"attempt_{attempt}"
+                _traj_resave = _attempt_dir / instance_id / f"{instance_id}.traj.json"
+                if _traj_resave.exists():
+                    try:
+                        _traj_data = json.loads(_traj_resave.read_text())
+                        _traj_data["jingu_body"] = jingu_body
+                        _traj_resave.write_text(json.dumps(_traj_data))
+                    except Exception as _e:
+                        print(f"    [traj-resave] failed: {_e}", flush=True)
 
             patch = normalize_patch(patch)
 
