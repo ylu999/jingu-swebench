@@ -19,6 +19,14 @@ See [BENCHMARK_RESULTS.md](BENCHMARK_RESULTS.md) for full methodology, instance-
 
 Config: `configs/best_config_v1.yaml` — all reported numbers use this configuration.
 
+### Reproduce in 3 Commands
+
+```bash
+./scripts/reproduce_benchmark.sh --model sonnet-4-6 --attempts 2   # → 22/30
+./scripts/reproduce_benchmark.sh --model sonnet-4-6 --attempts 1   # → 19/30 (model-only)
+./scripts/reproduce_benchmark.sh --model opus-4-6   --attempts 2   # → 23/30 (ceiling)
+```
+
 ## Quick Start
 
 All operations go through `ops.py`:
