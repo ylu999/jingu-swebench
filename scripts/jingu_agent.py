@@ -1243,6 +1243,81 @@ class JinguAgent:
         )
         return result
 
+    def generate_dual_hypotheses(
+        self, attempt: int, previous_failure: str = "",
+    ) -> "DualHypothesisResult":
+        """Generate TWO structurally different fix hypotheses via LLM call.
+
+        Feature flag: DHG_ENABLED=1
+        Returns DualHypothesisResult with hypothesis_a and hypothesis_b.
+        Falls back to single design record if DHG disabled or LLM fails.
+        """
+        from design_admission import (
+            DualHypothesisResult,
+            build_dual_hypothesis_prompt, parse_dual_hypothesis_response,
+            is_dhg_enabled,
+        )
+        import time as _time_dhg
+
+        if not is_dhg_enabled():
+            print(f"    [dhg] DISABLED (DHG_ENABLED={__import__('os').environ.get('DHG_ENABLED', '0')})", flush=True)
+            return DualHypothesisResult(parse_ok=False)
+
+        instance = self._instance
+
+        _dhg_model = __import__("os").environ.get(
+            "JINGU_DESIGN_MODEL",
+            "bedrock/global.anthropic.claude-sonnet-4-6",
+        )
+        _dhg_max_tokens = 4096
+        _dhg_temperature = 0.7  # higher temp for diversity
+
+        prompt = build_dual_hypothesis_prompt(instance, previous_failure)
+
+        print(
+            f"    [dhg] attempt={attempt} generating dual hypotheses "
+            f"(model={_dhg_model}, temp=0.7)",
+            flush=True,
+        )
+
+        t0 = _time_dhg.monotonic()
+        try:
+            import litellm
+            response = litellm.completion(
+                model=_dhg_model,
+                messages=[
+                    {"role": "user", "content": prompt},
+                ],
+                max_tokens=_dhg_max_tokens,
+                temperature=_dhg_temperature,
+                drop_params=True,
+            )
+            raw = response.choices[0].message.content or ""
+        except Exception as e:
+            print(f"    [dhg] LLM call failed: {e}", flush=True)
+            return DualHypothesisResult(parse_ok=False)
+
+        elapsed = round((_time_dhg.monotonic() - t0) * 1000, 1)
+        result = parse_dual_hypothesis_response(raw)
+
+        if result.parse_ok:
+            print(
+                f"    [dhg] parse_ok=True diversity={result.diversity_score:.2f} "
+                f"hyp_a_files={result.hypothesis_a.target_files} "
+                f"hyp_b_files={result.hypothesis_b.target_files} "
+                f"hyp_a_approach={result.hypothesis_a.solution_approach[:60]!r} "
+                f"hyp_b_approach={result.hypothesis_b.solution_approach[:60]!r} "
+                f"elapsed_ms={elapsed}",
+                flush=True,
+            )
+        else:
+            print(
+                f"    [dhg] parse_ok=False elapsed_ms={elapsed}",
+                flush=True,
+            )
+
+        return result
+
     # -- attempt-level hooks ------------------------------------------------
 
     def on_attempt_start(self, attempt: int, previous_failure: str | None) -> list[str]:
@@ -2423,6 +2498,80 @@ class JinguAgent:
                     flush=True,
                 )
 
+            # ── Divergent Hypothesis Generation (DHG) — Phase 1 ─────────
+            # Feature flag: DHG_ENABLED=1
+            # Generates 2 structurally different hypotheses. Picks the winner
+            # by heuristic (fewer files = more focused). Winner's design lock
+            # replaces the standard design admission lock context.
+            # The loser hypothesis is injected as alternative context so the
+            # agent is aware of the other path and can switch if stuck.
+            _dhg_telemetry = {}
+            from design_admission import is_dhg_enabled as _is_dhg_enabled
+            if _is_dhg_enabled():
+                _dhg_result = self.generate_dual_hypotheses(attempt, last_failure)
+                if _dhg_result.parse_ok and _dhg_result.hypothesis_a and _dhg_result.hypothesis_b:
+                    _ha = _dhg_result.hypothesis_a
+                    _hb = _dhg_result.hypothesis_b
+
+                    # Heuristic selection: prefer fewer target files (more focused),
+                    # tie-break by shorter solution_approach (more concrete)
+                    _score_a = len(_ha.target_files) + len(_ha.solution_approach) / 10000
+                    _score_b = len(_hb.target_files) + len(_hb.solution_approach) / 10000
+                    if _score_a <= _score_b:
+                        _winner, _loser, _winner_label = _ha, _hb, "A"
+                    else:
+                        _winner, _loser, _winner_label = _hb, _ha, "B"
+
+                    # Override design lock context with winner
+                    from design_admission import build_design_lock_context as _dhg_build_lock
+                    _design_lock_context = _dhg_build_lock(_winner)
+
+                    # Inject alternative hypothesis as awareness context
+                    _alt_context = (
+                        "\n\n=== ALTERNATIVE HYPOTHESIS (for awareness) ===\n"
+                        f"Root cause: {_loser.scope_boundary}\n"
+                        f"Target files: {_loser.target_files}\n"
+                        f"Approach: {_loser.solution_approach}\n"
+                        "If your primary approach fails, consider this alternative.\n"
+                        "=== END ALTERNATIVE ==="
+                    )
+                    _design_lock_context += _alt_context
+
+                    # Also override the _da_result record so execution_admission
+                    # checks against the DHG winner's target files
+                    _da_result.record = _winner
+
+                    _dhg_telemetry = {
+                        "enabled": True,
+                        "diversity_score": _dhg_result.diversity_score,
+                        "winner": _winner_label,
+                        "hypothesis_a": {
+                            "files": _ha.target_files,
+                            "root_cause": _ha.scope_boundary[:200],
+                            "approach": _ha.solution_approach[:200],
+                            "mechanism": _ha.validation_plan[:200],
+                        },
+                        "hypothesis_b": {
+                            "files": _hb.target_files,
+                            "root_cause": _hb.scope_boundary[:200],
+                            "approach": _hb.solution_approach[:200],
+                            "mechanism": _hb.validation_plan[:200],
+                        },
+                        "selection_reason": (
+                            f"focus_score: A={_score_a:.2f} B={_score_b:.2f} "
+                            f"→ {_winner_label} (lower=more focused)"
+                        ),
+                    }
+
+                    print(
+                        f"    [dhg] SELECTED={_winner_label} "
+                        f"files={_winner.target_files} "
+                        f"diversity={_dhg_result.diversity_score:.2f}",
+                        flush=True,
+                    )
+                else:
+                    print(f"    [dhg] fallback to single design (parse_ok={_dhg_result.parse_ok})", flush=True)
+
             outcome = self.run_attempt(
                 attempt,
                 previous_failure=last_failure,
@@ -2433,6 +2582,10 @@ class JinguAgent:
             agent_exit = outcome.result.exit_status
             jingu_body = outcome.result.jingu_body
             _attempt_monitor = outcome.result.monitor
+
+            # Inject DHG telemetry into jingu_body
+            if jingu_body and _dhg_telemetry:
+                jingu_body["dhg"] = _dhg_telemetry
 
             # Persist design admission result into jingu_body for telemetry
             if jingu_body:

@@ -207,6 +207,125 @@ def build_design_prompt(instance: dict, previous_failure: str = "") -> str:
     return "".join(parts)
 
 
+# ── Dual Hypothesis Generation (DHG) ─────────────────────────────────────
+
+def is_dhg_enabled() -> bool:
+    return os.environ.get("DHG_ENABLED", "0") == "1"
+
+
+def build_dual_hypothesis_prompt(instance: dict, previous_failure: str = "") -> str:
+    """Build prompt that asks for TWO structurally different fix hypotheses."""
+    problem = instance.get("problem_statement", "")
+    hints = instance.get("hints_text", "")
+    repo = instance.get("repo", "")
+    base_commit = instance.get("base_commit", "")
+
+    parts = [
+        "You are a software engineer about to fix a bug. You must produce "
+        "TWO structurally different fix hypotheses. Each hypothesis must target "
+        "a DIFFERENT root cause or fix mechanism.\n\n"
+        "## Problem\n\n"
+        f"{problem}\n\n"
+    ]
+    if hints:
+        parts.append(f"## Hints\n\n{hints}\n\n")
+
+    parts.append(
+        f"## Repository\n\n"
+        f"Repo: {repo}\n"
+        f"Base commit: {base_commit}\n\n"
+    )
+
+    if previous_failure:
+        parts.append(
+            f"## Previous Attempt Feedback\n\n{previous_failure}\n\n"
+        )
+
+    parts.append(
+        "## Required Output\n\n"
+        "Respond with a JSON object containing TWO hypotheses (and nothing else):\n\n"
+        "```json\n"
+        "{\n"
+        '  "hypothesis_a": {\n'
+        '    "root_cause": "What you believe is the underlying cause (hypothesis A)",\n'
+        '    "target_files": ["path/to/file1.py"],\n'
+        '    "solution_approach": "How hypothesis A fixes the bug (>=10 chars)",\n'
+        '    "fix_mechanism": "What code construct/pattern to change (e.g., regex, method override, queryset filter)"\n'
+        "  },\n"
+        '  "hypothesis_b": {\n'
+        '    "root_cause": "A DIFFERENT root cause (hypothesis B)",\n'
+        '    "target_files": ["path/to/file2.py"],\n'
+        '    "solution_approach": "How hypothesis B fixes the bug (>=10 chars)",\n'
+        '    "fix_mechanism": "A DIFFERENT code construct/pattern to change"\n'
+        "  }\n"
+        "}\n"
+        "```\n\n"
+        "CRITICAL RULES:\n"
+        "- hypothesis_a and hypothesis_b MUST have different root_cause explanations\n"
+        "- They SHOULD target different files OR different code regions within the same file\n"
+        "- They MUST have different fix_mechanism values\n"
+        "- If both hypotheses target the same file, the solution_approach must describe "
+        "a fundamentally different code change (not just a variation)\n"
+        "- Each target_files list: 1-3 files\n"
+        "- solution_approach: must NOT contain weakening words "
+        "(loosen, relax, skip, bypass, ignore, broader)\n"
+    )
+    return "".join(parts)
+
+
+@dataclass
+class DualHypothesisResult:
+    """Result of dual hypothesis generation."""
+    hypothesis_a: Optional[DesignRecord] = None
+    hypothesis_b: Optional[DesignRecord] = None
+    raw_content: str = ""
+    parse_ok: bool = False
+    diversity_score: float = 0.0  # 0=identical, 1=completely different files
+
+
+def parse_dual_hypothesis_response(text: str) -> DualHypothesisResult:
+    """Parse the LLM's dual hypothesis JSON response."""
+    result = DualHypothesisResult(raw_content=text)
+
+    json_match = re.search(r"```(?:json)?\s*\n?(.*?)\n?```", text, re.DOTALL)
+    if json_match:
+        raw = json_match.group(1)
+    else:
+        raw = text.strip()
+
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return result
+
+    for key, attr in [("hypothesis_a", "hypothesis_a"), ("hypothesis_b", "hypothesis_b")]:
+        h = data.get(key, {})
+        if h:
+            record = DesignRecord(
+                target_files=h.get("target_files", []),
+                solution_approach=h.get("solution_approach", ""),
+                scope_boundary=h.get("root_cause", ""),  # map root_cause to scope_boundary
+                validation_plan=h.get("fix_mechanism", ""),  # map fix_mechanism to validation_plan
+                principals=["causal_grounding", "minimal_change"],
+                raw_content=json.dumps(h),
+            )
+            setattr(result, attr, record)
+
+    if result.hypothesis_a and result.hypothesis_b:
+        result.parse_ok = True
+        # Compute diversity: file overlap
+        files_a = set(result.hypothesis_a.target_files)
+        files_b = set(result.hypothesis_b.target_files)
+        if files_a or files_b:
+            union = files_a | files_b
+            intersection = files_a & files_b
+            result.diversity_score = 1.0 - (len(intersection) / len(union)) if union else 0.0
+        else:
+            result.diversity_score = 0.0
+
+    return result
+
+
 # ── Parse LLM response into DesignRecord ─────────────────────────────────
 
 def parse_design_response(text: str) -> DesignRecord:
