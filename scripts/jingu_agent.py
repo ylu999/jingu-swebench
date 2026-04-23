@@ -3393,12 +3393,26 @@ class JinguAgent:
                         _rc_snippet = ""
                         if _has_root_cause:
                             _rc_snippet = f" Root cause from your analysis: {_analyze_rec['root_cause'][:120]}"
+                        # Derive candidate files for stall recovery
+                        _enm_candidates = derive_candidate_files(
+                            self._instance,
+                            cv_result=_jb.get("controlled_verify"),
+                            verify_history=_jb.get("verify_history"),
+                        )
+                        _enm_cand_section = ""
+                        if _enm_candidates:
+                            _enm_cand_section = (
+                                "\n\nCANDIDATE FILES (derived from test failures and problem statement):\n"
+                                + "\n".join(f"  - {f}" for f in _enm_candidates)
+                                + "\nStart your investigation at these files.\n"
+                            )
                         print(
-                            f"    [execution-gate] EXECUTION_NO_MATERIALIZATION"
+                            f"    [stall-detector] EXECUTION_NO_MATERIALIZATION"
                             f" files_written={_files_written_count}"
                             f" has_root_cause={_has_root_cause}"
                             f" has_plan={_has_plan}"
-                            f" execute_rec={_execute_rec is not None}",
+                            f" execute_rec={_execute_rec is not None}"
+                            f" candidates={_enm_candidates}",
                             flush=True,
                         )
                         last_failure = (
@@ -3412,7 +3426,9 @@ class JinguAgent:
                             "5. Call submit.\n\n"
                             "Failure to edit at least one file = attempt counts as FAILED."
                             + (_rc_snippet if _rc_snippet else "")
+                            + _enm_cand_section
                         )
+                        _next_attempt_start_phase = "DESIGN"
                     elif _files_written_count == 0 and _analyze_rec and not _execution_ready:
                         print(
                             f"    [execution-gate] ANALYZE_NOT_READY"
