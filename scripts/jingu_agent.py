@@ -167,6 +167,120 @@ def build_recovery_escalation_prompt(banned_files: set[str], violation_count: in
     )
 
 
+def derive_candidate_files(
+    instance: dict,
+    cv_result: dict | None = None,
+    verify_history: list | None = None,
+) -> list[str]:
+    """Derive candidate source files from test failures, problem statement, and stack traces.
+
+    Returns a list of candidate file paths (relative to repo root) that the agent
+    should focus on. Used by:
+    - wrong_direction retry: suggest concrete files when overlap=0.0
+    - near-miss finisher: narrow scope to relevant files
+
+    Signal sources (in priority order):
+    1. Stack traces in test stdout (File "..." references)
+    2. Module paths from f2p_failing_names (dotted test paths → source modules)
+    3. File paths mentioned in problem_statement
+    """
+    import re
+    candidates: dict[str, int] = {}  # path → relevance score
+
+    # Source 1: Stack traces from verify_history stdout
+    if verify_history:
+        for vh_entry in verify_history:
+            stdout = vh_entry.get("stdout", "") or ""
+            # Match Python traceback file references: File "/testbed/django/utils/html.py", line 42
+            for m in re.finditer(r'File "/testbed/([^"]+\.py)"', stdout):
+                fpath = m.group(1)
+                # Skip test files — we want source files
+                if "/tests/" not in fpath and "/test_" not in fpath.split("/")[-1]:
+                    candidates[fpath] = candidates.get(fpath, 0) + 3
+
+    # Source 2: f2p_failing_names from CV → infer source modules
+    if cv_result:
+        for test_name in cv_result.get("f2p_failing_names", []) or []:
+            # Extract dotted module path: "template_tests.filter_tests.test_title.TitleTests"
+            # → source might be django/template/defaultfilters.py
+            parts = test_name.split(".")
+            if len(parts) >= 2:
+                # Try to map test module to source module
+                # e.g., "auth_tests.test_forms" → "django/contrib/auth/forms.py"
+                # This is a heuristic — not all mappings are correct
+                test_mod = parts[0]  # e.g., "model_forms" or "auth_tests"
+                # Strip "_tests" / "_test" suffix to guess source module
+                source_mod = re.sub(r'_tests?$', '', test_mod)
+                if source_mod != test_mod:
+                    candidates[f"(module:{source_mod})"] = candidates.get(f"(module:{source_mod})", 0) + 1
+
+        # Also check stdout from CV for tracebacks
+        for key in ("stdout", "stderr"):
+            text = cv_result.get(key, "") or ""
+            for m in re.finditer(r'File "/testbed/([^"]+\.py)"', text):
+                fpath = m.group(1)
+                if "/tests/" not in fpath and "/test_" not in fpath.split("/")[-1]:
+                    candidates[fpath] = candidates.get(fpath, 0) + 3
+
+    # Source 3: File paths in problem statement
+    problem = instance.get("problem_statement", "")
+    for m in re.finditer(r'(?:django|lib)/[\w/]+\.py', problem):
+        candidates[m.group(0)] = candidates.get(m.group(0), 0) + 2
+    # Also match "in <module>" patterns
+    for m in re.finditer(r'(?:File ".*?/)(django/[\w/]+\.py)', problem):
+        candidates[m.group(1)] = candidates.get(m.group(1), 0) + 3
+
+    # Sort by score descending, take top 5
+    ranked = sorted(candidates.items(), key=lambda x: -x[1])
+    return [path for path, _score in ranked[:5]]
+
+
+def build_near_miss_finisher_prompt(
+    f2p_passed: int,
+    f2p_failed: int,
+    f2p_failing_names: list[str],
+    files_written: list[str],
+    candidate_files: list[str] | None = None,
+) -> str:
+    """Build a targeted near-miss finisher prompt.
+
+    This is injected when failure_type=near_miss AND f2p_ratio > 0.9.
+    Much more specific than the general residual_gap_repair protocol.
+    """
+    total = f2p_passed + f2p_failed
+    pct = f2p_passed / total * 100 if total > 0 else 0
+
+    parts = [
+        "=== NEAR-MISS FINISHER — SURGICAL FIX MODE ===\n"
+        f"You are {f2p_passed}/{total} ({pct:.0f}%) — only {f2p_failed} test(s) remain.\n"
+        "Your fix direction is CORRECT. Do NOT restart or redesign."
+    ]
+
+    if f2p_failing_names:
+        parts.append(
+            "\nFAILING TESTS (fix ONLY these):\n"
+            + "\n".join(f"  - {name}" for name in f2p_failing_names[:10])
+        )
+
+    if files_written:
+        parts.append(
+            f"\nSCOPE LOCK: You may ONLY modify: {', '.join(files_written)}"
+        )
+
+    parts.append(
+        "\nHARD CONSTRAINTS:\n"
+        "1. Do NOT change ANY code that makes the other tests pass — ZERO regression tolerated\n"
+        "2. Do NOT introduce new files\n"
+        "3. Do NOT broaden, relax, or bypass existing validation/checks\n"
+        "4. Make the SMALLEST possible change to fix the remaining test(s)\n"
+        "5. Prefer ADDING a condition/branch over REWRITING existing logic\n"
+        "6. Read the failing test source code FIRST to understand what it expects"
+    )
+
+    parts.append("=== END NEAR-MISS FINISHER ===")
+    return "\n\n".join(parts)
+
+
 def validate_direction_search_record(
     record: dict, banned_files: set[str],
 ) -> dict:
@@ -3276,6 +3390,39 @@ class JinguAgent:
                             flush=True,
                         )
                         last_failure = "No patch was generated"
+                    elif _files_written_count == 0 and attempt > 1:
+                        # Early stall detector: 2+ attempts with 0 files written
+                        # Derive candidate files and force replan
+                        _stall_candidates = derive_candidate_files(
+                            self._instance,
+                            cv_result=_jb.get("controlled_verify"),
+                            verify_history=_jb.get("verify_history"),
+                        )
+                        _stall_hint = (
+                            "[STALL DETECTED — NO FILES WRITTEN IN MULTIPLE ATTEMPTS]\n\n"
+                            "You have failed to write any files in this attempt.\n"
+                            "Your exploration is not converging. You MUST change strategy.\n\n"
+                        )
+                        if _stall_candidates:
+                            _stall_hint += (
+                                "CANDIDATE FILES (derived from test failures and problem statement):\n"
+                                + "\n".join(f"  - {f}" for f in _stall_candidates)
+                                + "\n\nStart your investigation at these files.\n"
+                            )
+                        _stall_hint += (
+                            "MANDATORY:\n"
+                            "1. Do NOT repeat your previous exploration path\n"
+                            "2. Go DIRECTLY to a specific file and make a concrete change\n"
+                            "3. If unsure, pick the MOST LIKELY file and try a minimal fix\n"
+                            "4. Submit SOMETHING — a failed attempt with a patch is better than no patch"
+                        )
+                        last_failure = _stall_hint
+                        _next_attempt_start_phase = "DESIGN"
+                        print(
+                            f"    [stall-detector] NO_PATCH attempt={attempt} "
+                            f"candidates={_stall_candidates}",
+                            flush=True,
+                        )
                     else:
                         last_failure = "No patch was generated"
                 t_gate.stop()
@@ -3971,6 +4118,22 @@ class JinguAgent:
                                     nm_state=_v03_nm_state,
                                     residual_payload=_v03_payload,
                                 )
+                                # Near-miss finisher: when f2p_ratio > 0.9, prepend targeted prompt
+                                _nm_f2p_p = _jb_cv.get("f2p_passed", 0) or 0
+                                _nm_f2p_f = _jb_cv.get("f2p_failed", 0) or 0
+                                _nm_total = _nm_f2p_p + _nm_f2p_f
+                                _nm_ratio = _nm_f2p_p / _nm_total if _nm_total > 0 else 0
+                                if _jb_ft == "near_miss" and _nm_ratio > 0.9 and _nm_f2p_f > 0:
+                                    _nm_finisher = build_near_miss_finisher_prompt(
+                                        f2p_passed=_nm_f2p_p,
+                                        f2p_failed=_nm_f2p_f,
+                                        f2p_failing_names=_jb_cv.get("f2p_failing_names", []) or [],
+                                        files_written=(jingu_body or {}).get("files_written", []),
+                                    )
+                                    _repair = _nm_finisher + "\n\n" + _repair
+                                    print(f"    [near-miss-finisher] injected: "
+                                          f"f2p={_nm_f2p_p}/{_nm_total} ratio={_nm_ratio:.3f} "
+                                          f"failing={_jb_cv.get('f2p_failing_names', [])}", flush=True)
                                 last_failure = _repair + "\n\n" + last_failure
                                 # p-fix: propagate repair routing target to next attempt cp_state
                                 _next_attempt_start_phase = _v03_routing['next_phase'].upper()
@@ -4366,6 +4529,20 @@ class JinguAgent:
                 _wd_written_files = _ea.get("actual_files_written", [])
                 _wd_oos_files = _ea.get("out_of_scope_files", [])
                 _wd_overlap = _ea.get("overlap", 0.0)
+                # Derive candidate files from test failures + problem statement
+                _wd_candidates = derive_candidate_files(
+                    self._instance,
+                    cv_result=(jingu_body or {}).get("controlled_verify"),
+                    verify_history=(jingu_body or {}).get("verify_history"),
+                )
+                _wd_candidate_section = ""
+                if _wd_candidates:
+                    _wd_candidate_section = (
+                        "\nCANDIDATE FILES (derived from test failures and problem statement):\n"
+                        + "\n".join(f"  - {f}" for f in _wd_candidates)
+                        + "\nThese files appeared in stack traces or are referenced by failing tests.\n"
+                        "Start your investigation here.\n"
+                    )
                 _wd_hint = (
                     "[WRONG DIRECTION — EXECUTION ADMISSION FAILURE]\n\n"
                     "Your previous execution was classified as WRONG_DIRECTION.\n"
@@ -4374,7 +4551,8 @@ class JinguAgent:
                     f"- Out-of-scope files: {_wd_oos_files}\n"
                     f"- Overlap with plan: {_wd_overlap:.0%}\n\n"
                     "This means the executed files had ZERO overlap with the planned files.\n"
-                    "This is NOT boundary drift — you worked on completely wrong files.\n\n"
+                    "This is NOT boundary drift — you worked on completely wrong files.\n"
+                    f"{_wd_candidate_section}\n"
                     "You MUST now:\n"
                     "1. Re-evaluate your root cause analysis — the previous diagnosis led to wrong files\n"
                     "2. Explain WHY the previous target files were insufficient or wrong\n"
@@ -4384,6 +4562,7 @@ class JinguAgent:
                 )
                 last_failure = _wd_hint + "\n\n" + (last_failure or "")
                 _ea["wrong_direction_retry_hint"] = _wd_hint
+                _ea["derived_candidate_files"] = _wd_candidates
                 print(
                     f"    [exec-admission-route] OVERRIDE: "
                     f"violation_type=wrong_direction overlap=0.0 "
