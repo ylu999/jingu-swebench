@@ -1155,6 +1155,108 @@ class JinguAgent:
                 flush=True,
             )
 
+    # -- design admission gate (in-loop, pre-execution) --------------------
+
+    def generate_design_record(
+        self, attempt: int, previous_failure: str = "",
+    ) -> "DesignAdmissionResult":
+        """Pre-execution DESIGN gate: separate LLM call to produce a DesignRecord.
+
+        Called before run_attempt(). If the design is not admitted, the attempt
+        is short-circuited (agent never runs freely).
+
+        Feature flag: DESIGN_ADMISSION_ENABLED=1
+        """
+        from design_admission import (
+            DesignRecord, DesignAdmissionResult,
+            build_design_prompt, parse_design_response, validate_design,
+            is_design_admission_enabled,
+        )
+        import time as _time_da
+
+        if not is_design_admission_enabled():
+            # Feature disabled — auto-admit with empty record
+            return DesignAdmissionResult(admitted=True, record=DesignRecord())
+
+        instance = self._instance
+        instance_id = instance["instance_id"]
+
+        _da_model = __import__("os").environ.get(
+            "JINGU_DESIGN_MODEL",
+            "bedrock/global.anthropic.claude-sonnet-4-6",
+        )
+        _da_max_tokens = 2048
+        _da_temperature = 0.3
+        _da_max_retries = 2  # allow 1 retry on validation failure
+
+        prompt = build_design_prompt(instance, previous_failure)
+
+        print(
+            f"    [design-admission] attempt={attempt} generating design record "
+            f"(model={_da_model})",
+            flush=True,
+        )
+
+        last_result = DesignAdmissionResult()
+        for da_try in range(1, _da_max_retries + 1):
+            t0 = _time_da.monotonic()
+            try:
+                import litellm
+                response = litellm.completion(
+                    model=_da_model,
+                    messages=[
+                        {"role": "user", "content": prompt},
+                    ],
+                    max_tokens=_da_max_tokens,
+                    temperature=_da_temperature,
+                    drop_params=True,
+                )
+                raw = response.choices[0].message.content or ""
+            except Exception as e:
+                print(
+                    f"    [design-admission] LLM call failed: {e}",
+                    flush=True,
+                )
+                return DesignAdmissionResult(
+                    admitted=True,  # fail-open: don't block on infra errors
+                    record=DesignRecord(),
+                    failure_reasons=[f"llm_error:{e}"],
+                )
+
+            elapsed = round((_time_da.monotonic() - t0) * 1000, 1)
+            record = parse_design_response(raw)
+            result = validate_design(record)
+
+            print(
+                f"    [design-admission] try={da_try}/{_da_max_retries} "
+                f"admitted={result.admitted} "
+                f"failures={len(result.failure_reasons)} "
+                f"target_files={record.target_files} "
+                f"elapsed_ms={elapsed}",
+                flush=True,
+            )
+
+            if result.admitted:
+                return result
+
+            last_result = result
+
+            # On validation failure, retry with repair hint appended
+            if da_try < _da_max_retries:
+                prompt += f"\n\n## Validation Feedback\n\n{result.repair_hint}\n"
+                print(
+                    f"    [design-admission] retrying with repair hint",
+                    flush=True,
+                )
+
+        # All retries exhausted — return the last failed result
+        print(
+            f"    [design-admission] REJECTED after {_da_max_retries} tries: "
+            f"{last_result.failure_reasons}",
+            flush=True,
+        )
+        return last_result
+
     # -- attempt-level hooks ------------------------------------------------
 
     def on_attempt_start(self, attempt: int, previous_failure: str | None) -> list[str]:
@@ -1560,6 +1662,7 @@ class JinguAgent:
         attempt: int,
         previous_failure: str | None = "",
         parent_timer: Any = None,
+        design_lock_context: str = "",
     ) -> "AttemptOutcome":
         """Execute a single attempt: prompt -> inner agent -> traj parse -> jingu_body.
 
@@ -1600,6 +1703,12 @@ class JinguAgent:
             config["agent"]["instance_template"] = (
                 config["agent"]["instance_template"] + "\n\n" + "\n\n".join(extra_parts)
             )
+        # Design admission gate: inject admitted design as hard constraint
+        if design_lock_context:
+            config["agent"]["instance_template"] = (
+                config["agent"]["instance_template"] + "\n\n" + design_lock_context
+            )
+            print(f"    [design-lock] injected admitted design context into prompt", flush=True)
         t_cfg.stop()
 
         # p228: create step event emitter for this attempt
@@ -2289,11 +2398,62 @@ class JinguAgent:
                     "Check build_execution_feedback() and ensure tests_ran signal is captured."
                 )
 
-            outcome = self.run_attempt(attempt, previous_failure=last_failure, parent_timer=t_inst)
+            # ── Design Admission Gate (in-loop, pre-execution) ────────────
+            # Feature flag: DESIGN_ADMISSION_ENABLED=1
+            # Generates a DesignRecord via separate LLM call, validates it,
+            # and injects the admitted design as execution constraint.
+            _design_lock_context = ""
+            _da_result = self.generate_design_record(attempt, last_failure)
+            if not _da_result.admitted:
+                # Design rejected — short-circuit this attempt
+                print(
+                    f"    [design-admission] attempt={attempt} SHORT-CIRCUIT: "
+                    f"design not admitted, skipping agent execution",
+                    flush=True,
+                )
+                attempts_log.append({
+                    "attempt": attempt,
+                    "admission_reason": "design_invalid",
+                    "patch_fp": None,
+                    "gate_reason_codes": ["DESIGN_INVALID"],
+                    "exit_status": None,
+                    "design_failures": _da_result.failure_reasons,
+                })
+                last_failure = _da_result.repair_hint or (
+                    "Your DESIGN record was rejected. You must submit a valid design "
+                    "before the agent can proceed to write code."
+                )
+                _last_failure_type = "design_invalid"
+                continue  # skip to next attempt
+            elif _da_result.record and _da_result.record.target_files:
+                # Design admitted — build lock context for agent prompt
+                from design_admission import build_design_lock_context
+                _design_lock_context = build_design_lock_context(_da_result.record)
+                print(
+                    f"    [design-admission] ADMITTED: target_files="
+                    f"{_da_result.record.target_files}",
+                    flush=True,
+                )
+
+            outcome = self.run_attempt(
+                attempt,
+                previous_failure=last_failure,
+                parent_timer=t_inst,
+                design_lock_context=_design_lock_context,
+            )
             patch = outcome.result.patch
             agent_exit = outcome.result.exit_status
             jingu_body = outcome.result.jingu_body
             _attempt_monitor = outcome.result.monitor
+
+            # Persist design admission result into jingu_body for telemetry
+            if jingu_body and _da_result.record and _da_result.record.target_files:
+                jingu_body["design_admission"] = {
+                    "admitted": _da_result.admitted,
+                    "target_files": _da_result.record.target_files,
+                    "solution_approach": _da_result.record.solution_approach[:200],
+                    "failure_reasons": _da_result.failure_reasons,
+                }
 
             # EFR telemetry: acknowledgment — did attempt N enter the prescribed repair phase?
             if attempt > 1 and _last_failure_type and _next_attempt_start_phase_for_ack:
