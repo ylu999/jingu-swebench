@@ -2600,6 +2600,13 @@ class JinguAgent:
                 print(f"    [dhg] pre-generation failed, falling back to single design", flush=True)
                 _dhg_hypotheses = None
 
+        # Feature flag: EXEC_INTERVENTIONS_ENABLED=1 enables enhanced A2 hints
+        # (stall detector candidates, near-miss finisher, derived candidate injection).
+        # Default: disabled (0) — 30-instance validation showed net -1 vs baseline.
+        _exec_interventions = __import__('os').environ.get('EXEC_INTERVENTIONS_ENABLED', '0') == '1'
+        if _exec_interventions:
+            print(f"    [exec-interventions] ENABLED", flush=True)
+
         for attempt in range(1, self._max_attempts + 1):
             print(f"  [attempt {attempt}/{self._max_attempts}] {instance_id}")
 
@@ -3404,7 +3411,7 @@ class JinguAgent:
                 if agent_exit and "LimitsExceeded" in agent_exit:
                     _le_jb = jingu_body or {}
                     _le_files_count = len(_le_jb.get("files_written", []))
-                    if _le_files_count == 0:
+                    if _le_files_count == 0 and _exec_interventions:
                         # Stall detector: LimitsExceeded + 0 files = exploration stall
                         _le_candidates = derive_candidate_files(
                             self._instance,
@@ -3449,7 +3456,7 @@ class JinguAgent:
                     _has_root_cause = bool(_analyze_rec and _analyze_rec.get("root_cause"))
                     _has_plan = bool(_analyze_rec and _analyze_rec.get("plan")) or bool(_execute_rec and _execute_rec.get("plan"))
                     _execution_ready = bool(_execute_rec or _has_plan)
-                    if _files_written_count == 0 and _analyze_rec and _execution_ready:
+                    if _files_written_count == 0 and _analyze_rec and _execution_ready and _exec_interventions:
                         _rc_snippet = ""
                         if _has_root_cause:
                             _rc_snippet = f" Root cause from your analysis: {_analyze_rec['root_cause'][:120]}"
@@ -3498,7 +3505,7 @@ class JinguAgent:
                             flush=True,
                         )
                         last_failure = "No patch was generated"
-                    elif _files_written_count == 0 and attempt >= 1:
+                    elif _files_written_count == 0 and attempt >= 1 and _exec_interventions:
                         # Stall detector: any attempt with 0 files written
                         # Derive candidate files and force replan to DESIGN
                         _stall_candidates = derive_candidate_files(
@@ -4226,8 +4233,8 @@ class JinguAgent:
                                     nm_state=_v03_nm_state,
                                     residual_payload=_v03_payload,
                                 )
-                                # Derive candidate files for wrong_direction repair
-                                if _jb_ft == "wrong_direction":
+                                # Derive candidate files for wrong_direction repair (gated)
+                                if _jb_ft == "wrong_direction" and _exec_interventions:
                                     _wd_repair_candidates = derive_candidate_files(
                                         self._instance,
                                         cv_result=_jb_cv,
@@ -4243,22 +4250,23 @@ class JinguAgent:
                                         _repair = _repair + "\n" + _wd_repair_cand_section
                                         print(f"    [derived-candidates] injected in wrong_direction repair: "
                                               f"candidates={_wd_repair_candidates}", flush=True)
-                                # Near-miss finisher: when f2p_ratio > 0.9, prepend targeted prompt
-                                _nm_f2p_p = _jb_cv.get("f2p_passed", 0) or 0
-                                _nm_f2p_f = _jb_cv.get("f2p_failed", 0) or 0
-                                _nm_total = _nm_f2p_p + _nm_f2p_f
-                                _nm_ratio = _nm_f2p_p / _nm_total if _nm_total > 0 else 0
-                                if _jb_ft == "near_miss" and _nm_ratio > 0.9 and _nm_f2p_f > 0:
-                                    _nm_finisher = build_near_miss_finisher_prompt(
-                                        f2p_passed=_nm_f2p_p,
-                                        f2p_failed=_nm_f2p_f,
-                                        f2p_failing_names=_jb_cv.get("f2p_failing_names", []) or [],
-                                        files_written=(jingu_body or {}).get("files_written", []),
-                                    )
-                                    _repair = _nm_finisher + "\n\n" + _repair
-                                    print(f"    [near-miss-finisher] injected: "
-                                          f"f2p={_nm_f2p_p}/{_nm_total} ratio={_nm_ratio:.3f} "
-                                          f"failing={_jb_cv.get('f2p_failing_names', [])}", flush=True)
+                                # Near-miss finisher (gated): when f2p_ratio > 0.9, prepend targeted prompt
+                                if _exec_interventions:
+                                    _nm_f2p_p = _jb_cv.get("f2p_passed", 0) or 0
+                                    _nm_f2p_f = _jb_cv.get("f2p_failed", 0) or 0
+                                    _nm_total = _nm_f2p_p + _nm_f2p_f
+                                    _nm_ratio = _nm_f2p_p / _nm_total if _nm_total > 0 else 0
+                                    if _jb_ft == "near_miss" and _nm_ratio > 0.9 and _nm_f2p_f > 0:
+                                        _nm_finisher = build_near_miss_finisher_prompt(
+                                            f2p_passed=_nm_f2p_p,
+                                            f2p_failed=_nm_f2p_f,
+                                            f2p_failing_names=_jb_cv.get("f2p_failing_names", []) or [],
+                                            files_written=(jingu_body or {}).get("files_written", []),
+                                        )
+                                        _repair = _nm_finisher + "\n\n" + _repair
+                                        print(f"    [near-miss-finisher] injected: "
+                                              f"f2p={_nm_f2p_p}/{_nm_total} ratio={_nm_ratio:.3f} "
+                                              f"failing={_jb_cv.get('f2p_failing_names', [])}", flush=True)
                                 last_failure = _repair + "\n\n" + last_failure
                                 # p-fix: propagate repair routing target to next attempt cp_state
                                 _next_attempt_start_phase = _v03_routing['next_phase'].upper()
@@ -4289,7 +4297,7 @@ class JinguAgent:
                                         _vh_f2p_f = _vhf
                                         _vh_failing = _vh_entry.get("f2p_failing_names", []) or []
                                         break
-                                if _vh_near_miss:
+                                if _vh_near_miss and _exec_interventions:
                                     _vh_finisher = build_near_miss_finisher_prompt(
                                         f2p_passed=_vh_f2p_p,
                                         f2p_failed=_vh_f2p_f,
@@ -4444,7 +4452,7 @@ class JinguAgent:
                                         _vh_f2p_f = _vhf
                                         _vh_failing = _vh_entry.get("f2p_failing_names", []) or []
                                         break
-                                if _vh_near_miss:
+                                if _vh_near_miss and _exec_interventions:
                                     _vh_finisher = build_near_miss_finisher_prompt(
                                         f2p_passed=_vh_f2p_p,
                                         f2p_failed=_vh_f2p_f,
@@ -4714,20 +4722,22 @@ class JinguAgent:
                 _wd_written_files = _ea.get("actual_files_written", [])
                 _wd_oos_files = _ea.get("out_of_scope_files", [])
                 _wd_overlap = _ea.get("overlap", 0.0)
-                # Derive candidate files from test failures + problem statement
-                _wd_candidates = derive_candidate_files(
-                    self._instance,
-                    cv_result=(jingu_body or {}).get("controlled_verify"),
-                    verify_history=(jingu_body or {}).get("verify_history"),
-                )
+                # Derive candidate files from test failures + problem statement (gated)
+                _wd_candidates = []
                 _wd_candidate_section = ""
-                if _wd_candidates:
-                    _wd_candidate_section = (
-                        "\nCANDIDATE SOURCE FILES (derived from test failures and problem statement):\n"
-                        + "\n".join(f"  - {f}" for f in _wd_candidates)
-                        + "\nThese files appeared in stack traces or are referenced by failing tests.\n"
-                        "Start your investigation here.\n"
+                if _exec_interventions:
+                    _wd_candidates = derive_candidate_files(
+                        self._instance,
+                        cv_result=(jingu_body or {}).get("controlled_verify"),
+                        verify_history=(jingu_body or {}).get("verify_history"),
                     )
+                    if _wd_candidates:
+                        _wd_candidate_section = (
+                            "\nCANDIDATE SOURCE FILES (derived from test failures and problem statement):\n"
+                            + "\n".join(f"  - {f}" for f in _wd_candidates)
+                            + "\nThese files appeared in stack traces or are referenced by failing tests.\n"
+                            "Start your investigation here.\n"
+                        )
                 _wd_hint = (
                     "[WRONG DIRECTION — EXECUTION ADMISSION FAILURE]\n\n"
                     "Your previous execution was classified as WRONG_DIRECTION.\n"
