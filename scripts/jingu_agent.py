@@ -167,6 +167,58 @@ def build_recovery_escalation_prompt(banned_files: set[str], violation_count: in
     )
 
 
+def _is_test_file(fpath: str) -> bool:
+    """Check if a file path is a test file (should not be injected as candidate source)."""
+    parts = fpath.split("/")
+    basename = parts[-1] if parts else fpath
+    # Directory-level: /tests/ or /testing/ (NOT /test/ — django/test/ is a legit module)
+    if any(p in ("tests", "testing") for p in parts[:-1]):
+        return True
+    # Top-level tests directory (path starts with tests/)
+    if parts[0] == "tests":
+        return True
+    # File-level: test_*.py, *_test.py, *_tests.py, conftest.py
+    if basename.startswith("test_") or basename.endswith(("_test.py", "_tests.py")):
+        return True
+    if basename == "conftest.py":
+        return True
+    return False
+
+
+def _infer_source_from_test(test_path: str) -> str | None:
+    """Try to infer source file path from a test file path.
+
+    e.g. tests/utils_tests/test_dateparse.py → django/utils/dateparse.py
+         tests/template_tests/test_filters.py → django/template/filters.py
+    """
+    import re
+    parts = test_path.split("/")
+    # Find the tests directory and strip it
+    # Common patterns: tests/<module>_tests/test_<name>.py
+    source_parts = []
+    skip_next = False
+    for i, p in enumerate(parts):
+        if p in ("tests", "testing", "test"):
+            skip_next = False
+            continue
+        # Strip _tests/_test suffix from directory names
+        cleaned = re.sub(r'_tests?$', '', p)
+        if cleaned != p or skip_next:
+            source_parts.append(cleaned)
+        else:
+            source_parts.append(p)
+    # Handle the filename: test_dateparse.py → dateparse.py
+    if source_parts and source_parts[-1].startswith("test_"):
+        source_parts[-1] = source_parts[-1][5:]  # strip "test_" prefix
+    if not source_parts or not source_parts[-1].endswith(".py"):
+        return None
+    # Prefix with django/ if not already there
+    if source_parts and source_parts[0] != "django":
+        source_parts = ["django"] + source_parts
+    candidate = "/".join(source_parts)
+    return candidate if candidate.endswith(".py") else None
+
+
 def derive_candidate_files(
     instance: dict,
     cv_result: dict | None = None,
@@ -183,33 +235,34 @@ def derive_candidate_files(
     1. Stack traces in test stdout (File "..." references)
     2. Module paths from f2p_failing_names (dotted test paths → source modules)
     3. File paths mentioned in problem_statement
+
+    All sources filter out test files and infer source modules instead.
     """
     import re
     candidates: dict[str, int] = {}  # path → relevance score
+
+    def _add_file(fpath: str, score: int):
+        """Add a file path, filtering test files and inferring source paths."""
+        if _is_test_file(fpath):
+            inferred = _infer_source_from_test(fpath)
+            if inferred:
+                candidates[inferred] = candidates.get(inferred, 0) + score
+            return
+        candidates[fpath] = candidates.get(fpath, 0) + score
 
     # Source 1: Stack traces from verify_history stdout
     if verify_history:
         for vh_entry in verify_history:
             stdout = vh_entry.get("stdout", "") or ""
-            # Match Python traceback file references: File "/testbed/django/utils/html.py", line 42
             for m in re.finditer(r'File "/testbed/([^"]+\.py)"', stdout):
-                fpath = m.group(1)
-                # Skip test files — we want source files
-                if "/tests/" not in fpath and "/test_" not in fpath.split("/")[-1]:
-                    candidates[fpath] = candidates.get(fpath, 0) + 3
+                _add_file(m.group(1), 3)
 
     # Source 2: f2p_failing_names from CV → infer source modules
     if cv_result:
         for test_name in cv_result.get("f2p_failing_names", []) or []:
-            # Extract dotted module path: "template_tests.filter_tests.test_title.TitleTests"
-            # → source might be django/template/defaultfilters.py
             parts = test_name.split(".")
             if len(parts) >= 2:
-                # Try to map test module to source module
-                # e.g., "auth_tests.test_forms" → "django/contrib/auth/forms.py"
-                # This is a heuristic — not all mappings are correct
-                test_mod = parts[0]  # e.g., "model_forms" or "auth_tests"
-                # Strip "_tests" / "_test" suffix to guess source module
+                test_mod = parts[0]
                 source_mod = re.sub(r'_tests?$', '', test_mod)
                 if source_mod != test_mod:
                     candidates[f"(module:{source_mod})"] = candidates.get(f"(module:{source_mod})", 0) + 1
@@ -218,17 +271,14 @@ def derive_candidate_files(
         for key in ("stdout", "stderr"):
             text = cv_result.get(key, "") or ""
             for m in re.finditer(r'File "/testbed/([^"]+\.py)"', text):
-                fpath = m.group(1)
-                if "/tests/" not in fpath and "/test_" not in fpath.split("/")[-1]:
-                    candidates[fpath] = candidates.get(fpath, 0) + 3
+                _add_file(m.group(1), 3)
 
     # Source 3: File paths in problem statement
     problem = instance.get("problem_statement", "")
     for m in re.finditer(r'(?:django|lib)/[\w/]+\.py', problem):
-        candidates[m.group(0)] = candidates.get(m.group(0), 0) + 2
-    # Also match "in <module>" patterns
+        _add_file(m.group(0), 2)
     for m in re.finditer(r'(?:File ".*?/)(django/[\w/]+\.py)', problem):
-        candidates[m.group(1)] = candidates.get(m.group(1), 0) + 3
+        _add_file(m.group(1), 3)
 
     # Sort by score descending, take top 5
     ranked = sorted(candidates.items(), key=lambda x: -x[1])
@@ -3368,7 +3418,7 @@ class JinguAgent:
                         )
                         if _le_candidates:
                             _le_hint += (
-                                "CANDIDATE FILES (derived from test failures and problem statement):\n"
+                                "CANDIDATE SOURCE FILES (derived from test failures and problem statement):\n"
                                 + "\n".join(f"  - {f}" for f in _le_candidates)
                                 + "\n\nStart your investigation at these files.\n"
                             )
@@ -3412,7 +3462,7 @@ class JinguAgent:
                         _enm_cand_section = ""
                         if _enm_candidates:
                             _enm_cand_section = (
-                                "\n\nCANDIDATE FILES (derived from test failures and problem statement):\n"
+                                "\n\nCANDIDATE SOURCE FILES (derived from test failures and problem statement):\n"
                                 + "\n".join(f"  - {f}" for f in _enm_candidates)
                                 + "\nStart your investigation at these files.\n"
                             )
@@ -3463,7 +3513,7 @@ class JinguAgent:
                         )
                         if _stall_candidates:
                             _stall_hint += (
-                                "CANDIDATE FILES (derived from test failures and problem statement):\n"
+                                "CANDIDATE SOURCE FILES (derived from test failures and problem statement):\n"
                                 + "\n".join(f"  - {f}" for f in _stall_candidates)
                                 + "\n\nStart your investigation at these files.\n"
                             )
@@ -4185,7 +4235,7 @@ class JinguAgent:
                                     )
                                     if _wd_repair_candidates:
                                         _wd_repair_cand_section = (
-                                            "\nCANDIDATE FILES (derived from test failures and problem statement):\n"
+                                            "\nCANDIDATE SOURCE FILES (derived from test failures and problem statement):\n"
                                             + "\n".join(f"  - {f}" for f in _wd_repair_candidates)
                                             + "\nThese files appeared in stack traces or are referenced by failing tests.\n"
                                             "Start your investigation here.\n"
@@ -4673,7 +4723,7 @@ class JinguAgent:
                 _wd_candidate_section = ""
                 if _wd_candidates:
                     _wd_candidate_section = (
-                        "\nCANDIDATE FILES (derived from test failures and problem statement):\n"
+                        "\nCANDIDATE SOURCE FILES (derived from test failures and problem statement):\n"
                         + "\n".join(f"  - {f}" for f in _wd_candidates)
                         + "\nThese files appeared in stack traces or are referenced by failing tests.\n"
                         "Start your investigation here.\n"
