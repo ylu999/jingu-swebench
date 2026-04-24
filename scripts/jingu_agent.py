@@ -399,6 +399,86 @@ def build_proposal_record(jingu_body: dict) -> dict:
     }
 
 
+def run_mechanism_critic(
+    problem_statement: str,
+    fail_to_pass: list[str],
+    agent_patch: str,
+) -> dict:
+    """Run offline mechanism critic: LLM identifies mechanism gaps in agent's patch.
+
+    Shadow mode only — output is telemetry, never affects routing or retry.
+    Returns dict for jingu_body["mechanism_critic"].
+    """
+    import os
+    if not agent_patch or not agent_patch.strip():
+        return {"skipped": True, "reason": "no_patch"}
+
+    _critic_model = os.environ.get(
+        "JINGU_CRITIC_MODEL",
+        "bedrock/global.anthropic.claude-sonnet-4-6",
+    )
+    _system = (
+        "You are a senior code reviewer. Given a bug report, failing tests, and an "
+        "agent's attempted patch that did NOT fully resolve the issue, identify what "
+        "is WRONG with the patch.\n\n"
+        "Output JSON with fields:\n"
+        "- missing_mechanism: what the patch fails to address (be specific)\n"
+        "- incorrect_assumption: what wrong assumption the agent made\n"
+        "- suggested_direction: one-sentence description of what the fix should do\n"
+        "- confidence: \"low\" | \"medium\" | \"high\""
+    )
+    _f2p_str = "\n".join(f"  - {t}" for t in fail_to_pass[:10])
+    _user = (
+        f"## Problem Statement\n{problem_statement[:3000]}\n\n"
+        f"## Failing Tests\n{_f2p_str}\n\n"
+        f"## Agent's Patch (did NOT fully resolve)\n```diff\n{agent_patch[:4000]}\n```\n\n"
+        f"Respond with JSON only."
+    )
+
+    t0 = __import__("time").monotonic()
+    try:
+        import litellm
+        response = litellm.completion(
+            model=_critic_model,
+            messages=[
+                {"role": "system", "content": _system},
+                {"role": "user", "content": _user},
+            ],
+            max_tokens=1024,
+            temperature=0.0,
+            drop_params=True,
+        )
+        raw = response.choices[0].message.content or ""
+        elapsed_ms = round((__import__("time").monotonic() - t0) * 1000, 1)
+    except Exception as e:
+        print(f"    [mechanism-critic] LLM call failed: {e}", flush=True)
+        return {"skipped": True, "reason": f"llm_error:{e}"}
+
+    # Parse JSON from critic output
+    try:
+        import json as _json
+        text = raw.strip()
+        if "```" in text:
+            json_str = text.split("```")[1]
+            if json_str.startswith("json"):
+                json_str = json_str[4:]
+            parsed = _json.loads(json_str.strip())
+        else:
+            parsed = _json.loads(text)
+    except Exception:
+        parsed = {"raw": raw[:2000]}
+
+    return {
+        "skipped": False,
+        "model": _critic_model,
+        "elapsed_ms": elapsed_ms,
+        "missing_mechanism": parsed.get("missing_mechanism", ""),
+        "incorrect_assumption": parsed.get("incorrect_assumption", ""),
+        "suggested_direction": parsed.get("suggested_direction", ""),
+        "confidence": parsed.get("confidence", "unknown"),
+    }
+
+
 def strip_test_file_hunks(patch: str) -> tuple[str, list[str]]:
     """Remove hunks that modify test files from a unified diff.
 
@@ -3103,6 +3183,23 @@ class JinguAgent:
                     f"actual_files={_pr_act} "
                     f"overlap={_pr_ovl:.2f} "
                     f"phases={_proposal['phase_record_count']}",
+                    flush=True,
+                )
+
+            # ── Mechanism Critic (shadow mode, telemetry only) ──
+            if jingu_body and patch and patch.strip():
+                _critic_f2p = _parse_fail_to_pass(self._instance)
+                _critic_result = run_mechanism_critic(
+                    problem_statement=self._instance.get("problem_statement", ""),
+                    fail_to_pass=_critic_f2p,
+                    agent_patch=patch,
+                )
+                jingu_body["mechanism_critic"] = _critic_result
+                print(
+                    f"    [mechanism-critic] attempt={attempt} "
+                    f"skipped={_critic_result.get('skipped', False)} "
+                    f"confidence={_critic_result.get('confidence', 'n/a')} "
+                    f"elapsed={_critic_result.get('elapsed_ms', 0)}ms",
                     flush=True,
                 )
 
