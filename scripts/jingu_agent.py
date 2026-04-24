@@ -399,6 +399,47 @@ def build_proposal_record(jingu_body: dict) -> dict:
     }
 
 
+def strip_test_file_hunks(patch: str) -> tuple[str, list[str]]:
+    """Remove hunks that modify test files from a unified diff.
+
+    Returns (cleaned_patch, list_of_stripped_files).
+    Uses _is_test_file() to detect test file paths in 'diff --git a/... b/...' headers.
+    """
+    if not patch:
+        return patch, []
+
+    stripped_files = []
+    kept_sections = []
+    current_section: list[str] = []
+    current_file = ""
+    is_test = False
+
+    for line in patch.split("\n"):
+        if line.startswith("diff --git "):
+            # Flush previous section
+            if current_section and not is_test:
+                kept_sections.extend(current_section)
+            elif current_section and is_test:
+                stripped_files.append(current_file)
+            # Start new section
+            current_section = [line]
+            # Extract file path: diff --git a/path b/path
+            parts = line.split()
+            current_file = parts[-1].lstrip("b/") if len(parts) >= 4 else ""
+            is_test = _is_test_file(current_file) if current_file else False
+        else:
+            current_section.append(line)
+
+    # Flush last section
+    if current_section and not is_test:
+        kept_sections.extend(current_section)
+    elif current_section and is_test:
+        stripped_files.append(current_file)
+
+    cleaned = "\n".join(kept_sections)
+    return cleaned, stripped_files
+
+
 def build_near_miss_finisher_prompt(
     f2p_passed: int,
     f2p_failed: int,
@@ -1758,7 +1799,10 @@ class JinguAgent:
                 f"Fix only the minimal code needed to make the tests pass. "
                 f"SUBMIT IMMEDIATELY once these tests pass — do NOT add extra tests, "
                 f"demonstration scripts, or comment updates. "
-                f"Every step matters — go straight to submission as soon as the required tests pass."
+                f"Every step matters — go straight to submission as soon as the required tests pass.\n\n"
+                f"CRITICAL: Do NOT modify any test files. Fix ONLY source code. "
+                f"Modifying test assertions to make tests pass is forbidden — "
+                f"the evaluation uses the ORIGINAL tests, not your modified version."
             )
         # ScopeLockGate v0.1: inject scope constraints into A2+ prompt
         if previous_failure and self._scope_lock_envelope is not None:
@@ -2590,6 +2634,20 @@ class JinguAgent:
                 except Exception as _e:
                     print(f"    [agent] container-diff fallback failed: {_e}", flush=True)
 
+        # Test File Modification Guard: strip test file hunks from patch
+        _stripped_test_files: list[str] = []
+        if patch:
+            patch, _stripped_test_files = strip_test_file_hunks(patch)
+            if _stripped_test_files:
+                print(
+                    f"    [test-file-guard] STRIPPED test file hunks from patch: "
+                    f"{_stripped_test_files}",
+                    flush=True,
+                )
+                if jingu_body:
+                    jingu_body.setdefault("test_file_guard", {})
+                    jingu_body["test_file_guard"]["stripped_from_patch"] = _stripped_test_files
+
         result = AttemptResult(
             patch=patch,
             exit_status=exit_status,
@@ -3011,6 +3069,23 @@ class JinguAgent:
                         f"    [exec-admission] OK: "
                         f"written_files={sorted(_written_files)} "
                         f"all within design target_files",
+                        flush=True,
+                    )
+
+            # ── Test File Modification Guard: detect agent editing test files ──
+            if jingu_body:
+                _all_written = jingu_body.get("files_written", [])
+                _test_files_written = [f for f in _all_written if _is_test_file(f)]
+                _tfm_guard = {
+                    "test_files_modified": _test_files_written,
+                    "source_files_modified": [f for f in _all_written if not _is_test_file(f)],
+                    "violation": len(_test_files_written) > 0,
+                }
+                jingu_body["test_file_guard"] = _tfm_guard
+                if _test_files_written:
+                    print(
+                        f"    [test-file-guard] VIOLATION: agent modified test files: "
+                        f"{_test_files_written}",
                         flush=True,
                     )
 
