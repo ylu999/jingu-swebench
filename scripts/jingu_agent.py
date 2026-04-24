@@ -285,6 +285,120 @@ def derive_candidate_files(
     return [path for path, _score in ranked[:5]]
 
 
+def build_proposal_record(jingu_body: dict) -> dict:
+    """Build a ProposalRecord from jingu_body data — no LLM call, pure extraction.
+
+    Captures the agent's intent (what it planned to do) and compares with outcome
+    (what it actually did). Used for replay analysis to determine whether
+    structured enforcement would help.
+
+    Fields:
+    - phase: last phase the agent was in before writing code
+    - target_files: files the agent declared it would modify (from DESIGN/ANALYZE records)
+    - actual_files_written: files actually changed in the patch
+    - failure_diagnosis: agent's root_cause from ANALYZE phase
+    - test_evidence: test names/results the agent referenced
+    - proposed_change: agent's plan/approach description
+    - principal_used: principals declared across all phases
+    - confidence: heuristic confidence score based on data completeness
+    - intent_vs_outcome: comparison metrics
+    """
+    phase_records = jingu_body.get("phase_records", [])
+    files_written = jingu_body.get("files_written", [])
+    cv = jingu_body.get("controlled_verify", {})
+
+    # Extract from ANALYZE records
+    _diagnosis = ""
+    _root_cause_files = []
+    for pr in phase_records:
+        if pr.get("phase", "").upper() in ("ANALYZE", "ANALYSIS"):
+            _diagnosis = pr.get("root_cause", "") or ""
+            _root_cause_files = pr.get("root_cause_location_files", []) or []
+
+    # Extract from DESIGN records
+    _design_files = []
+    _approach = ""
+    _mechanism = ""
+    for pr in phase_records:
+        if pr.get("phase", "").upper() == "DESIGN":
+            _design_files = pr.get("files_to_modify", []) or []
+            _approach = pr.get("scope_boundary", "") or ""
+            _mechanism = pr.get("change_mechanism", "") or ""
+
+    # Extract from EXECUTE records
+    _exec_files = []
+    _patch_desc = ""
+    for pr in phase_records:
+        if pr.get("phase", "").upper() in ("EXECUTE", "EXECUTION"):
+            _exec_files = pr.get("files_modified", []) or []
+            _patch_desc = pr.get("patch_description", "") or ""
+
+    # Target files: design > analyze > execute declaration
+    _target_files = _design_files or _root_cause_files or _exec_files
+
+    # Principals: union across all phases
+    _all_principals = []
+    for pr in phase_records:
+        for p in (pr.get("principals", []) or []):
+            if p and p not in _all_principals:
+                _all_principals.append(p)
+
+    # Test evidence from controlled_verify
+    _test_evidence = {}
+    if cv:
+        _test_evidence = {
+            "f2p_passed": cv.get("f2p_passed"),
+            "f2p_failed": cv.get("f2p_failed"),
+            "f2p_failing_names": (cv.get("f2p_failing_names", []) or [])[:5],
+            "eval_resolved": cv.get("eval_resolved"),
+        }
+
+    # Proposed change: combine approach + mechanism + patch description
+    _proposed_change = _approach or _mechanism or _patch_desc
+    if _approach and _mechanism:
+        _proposed_change = f"{_approach} | {_mechanism}"
+
+    # Intent vs outcome comparison
+    _target_set = set(_target_files)
+    _written_set = set(files_written)
+    _overlap = (
+        len(_target_set & _written_set) / len(_written_set)
+        if _written_set else (1.0 if not _target_set else 0.0)
+    )
+    _missing_from_plan = sorted(_written_set - _target_set)
+    _planned_not_written = sorted(_target_set - _written_set)
+
+    # Confidence heuristic: how complete is the agent's structured output?
+    _conf = 0.0
+    if _diagnosis:
+        _conf += 0.25
+    if _target_files:
+        _conf += 0.25
+    if _proposed_change:
+        _conf += 0.25
+    if _all_principals:
+        _conf += 0.15
+    if _test_evidence:
+        _conf += 0.10
+
+    return {
+        "phase": phase_records[-1].get("phase", "unknown") if phase_records else "no_phases",
+        "target_files": _target_files[:5],
+        "actual_files_written": files_written[:10],
+        "failure_diagnosis": _diagnosis[:300],
+        "test_evidence": _test_evidence,
+        "proposed_change": _proposed_change[:300],
+        "principal_used": _all_principals[:10],
+        "confidence": round(_conf, 2),
+        "intent_vs_outcome": {
+            "target_vs_written_overlap": round(_overlap, 2),
+            "missing_from_plan": _missing_from_plan[:5],
+            "planned_not_written": _planned_not_written[:5],
+        },
+        "phase_record_count": len(phase_records),
+    }
+
+
 def build_near_miss_finisher_prompt(
     f2p_passed: int,
     f2p_failed: int,
@@ -2899,6 +3013,23 @@ class JinguAgent:
                         f"all within design target_files",
                         flush=True,
                     )
+
+            # ── Proposal Record: structured intent extraction (telemetry only) ──
+            if jingu_body:
+                _proposal = build_proposal_record(jingu_body)
+                jingu_body["proposal_record"] = _proposal
+                _pr_tgt = _proposal["target_files"]
+                _pr_act = _proposal["actual_files_written"]
+                _pr_ovl = _proposal["intent_vs_outcome"]["target_vs_written_overlap"]
+                _pr_cnf = _proposal["confidence"]
+                print(
+                    f"    [proposal] confidence={_pr_cnf} "
+                    f"target_files={_pr_tgt} "
+                    f"actual_files={_pr_act} "
+                    f"overlap={_pr_ovl:.2f} "
+                    f"phases={_proposal['phase_record_count']}",
+                    flush=True,
+                )
 
             # EFR telemetry: acknowledgment — did attempt N enter the prescribed repair phase?
             if attempt > 1 and _last_failure_type and _next_attempt_start_phase_for_ack:
